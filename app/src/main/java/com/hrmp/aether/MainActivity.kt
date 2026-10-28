@@ -123,7 +123,7 @@ class MainActivity : Activity() {
             setPadding(dp(16), dp(14), dp(16), dp(14))
         }
 
-        scroll.addView(root, ScrollView.LayoutParams(-1, -2))
+        scroll.addView(root)
         header()
         gap(root, 13)
 
