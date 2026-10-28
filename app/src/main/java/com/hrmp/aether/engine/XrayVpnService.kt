@@ -59,7 +59,8 @@ class XrayVpnService : VpnService() {
         if (!assets.exists() && !assets.mkdirs()) { pfd.close(); error("Could not create Xray asset directory.") }
         try {
             Seq.setContext(applicationContext)
-            Libv2ray.initCoreEnv(assets.absolutePath, "TIREXNET-XUDP-BASE-KEY-2026-0001")
+            // Libv2ray BaseKey is Base64-decoded internally. This value decodes to exactly 32 bytes.
+            Libv2ray.initCoreEnv(assets.absolutePath, "VElSRVhORVQtWFVEUC1CQVNFLUtFWS0yMDI2LTAwMDE=")
             val core = Libv2ray.newCoreController(object : CoreCallbackHandler {
                 override fun startup(): Long = 0L
                 override fun shutdown(): Long = 0L
