@@ -1,3 +1,4 @@
+
 package com.tirexnet.app
 
 import android.animation.ValueAnimator
@@ -56,6 +57,7 @@ import com.tirexnet.app.ui.dp
 import com.tirexnet.app.ui.dpi
 import com.tirexnet.app.ui.pressable
 import com.tirexnet.app.ui.tv
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -67,7 +69,7 @@ import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
 
-    private data class ServerItem(val name: String, val raw: String, val engine: ConfigEngine, val host: String, val port: String)
+    private data class ServerItem(val name: String, val raw: String, val engine: ConfigEngine, val host: String, val port: String, val local: Boolean = false)
     private data class Endpoint(val name: String, val host: String, val port: String)
     private enum class ServersState { IDLE, LOADING, ERROR, READY }
 
@@ -520,6 +522,7 @@ class MainActivity : Activity() {
         brow.addView(ghostButton("File") { pickFile() }, LinearLayout.LayoutParams(0, dpi(44), 1f).apply { leftMargin = dpi(4); rightMargin = dpi(4) })
         brow.addView(ghostButton("Edit") { toggleEditor() }, LinearLayout.LayoutParams(0, dpi(44), 1f).apply { leftMargin = dpi(4) })
         imp.addView(brow, lp(MATCH, WRAP, 10))
+        imp.addView(ghostButton("Add to Servers") { saveCurrentConfigAsProfile() }, lp(MATCH, dpi(44), 8))
 
         val editor = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE; setPadding(0, dpi(10), 0, 0) }
         editorBox = editor
@@ -625,7 +628,7 @@ class MainActivity : Activity() {
                         lp(dpi(46), dpi(46))
                     )
                     val info = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(12), 0, dpi(8), 0) }
-                    info.addView(tv(item.name, 14.5f, Palette.text, 1).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END })
+                    info.addView(tv("${flagEmoji(countryCodeFor(item.name + " " + item.host))}  ${item.name}", 14.5f, Palette.text, 1).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END })
                     val meta = listOf(engineName(item.engine), item.host, item.port).filter { it.isNotBlank() }.joinToString("  •  ")
                     info.addView(tv(meta, 10.5f, Palette.muted, 0).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }, lp(MATCH, WRAP, 4))
                     row.addView(info, LinearLayout.LayoutParams(0, WRAP, 1f))
@@ -1008,6 +1011,147 @@ class MainActivity : Activity() {
 
     private fun currentConfig(): String = prefs.getString("last_config", "") ?: ""
 
+    // Local profiles are kept on this device and remain available after app restarts.
+    private fun loadLocalProfiles(): List<ServerItem> {
+        val savedText = prefs.getString("saved_server_profiles", "[]") ?: "[]"
+        val array = runCatching { JSONArray(savedText) }.getOrElse { JSONArray() }
+        val result = ArrayList<ServerItem>()
+        for (i in 0 until array.length()) {
+            val obj = array.optJSONObject(i) ?: continue
+            val raw = obj.optString("raw", "").trim()
+            if (raw.isBlank()) continue
+            val ep = endpointOf(raw)
+            val suppliedName = obj.optString("name", "").trim()
+            val name = serverDisplayName(suppliedName.ifBlank { ep.name }, raw, result.size + 1)
+            result.add(ServerItem(name, raw, ConfigDetector.detect(raw), ep.host, ep.port, true))
+        }
+        return result
+    }
+
+    private fun persistLocalProfiles(profiles: List<ServerItem>) {
+        val array = JSONArray()
+        profiles.filter { it.local }.forEach { profile ->
+            array.put(JSONObject().put("name", profile.name).put("raw", profile.raw))
+        }
+        prefs.edit().putString("saved_server_profiles", array.toString()).apply()
+    }
+
+    private fun mergeSavedAndRemote(remote: List<ServerItem>): List<ServerItem> {
+        val merged = ArrayList<ServerItem>()
+        val seen = HashSet<String>()
+        for (profile in loadLocalProfiles()) {
+            if (seen.add(profile.raw.trim())) merged.add(profile)
+        }
+        for (profile in remote) {
+            if (seen.add(profile.raw.trim())) merged.add(profile)
+        }
+        return merged
+    }
+
+    private fun saveCurrentConfigAsProfile() {
+        val raw = currentConfig().trim()
+        if (raw.isBlank()) {
+            toast("اول کانفیگ را با Paste یا File وارد کن.")
+            return
+        }
+        if (ConfigDetector.detect(raw) == ConfigEngine.UNKNOWN) {
+            toast("فرمت کانفیگ شناسایی نشد؛ یک کانفیگ پشتیبانی‌شده وارد کن.")
+            return
+        }
+
+        val ep = endpointOf(raw)
+        val suggested = serverDisplayName(ep.name, raw, loadLocalProfiles().size + 1)
+        val nameInput = EditText(this).apply {
+            hint = "Server name"
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setText(suggested)
+            setSelection(text.length)
+            setPadding(dpi(14), dpi(10), dpi(14), dpi(10))
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Add server profile")
+            .setMessage("این کانفیگ روی همین گوشی ذخیره می‌شود.")
+            .setView(nameInput)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Add") { _, _ ->
+                val name = nameInput.text?.toString()?.trim().orEmpty()
+                    .ifBlank { serverDisplayName(ep.name, raw, loadLocalProfiles().size + 1) }
+                val saved = loadLocalProfiles().toMutableList()
+                val newProfile = ServerItem(name, raw, ConfigDetector.detect(raw), ep.host, ep.port, true)
+                val existing = saved.indexOfFirst { it.raw.trim() == raw }
+                if (existing >= 0) saved[existing] = newProfile else saved.add(0, newProfile)
+
+                persistLocalProfiles(saved)
+                val remote = servers.filterNot { it.local }
+                servers = mergeSavedAndRemote(remote)
+                serversState = ServersState.READY
+                serversError = ""
+                rebuildServerList(-1)
+                toast("پروفایل «$name» ذخیره شد.")
+            }
+            .show()
+    }
+
+    // If a link only contains a protocol label (or "Profile 1"), show its host instead.
+    private fun serverDisplayName(candidate: String, raw: String, index: Int): String {
+        val value = candidate.trim()
+        val generic = value.isBlank() || Regex(
+            "(?i)^(profile\\s*\\d*|server\\s*\\d*|vless|vmess|trojan|shadowsocks|wireguard|amneziawg|config|ss|ssr)$"
+        ).matches(value)
+        if (!generic) return value
+        val host = endpointOf(raw).host.trim()
+        return host.ifBlank { "Server $index" }
+    }
+
+    private fun countryCodeFor(value: String): String {
+        val lower = value.lowercase(Locale.US)
+        val aliases = listOf(
+            "DE" to listOf("germany", "deutschland", "frankfurt", "berlin", "munich", "dusseldorf", "düsseldorf"),
+            "IR" to listOf("iran", "tehran", "mashhad", "shiraz"),
+            "US" to listOf("united states", "unitedstates", "usa", "america", "new york", "los angeles", "chicago", "seattle"),
+            "GB" to listOf("united kingdom", "great britain", "england", "london", "manchester", "britain"),
+            "NL" to listOf("netherlands", "holland", "amsterdam", "rotterdam"),
+            "FR" to listOf("france", "paris", "marseille"),
+            "TR" to listOf("turkey", "türkiye", "turkiye", "istanbul", "ankara"),
+            "RU" to listOf("russia", "moscow", "st petersburg"),
+            "AE" to listOf("uae", "united arab emirates", "dubai", "abu dhabi", "emirates"),
+            "FI" to listOf("finland", "helsinki"),
+            "SE" to listOf("sweden", "stockholm"),
+            "CH" to listOf("switzerland", "zurich", "geneva"),
+            "CA" to listOf("canada", "toronto", "montreal", "vancouver"),
+            "JP" to listOf("japan", "tokyo", "osaka"),
+            "SG" to listOf("singapore"),
+            "PL" to listOf("poland", "warsaw"),
+            "UA" to listOf("ukraine", "kyiv", "kiev"),
+            "IT" to listOf("italy", "milan", "rome"),
+            "ES" to listOf("spain", "madrid", "barcelona"),
+            "BR" to listOf("brazil", "sao paulo"),
+            "AT" to listOf("austria", "vienna"),
+            "CZ" to listOf("czech", "prague"),
+            "RO" to listOf("romania", "bucharest"),
+            "HK" to listOf("hong kong")
+        )
+        for ((code, words) in aliases) {
+            if (words.any { lower.contains(it) }) return code
+        }
+        val codes = listOf("DE", "IR", "US", "GB", "NL", "FR", "TR", "RU", "AE", "FI", "SE", "CH", "CA", "JP", "SG", "PL", "UA", "IT", "ES", "BR", "AT", "CZ", "RO", "HK")
+        for (code in codes) {
+            val pattern = Regex("(^|[^a-z])" + code.lowercase(Locale.US) + "([^a-z]|$)", RegexOption.IGNORE_CASE)
+            if (pattern.containsMatchIn(value)) return code
+        }
+        return ""
+    }
+
+    private fun flagEmoji(countryCode: String): String {
+        val code = countryCode.uppercase(Locale.US)
+        if (code.length != 2 || code.any { it !in 'A'..'Z' }) return "🌐"
+        val first = Character.toChars(0x1F1E6 + (code[0] - 'A'))
+        val second = Character.toChars(0x1F1E6 + (code[1] - 'A'))
+        return String(first) + String(second)
+    }
+
     private fun setConfig(raw: String) {
         prefs.edit().putString("last_config", raw).apply()
         settingConfig = true
@@ -1185,7 +1329,13 @@ class MainActivity : Activity() {
     }
 
     private fun loadServers() {
-        if (token.isBlank()) { toast("ابتدا وارد حساب شو."); return }
+        if (token.isBlank()) {
+            servers = loadLocalProfiles()
+            serversState = ServersState.READY
+            rebuildServerList(-1)
+            if (servers.isEmpty()) toast("ابتدا وارد حساب شو یا یک پروفایل محلی ذخیره کن.")
+            return
+        }
         serversState = ServersState.LOADING
         rebuildServerList(-1)
         val t = token
@@ -1196,7 +1346,7 @@ class MainActivity : Activity() {
                     ?: data.optJSONArray("profiles")
                     ?: data.optJSONArray("items")
                     ?: throw IllegalStateException("Worker response has no configs/profiles array.")
-                val out = ArrayList<ServerItem>()
+                val remote = ArrayList<ServerItem>()
                 for (i in 0 until arr.length()) {
                     val item = arr.opt(i)
                     val raw = when (item) {
@@ -1207,12 +1357,31 @@ class MainActivity : Activity() {
                     if (raw.isNotBlank()) {
                         val ep = endpointOf(raw)
                         val given = (item as? JSONObject)?.optString("name", "")?.takeIf { it.isNotBlank() }
-                        out.add(ServerItem(given ?: ep.name.ifBlank { "Profile " + (out.size + 1) }, raw, ConfigDetector.detect(raw), ep.host, ep.port))
+                        val displayName = serverDisplayName(given ?: ep.name, raw, remote.size + 1)
+                        remote.add(ServerItem(displayName, raw, ConfigDetector.detect(raw), ep.host, ep.port))
                     }
                 }
-                runOnUiThread { servers = out; serversState = ServersState.READY; rebuildServerList(-1) }
+                runOnUiThread {
+                    servers = mergeSavedAndRemote(remote)
+                    serversState = ServersState.READY
+                    serversError = ""
+                    rebuildServerList(-1)
+                }
             } catch (e: Exception) {
-                runOnUiThread { serversError = e.message ?: "endpoint unavailable"; serversState = ServersState.ERROR; rebuildServerList(-1) }
+                runOnUiThread {
+                    val local = loadLocalProfiles()
+                    if (local.isNotEmpty()) {
+                        servers = local
+                        serversState = ServersState.READY
+                        serversError = e.message ?: "endpoint unavailable"
+                        rebuildServerList(-1)
+                        toast("سرورهای آنلاین بارگذاری نشدند؛ پروفایل‌های ذخیره‌شده نمایش داده شدند.")
+                    } else {
+                        serversError = e.message ?: "endpoint unavailable"
+                        serversState = ServersState.ERROR
+                        rebuildServerList(-1)
+                    }
+                }
             }
         }
     }
