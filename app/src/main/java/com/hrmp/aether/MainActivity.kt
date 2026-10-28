@@ -1,5 +1,6 @@
 package com.tirexnet.app
 
+import android.animation.ValueAnimator
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.BroadcastReceiver
@@ -15,14 +16,21 @@ import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.text.Editable
+import android.text.InputType
+import android.text.TextUtils
 import android.text.TextWatcher
 import android.util.Base64
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Button
+import android.view.WindowInsets
+import android.view.animation.DecelerateInterpolator
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -31,6 +39,23 @@ import com.tirexnet.app.engine.ConfigDetector
 import com.tirexnet.app.engine.ConfigEngine
 import com.tirexnet.app.engine.WgTunnelEngine
 import com.tirexnet.app.engine.XrayVpnService
+import com.tirexnet.app.ui.AmbientBackground
+import com.tirexnet.app.ui.BrandMark
+import com.tirexnet.app.ui.ConnectOrb
+import com.tirexnet.app.ui.EmptyArt
+import com.tirexnet.app.ui.GlassCard
+import com.tirexnet.app.ui.GlassNavBar
+import com.tirexnet.app.ui.Icon
+import com.tirexnet.app.ui.IconView
+import com.tirexnet.app.ui.LinearMeter
+import com.tirexnet.app.ui.OrbState
+import com.tirexnet.app.ui.Palette
+import com.tirexnet.app.ui.SkeletonView
+import com.tirexnet.app.ui.UsageRing
+import com.tirexnet.app.ui.dp
+import com.tirexnet.app.ui.dpi
+import com.tirexnet.app.ui.pressable
+import com.tirexnet.app.ui.tv
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -42,56 +67,115 @@ import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
 
+    private data class ServerItem(val name: String, val raw: String, val engine: ConfigEngine, val host: String, val port: String)
+    private data class Endpoint(val name: String, val host: String, val port: String)
+    private enum class ServersState { IDLE, LOADING, ERROR, READY }
+
     private val api = "https://hrmp.hrmpdownloader.kdns.fr"
     private val io = Executors.newSingleThreadExecutor()
+    private val handler = Handler(Looper.getMainLooper())
+    private val prefs by lazy { getSharedPreferences("tirexnet", MODE_PRIVATE) }
 
-    private val bg = Color.rgb(3, 7, 19)
-    private val panel = Color.rgb(8, 17, 38)
-    private val panel2 = Color.rgb(14, 27, 57)
-    private val cyan = Color.rgb(0, 213, 255)
-    private val mint = Color.rgb(0, 245, 177)
-    private val blue = Color.rgb(39, 110, 255)
-    private val purple = Color.rgb(135, 45, 255)
-    private val white = Color.rgb(242, 247, 255)
-    private val muted = Color.rgb(145, 163, 194)
-    private val red = Color.rgb(255, 83, 118)
+    private val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
+    private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
 
+    // ---- session / connection state
     private var token = ""
     private var pendingRaw = ""
     private var pendingEngine = ConfigEngine.UNKNOWN
+    private var state = OrbState.DISCONNECTED
+    private var statusMessage = ""
+    private var connectedAtRt = 0L
+    private var resumed = false
+    private var currentTab = 0
+    private val shownTabs = HashSet<Int>()
 
-    private lateinit var root: LinearLayout
-    private lateinit var scroll: ScrollView
-    private lateinit var status: TextView
-    private lateinit var configInput: EditText
-    private lateinit var usernameInput: EditText
-    private lateinit var passwordInput: EditText
-    private lateinit var accountInfo: TextView
-    private lateinit var dataUsedValue: TextView
-    private lateinit var expiryValue: TextView
-    private lateinit var detectionView: TextView
-    private lateinit var activeProfileInfo: TextView
-    private lateinit var configEditor: LinearLayout
-    private var powerControl: TextView? = null
+    // ---- account data (values come only from the backend)
+    private var accUser = ""
+    private var accStatus = ""
+    private var accPanelUser = ""
+    private var usedBytes = -1L
+    private var limitBytes = 0L
+    private var expireText = ""
+    private var accountError: String? = null
+    private var shownUsed = 0L
+
+    // ---- servers
+    private var servers: List<ServerItem> = emptyList()
+    private var serversState = ServersState.IDLE
+    private var serversError = ""
+    private var serverQuery = ""
+    private var settingConfig = false
+
+    // ---- views (rebuilt by render())
+    private var tabViews: List<View> = emptyList()
+    private var contentFrame: FrameLayout? = null
+    private var nav: GlassNavBar? = null
+    private var orb: ConnectOrb? = null
+    private var statusTitle: TextView? = null
+    private var statusDesc: TextView? = null
+    private var timerView: TextView? = null
+    private var chipText: TextView? = null
+    private var chipDot: View? = null
+    private var homeServerName: TextView? = null
+    private var homeServerMeta: TextView? = null
+    private var homeAccName: TextView? = null
+    private var homeAccStatus: TextView? = null
+    private var homeExpiry: TextView? = null
+    private var homeUsageText: TextView? = null
+    private var homeUsageMeter: LinearMeter? = null
+    private var statsRing: UsageRing? = null
+    private var statsStatus: TextView? = null
+    private var statsDuration: TextView? = null
+    private var statsEngine: TextView? = null
+    private var statsExpiry: TextView? = null
+    private var statsLog: TextView? = null
+    private var profAvatar: TextView? = null
+    private var profName: TextView? = null
+    private var profStatus: TextView? = null
+    private var profPanel: TextView? = null
+    private var profExpiry: TextView? = null
+    private var profUsage: TextView? = null
+    private var serverListBox: LinearLayout? = null
+    private var editorBox: LinearLayout? = null
+    private var configInput: EditText? = null
+    private var editorEngine: TextView? = null
+    private var settingsAnchor: View? = null
+    private var profileScroll: ScrollView? = null
+    private var usernameInput: EditText? = null
+    private var passwordInput: EditText? = null
+    private var loginButton: TextView? = null
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val message = intent?.getStringExtra(XrayVpnService.EXTRA_MESSAGE) ?: return
-            setConnectionStatus(
-                message,
-                intent.getBooleanExtra(XrayVpnService.EXTRA_ACTIVE, false)
-            )
+            applyStatus(message, intent.getBooleanExtra(XrayVpnService.EXTRA_ACTIVE, false))
         }
     }
 
+    private val tick = object : Runnable {
+        override fun run() {
+            if (state == OrbState.CONNECTED && resumed) {
+                val t = durationText()
+                timerView?.text = t
+                statsDuration?.text = t
+                handler.postDelayed(this, 1000)
+            }
+        }
+    }
+
+    // =====================================================================
+    // Lifecycle
+    // =====================================================================
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = bg
-        window.navigationBarColor = bg
-        window.decorView.systemUiVisibility = 0
+        if (Build.VERSION.SDK_INT >= 30) window.setDecorFitsSystemWindows(false)
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
 
-        token = getSharedPreferences("tirexnet", MODE_PRIVATE)
-            .getString("token", "") ?: ""
+        token = prefs.getString("token", "") ?: ""
+        statusMessage = prefs.getString("connection_message", "") ?: ""
 
         val filter = IntentFilter(XrayVpnService.ACTION_STATUS)
         if (Build.VERSION.SDK_INT >= 33) {
@@ -101,643 +185,757 @@ class MainActivity : Activity() {
             registerReceiver(receiver, filter)
         }
 
+        reconcileState()
         render()
         if (token.isNotBlank()) loadAccount()
     }
 
-    private fun render() {
-        val screen = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(bg)
-        }
-
-        scroll = ScrollView(this).apply {
-            setFillViewport(true)
-            setBackgroundColor(bg)
-            clipToPadding = false
-            isVerticalScrollBarEnabled = false
-        }
-
-        root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(14), dp(16), dp(14))
-        }
-
-        scroll.addView(root)
-        header()
-        gap(root, 13)
-
-        if (token.isBlank()) {
-            loginScreen()
-        } else {
-            dashboard()
-        }
-
-        screen.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        if (token.isNotBlank()) {
-            screen.addView(bottomNavigation(), lp(-1, dp(66)))
-        }
-        setContentView(screen)
+    override fun onResume() {
+        super.onResume()
+        resumed = true
+        reconcileState()
+        updateConnectionUi()
     }
 
-    private fun header() {
+    override fun onPause() {
+        resumed = false
+        handler.removeCallbacks(tick)
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        runCatching { unregisterReceiver(receiver) }
+        handler.removeCallbacksAndMessages(null)
+        io.shutdown()
+        super.onDestroy()
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        if (token.isNotBlank() && currentTab != 0) showTab(0) else super.onBackPressed()
+    }
+
+    /** The only source of truth for "connected" is an engine that confirmed the tunnel. */
+    private fun reconcileState() {
+        val real = XrayVpnService.isActive || WgTunnelEngine.isActive
+        if (real && state != OrbState.CONNECTED) {
+            applyStatus(statusMessage.ifBlank { "Connected." }, true)
+        } else if (!real && state == OrbState.CONNECTED) {
+            applyStatus("Disconnected.", false)
+        } else if (!real && prefs.getBoolean("connection_active", false)) {
+            prefs.edit().putBoolean("connection_active", false).putString("active_engine", "").apply()
+        }
+    }
+
+    // =====================================================================
+    // Render
+    // =====================================================================
+
+    private fun render() {
+        shownTabs.clear()
+        val rootFrame = FrameLayout(this)
+        rootFrame.setBackgroundColor(Palette.bg0)
+        rootFrame.addView(AmbientBackground(this), FrameLayout.LayoutParams(MATCH, MATCH))
+
+        val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        rootFrame.addView(column, FrameLayout.LayoutParams(MATCH, MATCH))
+        column.addView(buildHeader(), lp(MATCH, WRAP))
+
+        val content = FrameLayout(this)
+        contentFrame = content
+        column.addView(content, LinearLayout.LayoutParams(MATCH, 0, 1f))
+
+        if (token.isBlank()) {
+            nav = null
+            tabViews = emptyList()
+            content.addView(buildLogin(), FrameLayout.LayoutParams(MATCH, MATCH))
+        } else {
+            tabViews = listOf(buildHomeTab(), buildServersTab(), buildStatsTab(), buildProfileTab())
+            for (v in tabViews) content.addView(v, FrameLayout.LayoutParams(MATCH, MATCH))
+            val bar = GlassNavBar(this)
+            bar.onSelect = { showTab(it) }
+            nav = bar
+            column.addView(bar, lp(MATCH, dpi(74)))
+            showTab(currentTab.coerceIn(0, 3), false)
+        }
+
+        setContentView(rootFrame)
+        rootFrame.setOnApplyWindowInsetsListener { _, insets ->
+            var l = 0; var t = 0; var r = 0; var b = 0
+            if (Build.VERSION.SDK_INT >= 30) {
+                val i = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+                l = i.left; t = i.top; r = i.right; b = i.bottom
+            } else {
+                @Suppress("DEPRECATION")
+                l = insets.systemWindowInsetLeft
+                @Suppress("DEPRECATION")
+                t = insets.systemWindowInsetTop
+                @Suppress("DEPRECATION")
+                r = insets.systemWindowInsetRight
+                @Suppress("DEPRECATION")
+                b = insets.systemWindowInsetBottom
+            }
+            column.setPadding(l, t, r, b)
+            insets
+        }
+        rootFrame.requestApplyInsets()
+
+        bindAccount()
+        bindServerSummary()
+        updateConnectionUi()
+    }
+
+    private fun buildHeader(): View {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            setPadding(dpi(20), dpi(10), dpi(16), dpi(6))
         }
+        row.addView(BrandMark(this), lp(dpi(44), dpi(44)))
+        val titles = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpi(12), 0, 0, 0)
+        }
+        titles.addView(tv("TIREXNET", 18f, Palette.text, 2).apply { letterSpacing = 0.16f })
+        titles.addView(tv("SECURE  •  FAST  •  FREE", 8f, Palette.muted, 1).apply { letterSpacing = 0.22f }, lp(WRAP, WRAP, 3))
+        row.addView(titles, LinearLayout.LayoutParams(0, WRAP, 1f))
 
-        val logo = TextView(this).apply {
-            text = "T"
-            textSize = 28f
-            typeface = Typeface.create("sans-serif-black", Typeface.BOLD)
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TL_BR,
-                intArrayOf(blue, cyan, purple)
-            ).apply {
-                cornerRadius = dp(17).toFloat()
-                setStroke(dp(1), Color.rgb(80, 185, 255))
+        if (token.isNotBlank()) {
+            val chip = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dpi(10), dpi(6), dpi(11), dpi(6))
+                background = Palette.glass(this@MainActivity, 16f)
             }
-            elevation = dp(5).toFloat()
+            val dot = View(this)
+            chipDot = dot
+            chip.addView(dot, lp(dpi(7), dpi(7)))
+            val t = tv("OFFLINE", 9f, Palette.muted, 2).apply { letterSpacing = 0.12f }
+            chipText = t
+            chip.addView(t, lp(WRAP, WRAP, 0, 0, 7))
+            row.addView(chip, lp(WRAP, WRAP, 0, 0, 0, 8))
+            row.addView(roundButton(Icon.PROFILE) { showTab(3) }, lp(dpi(38), dpi(38), 0, 0, 0, 6))
+            row.addView(roundButton(Icon.GEAR) { showTab(3); scrollToSettings() }, lp(dpi(38), dpi(38)))
         }
-        row.addView(logo, lp(dp(55), dp(55)))
-
-        val brand = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(11), 0, dp(5), 0)
-        }
-        brand.addView(text("TIREXNET", 22, white, true), lp(-1, dp(31)))
-        brand.addView(
-            text("FAST  •  SECURE  •  FREEDOM", 9, muted, true),
-            lp(-1, dp(21))
-        )
-        row.addView(brand, LinearLayout.LayoutParams(0, dp(55), 1f))
-
-        val secure = TextView(this).apply {
-            text = "● امن"
-            textSize = 10f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(mint)
-            gravity = Gravity.CENTER
-            setPadding(dp(11), 0, dp(11), 0)
-            background = bordered(panel, 18, mint)
-        }
-        row.addView(secure, lp(-2, dp(33)))
-        root.addView(row, lp(-1, dp(56)))
-
-        val divider = View(this).apply {
-            background = GradientDrawable(
-                GradientDrawable.Orientation.LEFT_RIGHT,
-                intArrayOf(Color.TRANSPARENT, cyan, blue, purple, Color.TRANSPARENT)
-            )
-        }
-        val dividerParams = lp(-1, dp(1))
-        dividerParams.topMargin = dp(13)
-        root.addView(divider, dividerParams)
+        return row
     }
 
-    private fun loginScreen() {
-        gap(root, 14)
-        root.addView(text("ورود امن به TIREXNET", 12, cyan, true), lp(-1, dp(25)))
-        root.addView(text("اینترنت تو.\nقوانین تو.", 34, white, true), lp(-1, dp(91)))
-        root.addView(
-            text("با اطلاعات حساب اشتراک، وارد پنل خودت شو و کانفیگ‌ها را مدیریت کن.", 13, muted, false),
-            lp(-1, -2)
-        )
-
-        val hero = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(17), dp(15), dp(17), dp(15))
-            background = gradient(Color.rgb(5, 49, 78), Color.rgb(30, 19, 76), 22)
+    private fun roundButton(icon: Icon, onClick: () -> Unit): View {
+        val f = FrameLayout(this).apply {
+            background = Palette.glass(this@MainActivity, 19f)
+            isClickable = true
+            contentDescription = icon.name
+            setOnClickListener { onClick() }
+            pressable(0.92f)
         }
-        val heroParams = lp(-1, dp(126))
-        heroParams.topMargin = dp(20)
-        root.addView(hero, heroParams)
-        hero.addView(text("✦  انتخاب هوشمند پروتکل", 12, cyan, true), lp(-1, dp(25)))
-        hero.addView(text("یک برنامه، چندین پروتکل", 19, white, true), lp(-1, dp(33)))
-        hero.addView(text("XRAY  •  WIREGUARD  •  AMNEZIAWG", 10, muted, true), lp(-1, dp(22)))
-
-        gap(root, 23)
-        root.addView(text("اطلاعات حساب", 15, white, true), lp(-1, dp(28)))
-        usernameInput = input("نام کاربری")
-        root.addView(usernameInput, lp(-1, dp(53)))
-        gap(root, 10)
-        passwordInput = input("رمز عبور").apply {
-            inputType = 129
-        }
-        root.addView(passwordInput, lp(-1, dp(53)))
-        gap(root, 15)
-        root.addView(
-            button("ورود به حساب  ←", true).apply { setOnClickListener { login() } },
-            lp(-1, dp(54))
-        )
-        root.addView(
-            text("احراز هویت حساب از طریق سرویس TIREXNET انجام می‌شود.", 10, muted, false).apply {
-                gravity = Gravity.CENTER
-            },
-            lp(-1, dp(44))
-        )
+        f.addView(IconView(this, icon, Palette.ice), FrameLayout.LayoutParams(dpi(38), dpi(38)))
+        return f
     }
 
-    private fun dashboard() {
-        root.addView(text("CONTROL CENTER  /  مرکز کنترل", 10, cyan, true), lp(-1, dp(22)))
-        root.addView(text("شبکه‌ی تو", 30, white, true), lp(-1, dp(43)))
-        root.addView(
-            text("اتصال امن و مدیریت اشتراک در یک نگاه", 12, muted, false),
-            lp(-1, dp(26))
-        )
+    // =====================================================================
+    // Tabs
+    // =====================================================================
 
-        // Primary connection card
-        val hero = LinearLayout(this).apply {
+    private fun tabScroll(): Pair<ScrollView, LinearLayout> {
+        val sv = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            clipToPadding = false
+            isFillViewport = true
+        }
+        val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(13), dp(14), dp(13))
-            background = bordered(
-                gradient(Color.rgb(5, 48, 64), Color.rgb(16, 20, 63), 22),
-                22,
-                Color.rgb(27, 117, 210)
-            )
-            elevation = dp(3).toFloat()
+            setPadding(dpi(20), dpi(6), dpi(20), dpi(22))
         }
-        val heroParams = lp(-1, -2)
-        heroParams.topMargin = dp(8)
-        root.addView(hero, heroParams)
+        sv.addView(col, FrameLayout.LayoutParams(MATCH, WRAP))
+        return sv to col
+    }
 
-        val heroTop = LinearLayout(this).apply {
+    private fun showTab(index: Int, animate: Boolean = true) {
+        if (tabViews.isEmpty()) return
+        val dir = if (index >= currentTab) 1 else -1
+        currentTab = index
+        tabViews.forEachIndexed { i, v ->
+            if (i == index) {
+                v.visibility = View.VISIBLE
+                if (animate) {
+                    v.alpha = 0f
+                    v.translationX = dp(22f) * dir
+                    v.animate().alpha(1f).translationX(0f).setDuration(260).setInterpolator(DecelerateInterpolator()).start()
+                } else { v.alpha = 1f; v.translationX = 0f }
+                if (shownTabs.add(index)) {
+                    val sv = v as? ScrollView
+                    (sv?.getChildAt(0) as? ViewGroup)?.let { staggerIn(it) }
+                }
+            } else {
+                v.animate().cancel()
+                v.visibility = View.GONE
+            }
+        }
+        nav?.select(index, animate)
+        if (index == 1) ensureServersLoaded()
+    }
+
+    private fun staggerIn(group: ViewGroup) {
+        for (i in 0 until group.childCount) {
+            val v = group.getChildAt(i)
+            v.alpha = 0f
+            v.translationY = dp(16f)
+            v.animate().alpha(1f).translationY(0f).setStartDelay(i * 50L).setDuration(340)
+                .setInterpolator(DecelerateInterpolator()).start()
+        }
+    }
+
+    // ---------------------------------------------------------------- Home
+    private fun buildHomeTab(): View {
+        val (sv, col) = tabScroll()
+        val orbSize = minOf(dpi(290), resources.displayMetrics.widthPixels - dpi(48))
+        val o = ConnectOrb(this)
+        o.contentDescription = "Connect or disconnect"
+        o.onToggle = { toggleConnection() }
+        orb = o
+        val orbHolder = FrameLayout(this)
+        orbHolder.addView(o, FrameLayout.LayoutParams(orbSize, orbSize, Gravity.CENTER))
+        col.addView(orbHolder, lp(MATCH, orbSize, 4))
+
+        val title = tv("Disconnected", 26f, Palette.muted, 2).apply { gravity = Gravity.CENTER; letterSpacing = 0.04f }
+        statusTitle = title
+        col.addView(title, lp(MATCH, WRAP, 6))
+
+        val timer = tv("00:00:00", 17f, Palette.cyan, 4).apply { gravity = Gravity.CENTER; letterSpacing = 0.12f; visibility = View.GONE }
+        timerView = timer
+        col.addView(timer, lp(MATCH, WRAP, 6))
+
+        val desc = tv("", 12.5f, Palette.muted, 0).apply { gravity = Gravity.CENTER; maxLines = 3; ellipsize = TextUtils.TruncateAt.END }
+        statusDesc = desc
+        col.addView(desc, lp(MATCH, WRAP, 8, 0, 18, 18))
+
+        // selected server
+        val serverCard = GlassCard(this, 20f, pad = 14).apply { isClickable = true; setOnClickListener { showTab(1) }; pressable(0.98f) }
+        val srow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        srow.addView(badge(Icon.SERVERS), lp(dpi(44), dpi(44)))
+        val sinfo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(12), 0, dpi(8), 0) }
+        sinfo.addView(tv("SELECTED SERVER", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
+        homeServerName = tv("—", 15f, Palette.text, 1).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
+        sinfo.addView(homeServerName!!, lp(MATCH, WRAP, 4))
+        homeServerMeta = tv("", 11f, Palette.muted, 0).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
+        sinfo.addView(homeServerMeta!!, lp(MATCH, WRAP, 2))
+        srow.addView(sinfo, LinearLayout.LayoutParams(0, WRAP, 1f))
+        srow.addView(IconView(this, Icon.CHEVRON, Palette.muted), lp(dpi(22), dpi(22)))
+        serverCard.addView(srow)
+        col.addView(serverCard, lp(MATCH, WRAP, 4))
+
+        // account + expiry
+        val two = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val accCard = GlassCard(this, 18f, pad = 13)
+        accCard.addView(tv("ACCOUNT", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
+        homeAccName = tv("—", 15f, Palette.text, 1).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
+        accCard.addView(homeAccName!!, lp(MATCH, WRAP, 6))
+        homeAccStatus = tv("", 11f, Palette.mint, 1)
+        accCard.addView(homeAccStatus!!, lp(MATCH, WRAP, 3))
+        val expCard = GlassCard(this, 18f, pad = 13)
+        expCard.addView(tv("EXPIRES", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
+        homeExpiry = tv("—", 13f, Palette.text, 1).apply { maxLines = 2; ellipsize = TextUtils.TruncateAt.END }
+        expCard.addView(homeExpiry!!, lp(MATCH, WRAP, 6))
+        two.addView(accCard, LinearLayout.LayoutParams(0, MATCH, 1f).apply { rightMargin = dpi(6) })
+        two.addView(expCard, LinearLayout.LayoutParams(0, MATCH, 1f).apply { leftMargin = dpi(6) })
+        col.addView(two, lp(MATCH, WRAP, 12))
+
+        // data usage
+        val usage = GlassCard(this, 18f, pad = 14)
+        val urow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        urow.addView(tv("DATA USAGE", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        homeUsageText = tv("—", 13f, Palette.text, 1)
+        urow.addView(homeUsageText!!)
+        usage.addView(urow)
+        homeUsageMeter = LinearMeter(this)
+        usage.addView(homeUsageMeter!!, lp(MATCH, dpi(6), 10))
+        col.addView(usage, lp(MATCH, WRAP, 12))
+
+        col.addView(
+            tv("ENCRYPTED TUNNEL  •  TIREXNET", 8.5f, Palette.dim, 1).apply { gravity = Gravity.CENTER; letterSpacing = 0.24f },
+            lp(MATCH, WRAP, 22)
+        )
+        return sv
+    }
+
+    private fun badge(icon: Icon, accent: Int = Palette.cyan): View {
+        val f = FrameLayout(this).apply {
+            background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(Palette.withAlpha(accent, 54), Palette.withAlpha(accent, 12))).apply {
+                cornerRadius = dp(14f)
+                setStroke(dpi(1), Palette.withAlpha(accent, 110))
+            }
+        }
+        f.addView(IconView(this, icon, accent, true), FrameLayout.LayoutParams(dpi(44), dpi(44)))
+        return f
+    }
+
+    // ------------------------------------------------------------- Servers
+    private fun buildServersTab(): View {
+        val (sv, col) = tabScroll()
+        val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val ht = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        ht.addView(tv("Servers", 26f, Palette.text, 2))
+        ht.addView(tv("کانفیگ‌های اشتراک تو", 12f, Palette.muted, 0), lp(WRAP, WRAP, 4))
+        head.addView(ht, LinearLayout.LayoutParams(0, WRAP, 1f))
+        head.addView(roundButton(Icon.REFRESH) { loadServers() }, lp(dpi(42), dpi(42)))
+        col.addView(head, lp(MATCH, WRAP, 6))
+
+        val search = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            background = Palette.glass(this@MainActivity, 16f)
+            setPadding(dpi(12), 0, dpi(12), 0)
         }
-        heroTop.addView(
-            text("●  وضعیت اتصال", 11, mint, true),
-            LinearLayout.LayoutParams(0, dp(27), 1f)
-        )
-        heroTop.addView(
-            text("TIREXNET", 10, cyan, true).apply {
-                gravity = Gravity.CENTER
-                setPadding(dp(10), dp(5), dp(10), dp(5))
-                background = bordered(panel, 14, purple)
-            },
-            lp(-2, dp(29))
-        )
-        hero.addView(heroTop, lp(-1, dp(30)))
-
-        val heroBody = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+        search.addView(IconView(this, Icon.SEARCH, Palette.muted), lp(dpi(20), dpi(20)))
+        val sInput = EditText(this).apply {
+            hint = "Search servers"
+            textSize = 14f
+            setTextColor(Palette.text)
+            setHintTextColor(Palette.dim)
+            setSingleLine(true)
+            background = null
+            setPadding(dpi(10), dpi(14), dpi(4), dpi(14))
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {
+                    serverQuery = s?.toString().orEmpty().trim()
+                    rebuildServerList(-1)
+                }
+                override fun afterTextChanged(s: Editable?) = Unit
+            })
         }
+        search.addView(sInput, LinearLayout.LayoutParams(0, WRAP, 1f))
+        col.addView(search, lp(MATCH, dpi(48), 14))
 
-        powerControl = TextView(this).apply {
-            text = "⏻"
-            textSize = 39f
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setTextColor(cyan)
-            background = powerBackground(false)
-            setOnClickListener { toggleConnection() }
-            contentDescription = "اتصال یا قطع اتصال"
-        }
-        val powerParams = lp(dp(78), dp(78))
-        powerParams.rightMargin = dp(9)
-        heroBody.addView(powerControl, powerParams)
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        serverListBox = box
+        col.addView(box, lp(MATCH, WRAP, 10))
 
-        val serverInfo = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(4), 0, dp(4), 0)
-        }
-        serverInfo.addView(text("پروفایل انتخاب‌شده", 10, muted, true), lp(-1, dp(22)))
-        activeProfileInfo = text("هنوز کانفیگی انتخاب نشده است", 12, white, true).apply {
-            maxLines = 3
-        }
-        serverInfo.addView(activeProfileInfo, lp(-1, -2))
-        val serverParams = LinearLayout.LayoutParams(0, -2, 1f)
-        serverParams.rightMargin = dp(5)
-        heroBody.addView(serverInfo, serverParams)
+        // manual import
+        val imp = GlassCard(this, 20f, pad = 14)
+        imp.addView(tv("IMPORT CONFIG", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
+        val brow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        brow.addView(ghostButton("Paste") { pasteClipboard() }, LinearLayout.LayoutParams(0, dpi(44), 1f).apply { rightMargin = dpi(4) })
+        brow.addView(ghostButton("File") { pickFile() }, LinearLayout.LayoutParams(0, dpi(44), 1f).apply { leftMargin = dpi(4); rightMargin = dpi(4) })
+        brow.addView(ghostButton("Edit") { toggleEditor() }, LinearLayout.LayoutParams(0, dpi(44), 1f).apply { leftMargin = dpi(4) })
+        imp.addView(brow, lp(MATCH, WRAP, 10))
 
-        val statusColumn = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            background = bordered(panel, 14, Color.rgb(35, 75, 138))
-            setPadding(dp(7), dp(7), dp(7), dp(7))
-        }
-        statusColumn.addView(text("ENGINE", 8, muted, true).apply {
-            gravity = Gravity.CENTER
-        }, lp(-1, dp(18)))
-        detectionView = text("NONE", 11, cyan, true).apply {
-            gravity = Gravity.CENTER
-            maxLines = 2
-        }
-        statusColumn.addView(detectionView, lp(-1, dp(27)))
-        heroBody.addView(statusColumn, lp(dp(76), dp(66)))
-        val bodyParams = lp(-1, -2)
-        bodyParams.topMargin = dp(8)
-        hero.addView(heroBody, bodyParams)
-
-        status = text("○  اتصال برقرار نیست", 11, muted, true).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(10), dp(8), dp(10), dp(8))
-            minHeight = dp(40)
-            background = bordered(panel, 12, Color.rgb(42, 64, 102))
-            maxLines = 4
-        }
-        val statusParams = lp(-1, -2)
-        statusParams.topMargin = dp(11)
-        hero.addView(status, statusParams)
-
-        // Subscription details
-        val accountCard = card()
-        val accountParams = lp(-1, -2)
-        accountParams.topMargin = dp(13)
-        root.addView(accountCard, accountParams)
-
-        val accountTop = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        accountTop.addView(text("اشتراک من", 15, white, true), LinearLayout.LayoutParams(0, dp(27), 1f))
-        accountTop.addView(
-            text("● حساب", 9, mint, true).apply {
-                gravity = Gravity.CENTER
-                setPadding(dp(9), dp(4), dp(9), dp(4))
-                background = bordered(panel, 12, mint)
-            },
-            lp(-2, dp(26))
-        )
-        accountCard.addView(accountTop, lp(-1, dp(29)))
-        accountInfo = text("در حال دریافت اطلاعات اشتراک…", 15, white, true)
-        val accountInfoParams = lp(-1, dp(34))
-        accountInfoParams.topMargin = dp(3)
-        accountCard.addView(accountInfo, accountInfoParams)
-
-        val stats = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-        val usedCard = statCard("حجم مصرفی", "در حال بررسی…", "میزان ترافیک مصرف‌شده")
-        val expiryCard = statCard("اعتبار اشتراک", "—", "تاریخ پایان سرویس")
-        val stat1 = LinearLayout.LayoutParams(0, dp(96), 1f)
-        stat1.rightMargin = dp(5)
-        val stat2 = LinearLayout.LayoutParams(0, dp(96), 1f)
-        stat2.leftMargin = dp(5)
-        stats.addView(usedCard, stat1)
-        stats.addView(expiryCard, stat2)
-        val statsParams = lp(-1, dp(96))
-        statsParams.topMargin = dp(9)
-        accountCard.addView(stats, statsParams)
-
-        // Four compact quick actions
-        root.addView(text("دسترسی سریع", 14, white, true), lp(-1, dp(27)))
-        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val actionSpecs = listOf(
-            Triple("⇩", "دریافت", "دریافت کانفیگ"),
-            Triple("⎘", "چسباندن", "از کلیپ‌بورد"),
-            Triple("▤", "فایل", "واردکردن فایل"),
-            Triple("◉", "حساب", "اطلاعات اشتراک")
-        )
-        val callbacks: List<() -> Unit> = listOf(
-            { loadProfiles() },
-            { pasteClipboard() },
-            { pickFile() },
-            { loadAccount() }
-        )
-        for (i in actionSpecs.indices) {
-            val spec = actionSpecs[i]
-            val tile = actionTile(spec.first, spec.second, spec.third, callbacks[i])
-            val params = LinearLayout.LayoutParams(0, dp(90), 1f)
-            if (i != 0) params.leftMargin = dp(5)
-            actions.addView(tile, params)
-        }
-        val actionParams = lp(-1, dp(90))
-        actionParams.topMargin = dp(5)
-        root.addView(actions, actionParams)
-
-        // Active profile and config editor
-        val configCard = card()
-        val configParams = lp(-1, -2)
-        configParams.topMargin = dp(14)
-        root.addView(configCard, configParams)
-
-        val configTop = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        configTop.addView(text("کانفیگ‌های من", 15, white, true), LinearLayout.LayoutParams(0, dp(29), 1f))
-        configTop.addView(text("● مدیریت", 9, cyan, true), lp(-2, dp(25)))
-        configCard.addView(configTop, lp(-1, dp(30)))
-        configCard.addView(
-            text("پروتکل به‌صورت خودکار شناسایی می‌شود؛ برای اتصال، یک پروفایل انتخاب کن.", 10, muted, false),
-            lp(-1, dp(35))
-        )
-
-        val profileButtons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val listButton = button("لیست کانفیگ‌ها", true)
-        listButton.setOnClickListener { loadProfiles() }
-        val editButton = button("نمایش / ویرایش", false)
-        editButton.setOnClickListener { showConfigEditor(configEditor.visibility != View.VISIBLE) }
-        val listParams = LinearLayout.LayoutParams(0, dp(44), 1f)
-        listParams.rightMargin = dp(5)
-        val editParams = LinearLayout.LayoutParams(0, dp(44), 1f)
-        editParams.leftMargin = dp(5)
-        profileButtons.addView(listButton, listParams)
-        profileButtons.addView(editButton, editParams)
-        configCard.addView(profileButtons, lp(-1, dp(44)))
-
-        configEditor = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            visibility = View.GONE
-            setPadding(0, dp(10), 0, 0)
-        }
-        configEditor.addView(text("متن کانفیگ", 11, cyan, true), lp(-1, dp(25)))
-        configInput = EditText(this).apply {
-            setTextColor(white)
-            setHintTextColor(muted)
-            hint = "VLESS / VMess / Trojan / Shadowsocks یا کانفیگ WireGuard"
+        val editor = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE; setPadding(0, dpi(10), 0, 0) }
+        editorBox = editor
+        val input = EditText(this).apply {
+            hint = "VLESS / VMess / Trojan / Shadowsocks / WireGuard"
             textSize = 12f
+            setTextColor(Palette.text)
+            setHintTextColor(Palette.dim)
             gravity = Gravity.TOP or Gravity.START
-            minLines = 4
-            maxLines = 8
-            setPadding(dp(12), dp(11), dp(12), dp(11))
-            background = bordered(panel2, 14, Color.rgb(45, 89, 153))
-            setText(getSharedPreferences("tirexnet", MODE_PRIVATE).getString("last_config", "") ?: "")
+            minLines = 4; maxLines = 8
+            setPadding(dpi(12), dpi(10), dpi(12), dpi(10))
+            background = Palette.glass(this@MainActivity, 14f, Palette.stroke, Color.argb(70, 6, 14, 34), Color.argb(70, 6, 14, 34))
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setText(currentConfig())
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {
+                    if (settingConfig) return
+                    prefs.edit().putString("last_config", s?.toString().orEmpty()).apply()
+                    onConfigChanged()
+                }
+                override fun afterTextChanged(s: Editable?) = Unit
+            })
         }
-        configEditor.addView(configInput, lp(-1, dp(122)))
-        // Keep a separate profile summary in the hero and engine value in this editor.
-        val editorEngine = text("موتور: —", 10, mint, true)
-        editorEngine.tag = "EDITOR_ENGINE"
-        val editorEngineParams = lp(-1, dp(25))
-        editorEngineParams.topMargin = dp(3)
-        configEditor.addView(editorEngine, editorEngineParams)
+        configInput = input
+        editor.addView(input, lp(MATCH, WRAP))
+        editorEngine = tv("", 10.5f, Palette.mint, 1)
+        editor.addView(editorEngine!!, lp(WRAP, WRAP, 8))
+        imp.addView(editor)
+        col.addView(imp, lp(MATCH, WRAP, 10))
+        editorEngine?.text = engineLabel(currentConfig())
 
-        configInput.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                val raw = s?.toString().orEmpty()
-                getSharedPreferences("tirexnet", MODE_PRIVATE).edit().putString("last_config", raw).apply()
-                val engine = ConfigDetector.detect(raw)
-                val engineText = engineName(engine)
-                detectionView.text = engineText
-                editorEngine.text = "موتور شناسایی‌شده: " + engineText
-                activeProfileInfo.text = profileSummary(raw)
-            }
-            override fun afterTextChanged(s: Editable?) = Unit
-        })
-        val saved = configInput.text.toString().trim()
-        detectionView.text = engineName(ConfigDetector.detect(saved))
-        editorEngine.text = "موتور شناسایی‌شده: " + engineName(ConfigDetector.detect(saved))
-        activeProfileInfo.text = profileSummary(saved)
-
-        val editorActions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val pasteButton = button("چسباندن", false).apply { setOnClickListener { pasteClipboard() } }
-        val importButton = button("واردکردن فایل", false).apply { setOnClickListener { pickFile() } }
-        val ep1 = LinearLayout.LayoutParams(0, dp(43), 1f).apply { rightMargin = dp(5) }
-        val ep2 = LinearLayout.LayoutParams(0, dp(43), 1f).apply { leftMargin = dp(5) }
-        editorActions.addView(pasteButton, ep1)
-        editorActions.addView(importButton, ep2)
-        val editorActionsParams = lp(-1, dp(43))
-        editorActionsParams.topMargin = dp(7)
-        configEditor.addView(editorActions, editorActionsParams)
-
-        val connectButton = button("اتصال امن  ↗", true).apply {
-            setOnClickListener { connect() }
-        }
-        val connectParams = lp(-1, dp(49))
-        connectParams.topMargin = dp(8)
-        configEditor.addView(connectButton, connectParams)
-        configCard.addView(configEditor, lp(-1, -2))
-
-        root.addView(
-            text("ENCRYPTED TUNNEL  •  TIREXNET", 9, muted, true).apply {
-                gravity = Gravity.CENTER
-            },
-            lp(-1, dp(36))
-        )
-
-        val prefs = getSharedPreferences("tirexnet", MODE_PRIVATE)
-        setConnectionStatus(
-            prefs.getString("connection_message", "Disconnected.") ?: "Disconnected.",
-            prefs.getBoolean("connection_active", false)
-        )
+        rebuildServerList(-1)
+        return sv
     }
 
-    private fun bottomNavigation(): LinearLayout {
-        val bar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(7), dp(5), dp(7), dp(5))
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TL_BR,
-                intArrayOf(Color.rgb(6, 15, 34), Color.rgb(5, 9, 24))
-            ).apply {
-                setStroke(dp(1), Color.rgb(19, 57, 112))
-                cornerRadius = dp(17).toFloat()
-            }
-            elevation = dp(8).toFloat()
-        }
+    private fun toggleEditor() {
+        val e = editorBox ?: return
+        e.visibility = if (e.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        if (e.visibility == View.VISIBLE) configInput?.requestFocus()
+    }
 
-        addNavItem(bar, "⌂", "خانه", false) { scroll.smoothScrollTo(0, 0) }
-        addNavItem(bar, "☷", "کانفیگ‌ها", false) { loadProfiles() }
-        addNavItem(bar, "⏻", "اتصال", true) { toggleConnection() }
-        addNavItem(bar, "▥", "آمار", false) { loadAccount() }
-        addNavItem(bar, "♙", "پروفایل", false) {
-            AlertDialog.Builder(this)
-                .setTitle("حساب TIREXNET")
-                .setItems(arrayOf("به‌روزرسانی اشتراک", "خروج از حساب", "بستن")) { _, which ->
-                    when (which) {
-                        0 -> loadAccount()
-                        1 -> logout()
+    private fun ensureServersLoaded() {
+        if (serversState == ServersState.IDLE && token.isNotBlank()) loadServers()
+    }
+
+    private fun rebuildServerList(popIndex: Int) {
+        val box = serverListBox ?: return
+        box.removeAllViews()
+        when (serversState) {
+            ServersState.IDLE, ServersState.LOADING -> {
+                for (i in 0 until 3) box.addView(SkeletonView(this), lp(MATCH, dpi(76), if (i == 0) 0 else 10))
+            }
+            ServersState.ERROR -> {
+                val c = GlassCard(this, 20f, Palette.withAlpha(Palette.red, 120), pad = 16)
+                c.addView(tv("Couldn't load configurations", 15f, Palette.text, 1))
+                c.addView(tv(serversError, 11.5f, Palette.muted, 0).apply { maxLines = 4; ellipsize = TextUtils.TruncateAt.END }, lp(MATCH, WRAP, 6))
+                c.addView(primaryButton("Retry") { loadServers() }, lp(MATCH, dpi(46), 12))
+                box.addView(c, lp(MATCH, WRAP))
+            }
+            ServersState.READY -> {
+                if (servers.isEmpty()) {
+                    box.addView(EmptyArt(this), lp(dpi(190), dpi(190), 4).apply { gravity = Gravity.CENTER_HORIZONTAL })
+                    box.addView(tv("No configurations yet", 16f, Palette.text, 1).apply { gravity = Gravity.CENTER }, lp(MATCH, WRAP, 6))
+                    box.addView(
+                        tv("اشتراک هیچ کانفیگی برنگرداند. می‌توانی کانفیگ را دستی وارد کنی.", 12f, Palette.muted, 0).apply { gravity = Gravity.CENTER },
+                        lp(MATCH, WRAP, 6, 0, 20, 20)
+                    )
+                    box.addView(ghostButton("Reload") { loadServers() }, lp(MATCH, dpi(46), 14, 6, 60, 60))
+                    return
+                }
+                val q = serverQuery.lowercase(Locale.US)
+                val list = servers.filter { q.isEmpty() || it.name.lowercase(Locale.US).contains(q) || it.host.lowercase(Locale.US).contains(q) }
+                if (list.isEmpty()) {
+                    box.addView(tv("No matching server", 12.5f, Palette.muted, 0).apply { gravity = Gravity.CENTER }, lp(MATCH, WRAP, 20, 10))
+                    return
+                }
+                val cur = currentConfig().trim()
+                for ((idx, item) in list.withIndex()) {
+                    val sel = item.raw.trim() == cur
+                    val card = GlassCard(this, 18f, if (sel) Palette.strokeActive else Palette.stroke, pad = 12).apply {
+                        isClickable = true
+                        if (sel) background = Palette.glass(this@MainActivity, 18f, Palette.strokeActive, Palette.withAlpha(Palette.cyan, 54), Palette.withAlpha(Palette.violet, 24))
+                        setOnClickListener { selectServer(item, idx) }
+                        pressable(0.98f)
+                    }
+                    val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                    val accent = when (item.engine) {
+                        ConfigEngine.XRAY -> Palette.cyan
+                        ConfigEngine.WIREGUARD -> Palette.violet
+                        ConfigEngine.AMNEZIAWG -> Palette.mint
+                        else -> Palette.muted
+                    }
+                    val short = when (item.engine) { ConfigEngine.XRAY -> "XR"; ConfigEngine.WIREGUARD -> "WG"; ConfigEngine.AMNEZIAWG -> "AW"; else -> "?" }
+                    row.addView(
+                        tv(short, 13f, accent, 2).apply {
+                            gravity = Gravity.CENTER
+                            letterSpacing = 0.08f
+                            background = GradientDrawable().apply {
+                                cornerRadius = dp(14f); setColor(Palette.withAlpha(accent, 28)); setStroke(dpi(1), Palette.withAlpha(accent, 120))
+                            }
+                        },
+                        lp(dpi(46), dpi(46))
+                    )
+                    val info = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(12), 0, dpi(8), 0) }
+                    info.addView(tv(item.name, 14.5f, Palette.text, 1).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END })
+                    val meta = listOf(engineName(item.engine), item.host, item.port).filter { it.isNotBlank() }.joinToString("  •  ")
+                    info.addView(tv(meta, 10.5f, Palette.muted, 0).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }, lp(MATCH, WRAP, 4))
+                    row.addView(info, LinearLayout.LayoutParams(0, WRAP, 1f))
+                    if (sel) {
+                        row.addView(
+                            FrameLayout(this).apply {
+                                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Palette.withAlpha(Palette.cyan, 50)); setStroke(dpi(1), Palette.cyan) }
+                                addView(IconView(this@MainActivity, Icon.CHECK, Palette.cyan), FrameLayout.LayoutParams(dpi(26), dpi(26)))
+                            },
+                            lp(dpi(26), dpi(26))
+                        )
+                    }
+                    card.addView(row)
+                    box.addView(card, lp(MATCH, WRAP, if (idx == 0) 0 else 10))
+                    if (idx == popIndex) {
+                        card.scaleX = 0.96f; card.scaleY = 0.96f
+                        card.animate().scaleX(1f).scaleY(1f).setDuration(240).setInterpolator(DecelerateInterpolator()).start()
                     }
                 }
-                .show()
+            }
         }
-        return bar
     }
 
-    private fun addNavItem(
-        parent: LinearLayout,
-        icon: String,
-        label: String,
-        central: Boolean,
-        click: () -> Unit
-    ) {
-        val item = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+    private fun selectServer(item: ServerItem, idx: Int) {
+        setConfig(item.raw)
+        rebuildServerList(idx)
+        toast("سرور انتخاب شد؛ روی دکمه‌ی اتصال بزن.")
+    }
+
+    // --------------------------------------------------------------- Stats
+    private fun buildStatsTab(): View {
+        val (sv, col) = tabScroll()
+        col.addView(tv("Statistics", 26f, Palette.text, 2), lp(WRAP, WRAP, 6))
+        col.addView(tv("فقط مقدارهایی که واقعاً از سرور یا اپ می‌رسد", 12f, Palette.muted, 0), lp(WRAP, WRAP, 4))
+
+        val ringCard = GlassCard(this, 24f, pad = 16)
+        val ring = UsageRing(this)
+        statsRing = ring
+        ringCard.addView(ring, LinearLayout.LayoutParams(dpi(190), dpi(190)).apply { gravity = Gravity.CENTER_HORIZONTAL })
+        ringCard.addView(tv("DATA USAGE", 8.5f, Palette.muted, 1).apply { gravity = Gravity.CENTER; letterSpacing = 0.18f }, lp(MATCH, WRAP, 10))
+        col.addView(ringCard, lp(MATCH, WRAP, 16))
+
+        val r1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        statsStatus = tv("—", 15f, Palette.text, 1)
+        statsDuration = tv("—", 15f, Palette.text, 4)
+        r1.addView(metricTile("STATUS", statsStatus!!), LinearLayout.LayoutParams(0, MATCH, 1f).apply { rightMargin = dpi(6) })
+        r1.addView(metricTile("SESSION", statsDuration!!), LinearLayout.LayoutParams(0, MATCH, 1f).apply { leftMargin = dpi(6) })
+        col.addView(r1, lp(MATCH, WRAP, 12))
+
+        val r2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        statsEngine = tv("—", 15f, Palette.text, 1)
+        statsExpiry = tv("—", 13f, Palette.text, 1).apply { maxLines = 2; ellipsize = TextUtils.TruncateAt.END }
+        r2.addView(metricTile("ENGINE", statsEngine!!), LinearLayout.LayoutParams(0, MATCH, 1f).apply { rightMargin = dpi(6) })
+        r2.addView(metricTile("EXPIRES", statsExpiry!!), LinearLayout.LayoutParams(0, MATCH, 1f).apply { leftMargin = dpi(6) })
+        col.addView(r2, lp(MATCH, WRAP, 12))
+
+        val speed = GlassCard(this, 18f, pad = 14)
+        speed.addView(tv("LIVE SPEED", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
+        speed.addView(tv("Not measured", 15f, Palette.text, 1), lp(WRAP, WRAP, 8))
+        speed.addView(tv("سرعت لحظه‌ای در این نسخه اندازه‌گیری نمی‌شود، پس عددی نشان داده نمی‌شود.", 11f, Palette.muted, 0), lp(MATCH, WRAP, 6))
+        col.addView(speed, lp(MATCH, WRAP, 12))
+
+        val log = GlassCard(this, 18f, pad = 14)
+        val lrow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        lrow.addView(tv("LAST CONNECTION EVENT", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f }, LinearLayout.LayoutParams(0, WRAP, 1f))
+        lrow.addView(
+            IconView(this, Icon.COPY, Palette.ice).apply { setOnClickListener { copyDiagnostics() }; contentDescription = "Copy diagnostics"; pressable(0.9f) },
+            lp(dpi(28), dpi(28))
+        )
+        log.addView(lrow)
+        statsLog = tv("—", 12f, Palette.text, 0).apply { maxLines = 6; ellipsize = TextUtils.TruncateAt.END }
+        log.addView(statsLog!!, lp(MATCH, WRAP, 8))
+        col.addView(log, lp(MATCH, WRAP, 12))
+        return sv
+    }
+
+    private fun metricTile(label: String, value: TextView): View {
+        val c = GlassCard(this, 18f, pad = 13)
+        c.addView(tv(label, 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
+        c.addView(value, lp(MATCH, WRAP, 8))
+        return c
+    }
+
+    // ------------------------------------------------------------- Profile
+    private fun buildProfileTab(): View {
+        val (sv, col) = tabScroll()
+        profileScroll = sv
+        val top = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL }
+        val av = tv("T", 30f, Palette.text, 2).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(2), dp(1), dp(2), dp(1))
+            background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(Palette.blue, Palette.cyan, Palette.violet)).apply {
+                shape = GradientDrawable.OVAL
+            }
+        }
+        profAvatar = av
+        top.addView(av, lp(dpi(78), dpi(78), 6))
+        profName = tv("—", 20f, Palette.text, 2).apply { gravity = Gravity.CENTER }
+        top.addView(profName!!, lp(WRAP, WRAP, 12))
+        profStatus = tv("", 11f, Palette.mint, 1).apply { gravity = Gravity.CENTER; letterSpacing = 0.1f }
+        top.addView(profStatus!!, lp(WRAP, WRAP, 6))
+        col.addView(top, lp(MATCH, WRAP))
+
+        val sub = GlassCard(this, 20f, pad = 14)
+        sub.addView(tv("SUBSCRIPTION", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
+        profPanel = infoRow(sub, "Panel user")
+        profExpiry = infoRow(sub, "Expires")
+        profUsage = infoRow(sub, "Data used")
+        col.addView(sub, lp(MATCH, WRAP, 18))
+
+        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        actions.addView(ghostButton("Refresh account") { loadAccount(true) }, LinearLayout.LayoutParams(0, dpi(48), 1f).apply { rightMargin = dpi(6) })
+        actions.addView(ghostButton("Log out") { confirmLogout() }, LinearLayout.LayoutParams(0, dpi(48), 1f).apply { leftMargin = dpi(6) })
+        col.addView(actions, lp(MATCH, WRAP, 12))
+
+        val anchor = tv("SETTINGS", 10f, Palette.cyan, 2).apply { letterSpacing = 0.22f }
+        settingsAnchor = anchor
+        col.addView(anchor, lp(WRAP, WRAP, 26, 8))
+
+        val g1 = GlassCard(this, 20f, pad = 4)
+        settingRow(g1, Icon.INFO, "Active engine", "تشخیص خودکار از روی کانفیگ", engineLabelShort()) { }
+        settingRow(g1, Icon.COPY, "Copy diagnostics", "بدون رمز و توکن", null) { copyDiagnostics() }
+        settingRow(g1, Icon.TRASH, "Clear saved config", "پاک‌کردن کانفیگ ذخیره‌شده روی گوشی", null) { clearConfig() }
+        col.addView(g1, lp(MATCH, WRAP))
+
+        val g2 = GlassCard(this, 20f, pad = 4)
+        settingRow(g2, Icon.SHIELD, "Privacy", "چه چیزی روی گوشی ذخیره می‌شود", null) { showPrivacy() }
+        settingRow(g2, Icon.INFO, "App version", packageName, versionName()) { }
+        col.addView(g2, lp(MATCH, WRAP, 12))
+        return sv
+    }
+
+    private fun infoRow(parent: LinearLayout, label: String): TextView {
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        row.addView(tv(label, 12f, Palette.muted, 0), LinearLayout.LayoutParams(0, WRAP, 1f))
+        val v = tv("—", 13f, Palette.text, 1).apply { gravity = Gravity.END; maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
+        row.addView(v, LinearLayout.LayoutParams(0, WRAP, 1.4f))
+        parent.addView(row, lp(MATCH, WRAP, 12))
+        return v
+    }
+
+    private fun settingRow(parent: LinearLayout, icon: Icon, title: String, subtitle: String, value: String?, onClick: () -> Unit) {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dpi(10), dpi(12), dpi(10), dpi(12))
             isClickable = true
-            isFocusable = true
+            setOnClickListener { onClick() }
+            pressable(0.985f)
         }
-        val iconView = TextView(this).apply {
-            text = icon
-            textSize = if (central) 27f else 22f
-            gravity = Gravity.CENTER
-            setTextColor(if (central) cyan else muted)
-            if (central) {
-                background = GradientDrawable(
-                    GradientDrawable.Orientation.TL_BR,
-                    intArrayOf(Color.rgb(6, 53, 112), Color.rgb(34, 21, 111))
-                ).apply {
-                    shape = GradientDrawable.OVAL
-                    setStroke(dp(2), blue)
-                }
-                elevation = dp(3).toFloat()
-            }
-        }
-        item.addView(iconView, lp(if (central) dp(45) else -1, if (central) dp(42) else dp(32)))
-        item.addView(
-            text(label, 9, if (central) cyan else muted, central).apply {
-                gravity = Gravity.CENTER
-            },
-            lp(-1, dp(17))
+        row.addView(IconView(this, icon, Palette.ice), lp(dpi(24), dpi(24)))
+        val t = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(12), 0, dpi(8), 0) }
+        t.addView(tv(title, 14f, Palette.text, 1))
+        t.addView(tv(subtitle, 10.5f, Palette.muted, 0).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }, lp(MATCH, WRAP, 3))
+        row.addView(t, LinearLayout.LayoutParams(0, WRAP, 1f))
+        if (value != null) row.addView(tv(value, 12f, Palette.cyan, 1))
+        parent.addView(row, lp(MATCH, WRAP))
+    }
+
+    private fun scrollToSettings() {
+        val sv = profileScroll ?: return
+        val a = settingsAnchor ?: return
+        sv.post { sv.smoothScrollTo(0, (a.top - dpi(12)).coerceAtLeast(0)) }
+    }
+
+    // --------------------------------------------------------------- Login
+    private fun buildLogin(): View {
+        val (sv, col) = tabScroll()
+        col.addView(tv("SECURE ACCESS", 10f, Palette.cyan, 2).apply { letterSpacing = 0.26f }, lp(WRAP, WRAP, 22))
+        col.addView(tv("Your internet.\nYour rules.", 36f, Palette.text, 3).apply { setLineSpacing(0f, 1.05f) }, lp(WRAP, WRAP, 10))
+        col.addView(tv("با حساب اشتراک وارد شو و کانفیگ‌هایت را مدیریت کن.", 13f, Palette.muted, 0), lp(MATCH, WRAP, 12))
+
+        val card = GlassCard(this, 24f, pad = 16)
+        usernameInput = field("Username", false)
+        passwordInput = field("Password", true)
+        card.addView(usernameInput!!, lp(MATCH, dpi(54)))
+        card.addView(passwordInput!!, lp(MATCH, dpi(54), 10))
+        val btn = primaryButton("Sign in") { login() }
+        loginButton = btn
+        card.addView(btn, lp(MATCH, dpi(54), 16))
+        col.addView(card, lp(MATCH, WRAP, 26))
+        col.addView(
+            tv("احراز هویت از طریق سرویس TIREXNET انجام می‌شود.", 10.5f, Palette.dim, 0).apply { gravity = Gravity.CENTER },
+            lp(MATCH, WRAP, 16)
         )
-        item.setOnClickListener { click() }
-        parent.addView(item, LinearLayout.LayoutParams(0, -1, 1f))
+        return sv
     }
 
-    private fun actionTile(
-        icon: String,
-        title: String,
-        subtitle: String,
-        action: () -> Unit
-    ): LinearLayout {
-        val tile = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setPadding(dp(3), dp(6), dp(3), dp(5))
-            background = bordered(panel, 15, Color.rgb(28, 63, 119))
-            isClickable = true
-            isFocusable = true
+    private fun field(hintText: String, password: Boolean) = EditText(this).apply {
+        hint = hintText
+        textSize = 14.5f
+        setTextColor(Palette.text)
+        setHintTextColor(Palette.dim)
+        setSingleLine(true)
+        setPadding(dpi(16), 0, dpi(16), 0)
+        inputType = if (password) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        background = Palette.glass(this@MainActivity, 16f, Palette.stroke, Color.argb(70, 6, 14, 34), Color.argb(70, 6, 14, 34))
+    }
+
+    private fun primaryButton(label: String, onClick: () -> Unit): TextView = tv(label, 14f, Color.rgb(2, 10, 24), 2).apply {
+        gravity = Gravity.CENTER
+        letterSpacing = 0.06f
+        background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(Palette.cyan, Palette.mint)).apply { cornerRadius = dp(16f) }
+        isClickable = true
+        setOnClickListener { onClick() }
+        pressable(0.97f)
+    }
+
+    private fun ghostButton(label: String, onClick: () -> Unit): TextView = tv(label, 12.5f, Palette.text, 1).apply {
+        gravity = Gravity.CENTER
+        background = Palette.glass(this@MainActivity, 14f)
+        isClickable = true
+        setOnClickListener { onClick() }
+        pressable(0.96f)
+    }
+
+    // =====================================================================
+    // Connection state UI
+    // =====================================================================
+
+    private fun updateConnectionUi() {
+        val title: String; val desc: String; val color: Int; val chip: String
+        when (state) {
+            OrbState.DISCONNECTED -> { title = "Disconnected"; desc = "اتصال برقرار نیست. برای شروع، دکمه را بزن."; color = Palette.muted; chip = "OFFLINE" }
+            OrbState.CONNECTING -> { title = "Connecting"; desc = statusMessage.ifBlank { "در حال راه‌اندازی تونل…" }; color = Palette.cyan; chip = "CONNECTING" }
+            OrbState.CONNECTED -> { title = "Connected"; desc = "تونل توسط هسته‌ی VPN تأیید شد."; color = Palette.mint; chip = "SECURE" }
+            OrbState.DISCONNECTING -> { title = "Disconnecting"; desc = "در حال آزادسازی تونل…"; color = Palette.ice; chip = "CLOSING" }
+            OrbState.FAILED -> { title = "Connection failed"; desc = statusMessage.take(160); color = Palette.red; chip = "ERROR" }
+            OrbState.PERMISSION -> { title = "Permission required"; desc = "برای ساخت تونل، اجازه‌ی VPN را تأیید کن."; color = Palette.amber; chip = "PERMISSION" }
         }
-        tile.addView(
-            text(icon, 22, cyan, true).apply { gravity = Gravity.CENTER },
-            lp(-1, dp(31))
-        )
-        tile.addView(
-            text(title, 10, white, true).apply { gravity = Gravity.CENTER },
-            lp(-1, dp(20))
-        )
-        tile.addView(
-            text(subtitle, 8, muted, false).apply { gravity = Gravity.CENTER; maxLines = 1 },
-            lp(-1, dp(16))
-        )
-        tile.setOnClickListener { action() }
-        return tile
-    }
-
-    private fun statCard(title: String, initial: String, footer: String): LinearLayout {
-        val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(10), dp(8), dp(10), dp(7))
-            background = bordered(panel, 15, Color.rgb(28, 56, 100))
-        }
-        card.addView(text(title, 9, muted, true), lp(-1, dp(20)))
-        val value = text(initial, 15, white, true)
-        if (title == "حجم مصرفی") dataUsedValue = value else expiryValue = value
-        card.addView(value, lp(-1, dp(31)))
-        card.addView(text(footer, 8, muted, false), lp(-1, dp(21)))
-        return card
-    }
-
-    private fun card(): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(dp(13), dp(12), dp(13), dp(12))
-        background = bordered(panel, 20, Color.rgb(24, 54, 100))
-    }
-
-    private fun showConfigEditor(show: Boolean) {
-        if (!::configEditor.isInitialized) return
-        configEditor.visibility = if (show) View.VISIBLE else View.GONE
-        if (show) {
-            configInput.requestFocus()
-            scroll.post { scroll.smoothScrollTo(0, configEditor.top + dp(180)) }
+        orb?.state = state
+        statusTitle?.apply { text = title; setTextColor(color) }
+        statusDesc?.text = desc
+        chipText?.apply { text = chip; setTextColor(color) }
+        chipDot?.background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(color) }
+        statsStatus?.apply { text = title; setTextColor(color) }
+        statsEngine?.text = engineLabelShort()
+        statsLog?.text = statusMessage.ifBlank { "—" }
+        timerView?.visibility = if (state == OrbState.CONNECTED) View.VISIBLE else View.GONE
+        statsDuration?.text = if (state == OrbState.CONNECTED) durationText() else "—"
+        handler.removeCallbacks(tick)
+        if (state == OrbState.CONNECTED && resumed) {
+            timerView?.text = durationText()
+            handler.postDelayed(tick, 1000)
         }
     }
 
-    private fun engineName(engine: ConfigEngine): String = when (engine) {
-        ConfigEngine.XRAY -> "XRAY"
-        ConfigEngine.WIREGUARD -> "WIREGUARD"
-        ConfigEngine.AMNEZIAWG -> "AMNEZIAWG"
-        else -> "NONE"
+    private fun durationText(): String {
+        val s = ((SystemClock.elapsedRealtime() - connectedAtRt) / 1000L).coerceAtLeast(0L)
+        return String.format(Locale.US, "%02d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60)
     }
 
-    private fun profileSummary(rawValue: String): String {
-        val raw = rawValue.trim()
-        if (raw.isBlank()) return "کانفیگی انتخاب نشده است\nاز بخش کانفیگ‌ها، اشتراک را بارگذاری کن."
-
-        val scheme = raw.substringBefore("://", "config").uppercase(Locale.US)
-        var name = ""
-        var host = ""
-        var port = ""
-
-        if (raw.startsWith("vmess://", true)) {
-            val payload = raw.substringAfter("://").substringBefore("#").trim()
-            val padded = payload + "=".repeat((4 - payload.length % 4) % 4)
-            val decoded = runCatching {
-                String(Base64.decode(padded, Base64.DEFAULT), StandardCharsets.UTF_8)
-            }.getOrNull()
-            val json = runCatching { JSONObject(decoded ?: "") }.getOrNull()
-            if (json != null) {
-                name = json.optString("ps", "")
-                host = json.optString("add", "")
-                port = json.optString("port", "")
-            }
-        } else {
-            val uri = runCatching { Uri.parse(raw) }.getOrNull()
-            host = uri?.host.orEmpty()
-            if (uri != null && uri.port > 0) port = uri.port.toString()
-            name = uri?.fragment.orEmpty()
-        }
-
-        if (host.isBlank()) {
-            val endpoint = Regex("(?im)^\\s*Endpoint\\s*=\\s*([^\\s#]+)").find(raw)?.groupValues?.getOrNull(1)
-            if (!endpoint.isNullOrBlank()) {
-                val clean = endpoint.substringAfter("@", endpoint)
-                host = clean.substringBeforeLast(":", clean)
-                if (clean.contains(":")) port = clean.substringAfterLast(":")
-            }
-        }
-
-        val label = name.takeIf { it.isNotBlank() } ?: scheme
-        val server = host.takeIf { it.isNotBlank() } ?: "سرور"
-        val portLine = if (port.isNotBlank()) "  •  پورت " + port else ""
-        return label + "\n" + server + portLine
+    private fun engineLabelShort(): String {
+        val e = prefs.getString("active_engine", "") ?: ""
+        return if (e.isNotBlank()) e else engineName(ConfigDetector.detect(currentConfig()))
     }
 
-    // ------------------------------------------------------------------
-    // VPN engine selection
-    // ------------------------------------------------------------------
+    private fun applyStatus(message: String, active: Boolean) {
+        statusMessage = message
+        val lower = message.lowercase(Locale.US)
+        val next = when {
+            active -> OrbState.CONNECTED
+            listOf("failed", "error", "invalid", "could not", "ناموفق", "خطا").any { lower.contains(it) } -> OrbState.FAILED
+            lower.contains("denied") || lower.contains("revoked") -> OrbState.PERMISSION
+            lower.contains("disconnected") -> OrbState.DISCONNECTED
+            else -> OrbState.CONNECTING
+        }
+        if (next == OrbState.CONNECTED) {
+            if (connectedAtRt == 0L) connectedAtRt = SystemClock.elapsedRealtime()
+        } else connectedAtRt = 0L
+        state = next
+        prefs.edit().putString("connection_message", message).putBoolean("connection_active", active).apply()
+        updateConnectionUi()
+    }
+
+    // =====================================================================
+    // VPN engine selection (same engines and flow as before)
+    // =====================================================================
 
     private fun toggleConnection() {
-        val active = getSharedPreferences("tirexnet", MODE_PRIVATE)
-            .getBoolean("connection_active", false)
-        if (active) disconnect() else connect()
+        when (state) {
+            OrbState.CONNECTED -> disconnect()
+            OrbState.CONNECTING, OrbState.DISCONNECTING -> toast("لطفاً چند لحظه صبر کن.")
+            else -> connect()
+        }
     }
 
     private fun connect() {
-        val raw = if (::configInput.isInitialized) configInput.text.toString().trim() else ""
+        val raw = currentConfig().trim()
         if (raw.isBlank()) {
-            toast("اول یک کانفیگ از بخش «لیست کانفیگ‌ها» انتخاب کن.")
-            showConfigEditor(true)
+            toast("اول یک کانفیگ انتخاب کن.")
+            showTab(1)
             return
         }
-
         val engine = ConfigDetector.detect(raw)
         if (engine == ConfigEngine.UNKNOWN) {
-            toast("فرمت کانفیگ شناسایی نشد. از لینک VLESS / VMess / Trojan / Shadowsocks یا فایل WireGuard استفاده کن.")
-            showConfigEditor(true)
+            toast("فرمت کانفیگ شناسایی نشد. VLESS / VMess / Trojan / Shadowsocks یا WireGuard لازم است.")
+            showTab(1)
             return
         }
-
-        val prefs = getSharedPreferences("tirexnet", MODE_PRIVATE)
-        if (prefs.getBoolean("connection_active", false)) {
-            toast("یک اتصال فعال است؛ ابتدا آن را قطع کن.")
-            return
-        }
-
         pendingRaw = raw
         pendingEngine = engine
         prefs.edit().putString("active_engine", engine.name).apply()
 
         val permission = VpnService.prepare(this)
         if (permission != null) {
+            applyStatus("VPN permission is required.", false)
+            state = OrbState.PERMISSION
+            updateConnectionUi()
+            @Suppress("DEPRECATION")
             startActivityForResult(permission, VPN_REQUEST)
             return
         }
@@ -747,7 +945,7 @@ class MainActivity : Activity() {
     private fun startSelectedEngine() {
         when (pendingEngine) {
             ConfigEngine.XRAY -> {
-                setConnectionStatus("در حال راه‌اندازی هسته Xray…", false)
+                applyStatus("در حال راه‌اندازی هسته Xray…", false)
                 val intent = Intent(this, XrayVpnService::class.java)
                     .setAction(XrayVpnService.ACTION_START)
                     .putExtra(XrayVpnService.EXTRA_CONFIG, pendingRaw)
@@ -755,15 +953,9 @@ class MainActivity : Activity() {
             }
             ConfigEngine.WIREGUARD, ConfigEngine.AMNEZIAWG -> {
                 val amnezia = pendingEngine == ConfigEngine.AMNEZIAWG
-                setConnectionStatus(
-                    if (amnezia) "در حال راه‌اندازی AmneziaWG…" else "در حال راه‌اندازی WireGuard…",
-                    false
-                )
+                applyStatus(if (amnezia) "در حال راه‌اندازی AmneziaWG…" else "در حال راه‌اندازی WireGuard…", false)
                 WgTunnelEngine.start(this, pendingRaw, amnezia) { message, active ->
-                    runOnUiThread {
-                        setConnectionStatus(message, active)
-                        if (!active) toast(message)
-                    }
+                    runOnUiThread { applyStatus(message, active) }
                 }
             }
             else -> toast("یک پروفایل پشتیبانی‌شده انتخاب کن.")
@@ -771,79 +963,38 @@ class MainActivity : Activity() {
     }
 
     private fun disconnect() {
-        val engine = getSharedPreferences("tirexnet", MODE_PRIVATE)
-            .getString("active_engine", "")
+        val engine = prefs.getString("active_engine", "") ?: ""
+        state = OrbState.DISCONNECTING
+        statusMessage = "Disconnecting…"
+        updateConnectionUi()
+        var issued = false
         if (engine == "WIREGUARD" || engine == "AMNEZIAWG" || WgTunnelEngine.isActive) {
-            WgTunnelEngine.stop { message, active ->
-                runOnUiThread {
-                    setConnectionStatus(message, active)
-                    toast(message)
-                }
-            }
+            issued = true
+            WgTunnelEngine.stop { message, active -> runOnUiThread { applyStatus(message, active) } }
         }
         if (engine == "XRAY" || XrayVpnService.isActive) {
-            startService(
-                Intent(this, XrayVpnService::class.java).setAction(XrayVpnService.ACTION_STOP)
-            )
+            issued = true
+            startService(Intent(this, XrayVpnService::class.java).setAction(XrayVpnService.ACTION_STOP))
         }
-        setConnectionStatus("Disconnected.", false)
+        // Safety net so the UI can never hang in "Disconnecting".
+        handler.postDelayed({
+            if (state == OrbState.DISCONNECTING) applyStatus("Disconnected.", false)
+        }, if (issued) 6000L else 300L)
     }
-
-    private fun setConnectionStatus(message: String, active: Boolean) {
-        val lower = message.lowercase(Locale.US)
-        val failed = !active && listOf("failed", "error", "invalid", "denied", "could not", "ناموفق", "خطا").any {
-            lower.contains(it)
-        }
-        if (::status.isInitialized) {
-            status.text = (if (active) "●  " else if (failed) "⚠  " else "○  ") + message
-            status.setTextColor(if (active) mint else if (failed) red else muted)
-            status.background = bordered(
-                panel,
-                12,
-                if (active) mint else if (failed) red else Color.rgb(42, 64, 102)
-            )
-        }
-        powerControl?.let {
-            it.setTextColor(if (active) mint else cyan)
-            it.background = powerBackground(active)
-        }
-        getSharedPreferences("tirexnet", MODE_PRIVATE).edit()
-            .putString("connection_message", message)
-            .putBoolean("connection_active", active)
-            .apply()
-    }
-
-    private fun powerBackground(active: Boolean): GradientDrawable =
-        GradientDrawable(
-            GradientDrawable.Orientation.TL_BR,
-            if (active) intArrayOf(Color.rgb(0, 86, 75), Color.rgb(12, 30, 78))
-            else intArrayOf(Color.rgb(5, 38, 83), Color.rgb(35, 19, 93))
-        ).apply {
-            shape = GradientDrawable.OVAL
-            setStroke(dp(2), if (active) mint else blue)
-        }
-
-    // ------------------------------------------------------------------
-    // Clipboard, file import, and permission result
-    // ------------------------------------------------------------------
 
     @Suppress("DEPRECATION")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == VPN_REQUEST) {
-            if (resultCode == RESULT_OK) {
-                startSelectedEngine()
-            } else {
-                setConnectionStatus("VPN permission was denied.", false)
-                toast("اجازه VPN لازم است.")
+            if (resultCode == RESULT_OK) startSelectedEngine()
+            else {
+                applyStatus("VPN permission was denied.", false)
+                toast("اجازه‌ی VPN لازم است.")
             }
         } else if (requestCode == PICK_CONFIG && resultCode == RESULT_OK) {
             val uri = data?.data ?: return
             try {
-                contentResolver.openInputStream(uri)?.use {
-                    configInput.setText(readLimited(it))
-                }
-                showConfigEditor(true)
+                contentResolver.openInputStream(uri)?.use { setConfig(readLimited(it)) }
                 toast("کانفیگ وارد شد.")
             } catch (e: Exception) {
                 toast("خطا در واردکردن فایل: " + (e.message ?: "unknown error"))
@@ -851,21 +1002,90 @@ class MainActivity : Activity() {
         }
     }
 
+    // =====================================================================
+    // Config helpers
+    // =====================================================================
+
+    private fun currentConfig(): String = prefs.getString("last_config", "") ?: ""
+
+    private fun setConfig(raw: String) {
+        prefs.edit().putString("last_config", raw).apply()
+        settingConfig = true
+        configInput?.setText(raw)
+        settingConfig = false
+        onConfigChanged()
+        if (serversState == ServersState.READY) rebuildServerList(-1)
+    }
+
+    private fun onConfigChanged() {
+        editorEngine?.text = engineLabel(currentConfig())
+        bindServerSummary()
+        statsEngine?.text = engineLabelShort()
+    }
+
+    private fun engineLabel(raw: String) = "Detected engine: " + engineName(ConfigDetector.detect(raw))
+
+    private fun engineName(engine: ConfigEngine): String = when (engine) {
+        ConfigEngine.XRAY -> "XRAY"
+        ConfigEngine.WIREGUARD -> "WIREGUARD"
+        ConfigEngine.AMNEZIAWG -> "AMNEZIAWG"
+        else -> "NONE"
+    }
+
+    private fun bindServerSummary() {
+        val raw = currentConfig().trim()
+        if (raw.isBlank()) {
+            homeServerName?.text = "No server selected"
+            homeServerMeta?.text = "برای انتخاب سرور بزن"
+            return
+        }
+        val ep = endpointOf(raw)
+        homeServerName?.text = ep.name
+        homeServerMeta?.text = listOf(engineName(ConfigDetector.detect(raw)), ep.host, ep.port).filter { it.isNotBlank() }.joinToString("  •  ")
+    }
+
+    private fun endpointOf(rawValue: String): Endpoint {
+        val raw = rawValue.trim()
+        val scheme = raw.substringBefore("://", "config").uppercase(Locale.US)
+        var name = ""; var host = ""; var port = ""
+        if (raw.startsWith("vmess://", true)) {
+            val payload = raw.substringAfter("://").substringBefore("#").trim()
+            val padded = payload + "=".repeat((4 - payload.length % 4) % 4)
+            val decoded = runCatching { String(Base64.decode(padded, Base64.DEFAULT), StandardCharsets.UTF_8) }.getOrNull()
+            val json = runCatching { JSONObject(decoded ?: "") }.getOrNull()
+            if (json != null) {
+                name = json.optString("ps", ""); host = json.optString("add", ""); port = json.optString("port", "")
+            }
+        } else {
+            val uri = runCatching { Uri.parse(raw) }.getOrNull()
+            host = uri?.host.orEmpty()
+            if (uri != null && uri.port > 0) port = uri.port.toString()
+            name = uri?.fragment.orEmpty()
+        }
+        if (host.isBlank()) {
+            val endpoint = Regex("(?im)^\\s*Endpoint\\s*=\\s*([^\\s#]+)").find(raw)?.groupValues?.getOrNull(1)
+            if (!endpoint.isNullOrBlank()) {
+                val clean = endpoint.substringAfter("@", endpoint)
+                host = clean.substringBeforeLast(":", clean)
+                if (clean.contains(":")) port = clean.substringAfterLast(":")
+            }
+        }
+        return Endpoint(name.ifBlank { scheme }, host, port)
+    }
+
     private fun pasteClipboard() {
         try {
             val manager = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             val clip: ClipData? = manager.primaryClip
-            if (clip == null || clip.itemCount == 0) {
-                toast("کلیپ‌بورد خالی است.")
-                return
-            }
-            configInput.setText(clip.getItemAt(0).coerceToText(this)?.toString().orEmpty())
-            showConfigEditor(true)
+            if (clip == null || clip.itemCount == 0) { toast("کلیپ‌بورد خالی است."); return }
+            setConfig(clip.getItemAt(0).coerceToText(this)?.toString().orEmpty().trim())
+            toast("کانفیگ از کلیپ‌بورد وارد شد.")
         } catch (_: Exception) {
             toast("خواندن کلیپ‌بورد ناموفق بود.")
         }
     }
 
+    @Suppress("DEPRECATION")
     private fun pickFile() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
@@ -888,167 +1108,203 @@ class MainActivity : Activity() {
         return out.toString("UTF-8").trim()
     }
 
-    // ------------------------------------------------------------------
-    // Login, account, and config subscription APIs
-    // ------------------------------------------------------------------
+    private fun clearConfig() {
+        AlertDialog.Builder(this)
+            .setMessage("کانفیگ ذخیره‌شده روی این گوشی پاک شود؟")
+            .setPositiveButton("پاک کن") { _, _ -> setConfig(""); toast("کانفیگ پاک شد.") }
+            .setNegativeButton("لغو", null)
+            .show()
+    }
+
+    // =====================================================================
+    // Backend: login, account, configs (endpoints and formats unchanged)
+    // =====================================================================
 
     private fun login() {
-        val user = usernameInput.text.toString().trim()
-        val pass = passwordInput.text.toString()
-        if (user.isBlank() || pass.isBlank()) {
-            toast("نام کاربری و رمز عبور را وارد کن.")
-            return
-        }
-        toast("در حال ورود امن…")
+        val user = usernameInput?.text?.toString().orEmpty().trim()
+        val pass = passwordInput?.text?.toString().orEmpty()
+        if (user.isBlank() || pass.isBlank()) { toast("نام کاربری و رمز عبور را وارد کن."); return }
+        loginButton?.apply { text = "Signing in…"; alpha = 0.6f; isEnabled = false }
         io.execute {
             try {
-                val response = request(
-                    "POST",
-                    "/api/login",
-                    null,
-                    JSONObject().put("username", user).put("password", pass)
-                )
+                val response = request("POST", "/api/login", null, JSONObject().put("username", user).put("password", pass))
                 val newToken = response.optString("token")
                 require(newToken.isNotBlank()) { response.optString("error", "Login token is missing.") }
-                getSharedPreferences("tirexnet", MODE_PRIVATE).edit().putString("token", newToken).apply()
+                prefs.edit().putString("token", newToken).apply()
                 token = newToken
                 runOnUiThread {
+                    currentTab = 0
+                    serversState = ServersState.IDLE
+                    servers = emptyList()
                     render()
                     loadAccount()
                 }
             } catch (e: Exception) {
-                runOnUiThread { toast("ورود ناموفق بود: " + (e.message ?: "network error")) }
+                runOnUiThread {
+                    loginButton?.apply { text = "Sign in"; alpha = 1f; isEnabled = true }
+                    toast("ورود ناموفق بود: " + (e.message ?: "network error"))
+                }
             }
         }
     }
 
-    private fun loadAccount() {
+    private fun loadAccount(manual: Boolean = false) {
         if (token.isBlank()) return
+        val t = token
         io.execute {
             try {
-                val data = request("GET", "/api/me", token, null)
+                val data = request("GET", "/api/me", t, null)
                 val sub = data.optJSONObject("subscription") ?: JSONObject()
                 val appUser = data.optString("username", "Account")
                 val panelUser = sub.optString("username", "—")
                 val panelStatus = sub.optString("status", "Unknown")
-                val used = formatBytes(sub.optLong("usedTraffic", 0L))
+                val used = sub.optLong("usedTraffic", 0L)
                 val cap = sub.optLong("dataLimit", 0L)
                 val expire = if (sub.isNull("expire")) "بدون تاریخ پایان" else sub.optString("expire", "—")
                 runOnUiThread {
-                    if (::accountInfo.isInitialized) {
-                        accountInfo.text = appUser + "  •  " + panelStatus
-                    }
-                    if (::dataUsedValue.isInitialized) {
-                        dataUsedValue.text = if (cap > 0) used + " / " + formatBytes(cap) else used
-                    }
-                    if (::expiryValue.isInitialized) {
-                        expiryValue.text = if (expire.length > 18) expire.take(18) else expire
-                    }
-                    if (panelUser.isNotBlank() && panelUser != "—") {
-                        // Keep the panel username visible without showing a false connection state.
-                        if (::accountInfo.isInitialized && appUser.isBlank()) accountInfo.text = panelUser + " • " + panelStatus
-                    }
+                    accUser = appUser; accStatus = panelStatus; accPanelUser = panelUser
+                    usedBytes = used; limitBytes = cap; expireText = expire
+                    accountError = null
+                    bindAccount()
+                    if (manual) toast("اطلاعات حساب به‌روز شد.")
                 }
             } catch (e: Exception) {
                 if (e.message.orEmpty().contains("401")) {
-                    getSharedPreferences("tirexnet", MODE_PRIVATE).edit().remove("token").apply()
+                    prefs.edit().remove("token").apply()
                     token = ""
-                    runOnUiThread {
-                        render()
-                        toast("نشست منقضی شده؛ دوباره وارد شو.")
-                    }
+                    runOnUiThread { render(); toast("نشست منقضی شده؛ دوباره وارد شو.") }
                 } else {
-                    runOnUiThread { toast("به‌روزرسانی اشتراک ناموفق بود: " + (e.message ?: "network error")) }
+                    runOnUiThread {
+                        accountError = e.message ?: "network error"
+                        bindAccount()
+                        toast("به‌روزرسانی اشتراک ناموفق بود: " + accountError)
+                    }
                 }
             }
         }
     }
 
-    private fun loadProfiles() {
-        if (token.isBlank()) {
-            toast("ابتدا وارد حساب شو.")
-            return
-        }
-        toast("در حال دریافت کانفیگ‌های اشتراک…")
+    private fun loadServers() {
+        if (token.isBlank()) { toast("ابتدا وارد حساب شو."); return }
+        serversState = ServersState.LOADING
+        rebuildServerList(-1)
+        val t = token
         io.execute {
             try {
-                val data = request("GET", "/api/me/configs", token, null)
+                val data = request("GET", "/api/me/configs", t, null)
                 val arr = data.optJSONArray("configs")
                     ?: data.optJSONArray("profiles")
                     ?: data.optJSONArray("items")
                     ?: throw IllegalStateException("Worker response has no configs/profiles array.")
-                val names = ArrayList<String>()
-                val configs = ArrayList<String>()
+                val out = ArrayList<ServerItem>()
                 for (i in 0 until arr.length()) {
                     val item = arr.opt(i)
                     val raw = when (item) {
-                        is JSONObject -> item.optString(
-                            "config",
-                            item.optString("uri", item.optString("raw", item.optString("content", item.optString("link", ""))))
-                        )
+                        is JSONObject -> item.optString("config", item.optString("uri", item.optString("raw", item.optString("content", item.optString("link", "")))))
                         is String -> item
                         else -> ""
                     }.trim()
                     if (raw.isNotBlank()) {
-                        configs.add(raw)
-                        val itemName = (item as? JSONObject)?.optString("name", "")?.takeIf { it.isNotBlank() }
-                        val protocol = engineName(ConfigDetector.detect(raw))
-                        names.add((itemName ?: "پروفایل " + configs.size) + "  •  " + protocol)
+                        val ep = endpointOf(raw)
+                        val given = (item as? JSONObject)?.optString("name", "")?.takeIf { it.isNotBlank() }
+                        out.add(ServerItem(given ?: ep.name.ifBlank { "Profile " + (out.size + 1) }, raw, ConfigDetector.detect(raw), ep.host, ep.port))
                     }
                 }
-                runOnUiThread {
-                    if (configs.isEmpty()) {
-                        toast("اشتراک هیچ کانفیگ قابل‌استفاده‌ای برنگرداند.")
-                    } else {
-                        AlertDialog.Builder(this)
-                            .setTitle("انتخاب کانفیگ")
-                            .setItems(names.toTypedArray()) { _, which ->
-                                configInput.setText(configs[which])
-                                showConfigEditor(false)
-                                scroll.smoothScrollTo(0, 0)
-                                toast("کانفیگ انتخاب شد؛ روی دکمه اتصال بزن.")
-                            }
-                            .setNegativeButton("بستن", null)
-                            .show()
-                    }
-                }
+                runOnUiThread { servers = out; serversState = ServersState.READY; rebuildServerList(-1) }
             } catch (e: Exception) {
-                runOnUiThread {
-                    toast("دریافت کانفیگ‌ها ناموفق بود: " + (e.message ?: "endpoint unavailable"))
-                }
+                runOnUiThread { serversError = e.message ?: "endpoint unavailable"; serversState = ServersState.ERROR; rebuildServerList(-1) }
             }
         }
     }
 
     private fun request(method: String, path: String, bearer: String?, body: JSONObject?): JSONObject {
         val c = URL(api + path).openConnection() as HttpURLConnection
-        c.requestMethod = method
-        c.connectTimeout = 15000
-        c.readTimeout = 15000
-        c.setRequestProperty("Accept", "application/json")
-        if (!bearer.isNullOrBlank()) c.setRequestProperty("Authorization", "Bearer " + bearer)
-        if (body != null) {
-            c.doOutput = true
-            c.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            c.outputStream.use {
-                it.write(body.toString().toByteArray(StandardCharsets.UTF_8))
+        try {
+            c.requestMethod = method
+            c.connectTimeout = 15000
+            c.readTimeout = 15000
+            c.setRequestProperty("Accept", "application/json")
+            if (!bearer.isNullOrBlank()) c.setRequestProperty("Authorization", "Bearer $bearer")
+            if (body != null) {
+                c.doOutput = true
+                c.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                c.outputStream.use { it.write(body.toString().toByteArray(StandardCharsets.UTF_8)) }
             }
+            val code = c.responseCode
+            val responseText = (if (code in 200..299) c.inputStream else c.errorStream)?.bufferedReader()?.use { it.readText() }.orEmpty()
+            if (code !in 200..299) throw IllegalStateException("HTTP $code: $responseText")
+            return JSONObject(responseText)
+        } finally {
+            c.disconnect()
         }
-        val code = c.responseCode
-        val responseText = (
-            if (code in 200..299) c.inputStream else c.errorStream
-        )?.bufferedReader()?.use { it.readText() }.orEmpty()
-        c.disconnect()
-        if (code !in 200..299) throw IllegalStateException("HTTP " + code + ": " + responseText)
-        return JSONObject(responseText)
+    }
+
+    private fun confirmLogout() {
+        AlertDialog.Builder(this)
+            .setMessage("از حساب خارج می‌شوی؟")
+            .setPositiveButton("خروج") { _, _ -> logout() }
+            .setNegativeButton("لغو", null)
+            .show()
     }
 
     private fun logout() {
         val old = token
         token = ""
-        getSharedPreferences("tirexnet", MODE_PRIVATE).edit().remove("token").apply()
+        prefs.edit().remove("token").apply()
+        accUser = ""; accStatus = ""; accPanelUser = ""; usedBytes = -1L; limitBytes = 0L; expireText = ""
+        servers = emptyList(); serversState = ServersState.IDLE; currentTab = 0
         io.execute { runCatching { request("POST", "/api/logout", old, JSONObject()) } }
         render()
+    }
+
+    // =====================================================================
+    // Account binding
+    // =====================================================================
+
+    private fun bindAccount() {
+        val unavailable = if (accountError != null) "Unavailable" else "—"
+        val name = accUser.ifBlank { unavailable }
+        homeAccName?.text = name
+        homeAccStatus?.text = accStatus.ifBlank { "" }
+        val exp = if (expireText.isBlank()) unavailable else expireText.take(24)
+        homeExpiry?.text = exp
+        statsExpiry?.text = exp
+        profExpiry?.text = exp
+        profName?.text = name
+        profAvatar?.text = (accUser.firstOrNull()?.uppercaseChar() ?: 'T').toString()
+        profStatus?.text = accStatus.uppercase(Locale.US)
+        profPanel?.text = accPanelUser.ifBlank { unavailable }
+        val usageStr = when {
+            usedBytes < 0 -> unavailable
+            limitBytes > 0 -> formatBytes(usedBytes) + " / " + formatBytes(limitBytes)
+            else -> formatBytes(usedBytes)
+        }
+        profUsage?.text = usageStr
+        if (usedBytes >= 0) animateUsage(usageStr) else homeUsageText?.text = unavailable
+        val fraction = if (usedBytes >= 0 && limitBytes > 0) (usedBytes.toDouble() / limitBytes).toFloat() else null
+        homeUsageMeter?.set(fraction ?: 0f)
+        statsRing?.update(
+            fraction,
+            if (usedBytes >= 0) formatBytes(usedBytes) else unavailable,
+            if (usedBytes < 0) "" else if (limitBytes > 0) "of " + formatBytes(limitBytes) else "no limit reported"
+        )
+    }
+
+    private fun animateUsage(finalText: String) {
+        val tvv = homeUsageText ?: return
+        val target = usedBytes
+        val start = shownUsed
+        shownUsed = target
+        if (start == target) { tvv.text = finalText; return }
+        ValueAnimator.ofFloat(start.toFloat(), target.toFloat()).apply {
+            duration = 700
+            interpolator = DecelerateInterpolator()
+            addUpdateListener {
+                val v = (it.animatedValue as Float).toLong()
+                tvv.text = if (limitBytes > 0) formatBytes(v) + " / " + formatBytes(limitBytes) else formatBytes(v)
+            }
+            start()
+        }
     }
 
     private fun formatBytes(bytes: Long): String = when {
@@ -1058,82 +1314,47 @@ class MainActivity : Activity() {
         else -> String.format(Locale.US, "%.2f GB", bytes / (1024.0 * 1024 * 1024))
     }
 
-    // ------------------------------------------------------------------
-    // Reusable visual helpers
-    // ------------------------------------------------------------------
+    // =====================================================================
+    // Settings actions
+    // =====================================================================
 
-    private fun input(hintText: String) = EditText(this).apply {
-        hint = hintText
-        textSize = 14f
-        setTextColor(white)
-        setHintTextColor(muted)
-        setSingleLine(true)
-        setPadding(dp(14), 0, dp(14), 0)
-        background = bordered(panel, 14, Color.rgb(43, 76, 127))
+    private fun versionName(): String = runCatching {
+        @Suppress("DEPRECATION")
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "—"
+    }.getOrDefault("—")
+
+    private fun copyDiagnostics() {
+        val text = "TIREXNET " + versionName() + "\n" +
+            "state=" + state.name + "\n" +
+            "engine=" + engineLabelShort() + "\n" +
+            "message=" + statusMessage + "\n" +
+            "android=" + Build.VERSION.SDK_INT + " device=" + Build.MODEL
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        cm.setPrimaryClip(ClipData.newPlainText("TIREXNET diagnostics", text))
+        toast("اطلاعات عیب‌یابی کپی شد.")
     }
 
-    private fun button(label: String, primary: Boolean) = Button(this).apply {
-        text = label
-        setAllCaps(false)
-        textSize = 12f
-        typeface = Typeface.DEFAULT_BOLD
-        minHeight = dp(42)
-        setTextColor(if (primary) Color.rgb(1, 13, 30) else white)
-        background = if (primary) {
-            gradient(cyan, mint, 14)
-        } else {
-            bordered(panel2, 14, Color.rgb(40, 72, 125))
-        }
-        setPadding(dp(6), 0, dp(6), 0)
-        stateListAnimator = null
-        elevation = dp(1).toFloat()
+    private fun showPrivacy() {
+        AlertDialog.Builder(this)
+            .setTitle("Privacy")
+            .setMessage(
+                "• فقط توکن نشست و کانفیگ انتخاب‌شده روی همین گوشی ذخیره می‌شود.\n" +
+                    "• رمز عبور هرگز ذخیره نمی‌شود.\n" +
+                    "• اطلاعات عیب‌یابی شامل رمز یا توکن نیست."
+            )
+            .setPositiveButton("باشه", null)
+            .show()
     }
 
-    private fun text(value: String, sp: Int, color: Int, bold: Boolean) = TextView(this).apply {
-        text = value
-        textSize = sp.toFloat()
-        setTextColor(color)
-        gravity = Gravity.CENTER_VERTICAL
-        if (bold) typeface = Typeface.DEFAULT_BOLD
-    }
+    // =====================================================================
+    // Small helpers
+    // =====================================================================
 
-    private fun lp(w: Int, h: Int) = LinearLayout.LayoutParams(w, h)
-
-    private fun gap(parent: LinearLayout, h: Int) {
-        parent.addView(View(this), lp(-1, dp(h)))
-    }
-
-    private fun dp(v: Int): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
-
-    private fun shape(color: Int, radius: Int) = GradientDrawable().apply {
-        setColor(color)
-        cornerRadius = dp(radius).toFloat()
-    }
-
-    private fun bordered(color: Int, radius: Int, stroke: Int) = shape(color, radius).apply {
-        setStroke(dp(1), stroke)
-    }
-
-    private fun bordered(drawable: GradientDrawable, radius: Int, stroke: Int) = drawable.apply {
-        cornerRadius = dp(radius).toFloat()
-        setStroke(dp(1), stroke)
-    }
-
-    private fun gradient(start: Int, end: Int, radius: Int) = GradientDrawable(
-        GradientDrawable.Orientation.TL_BR,
-        intArrayOf(start, end)
-    ).apply {
-        cornerRadius = dp(radius).toFloat()
-    }
+    private fun lp(w: Int, h: Int, top: Int = 0, bottom: Int = 0, left: Int = 0, right: Int = 0): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(w, h).apply { setMargins(dpi(left), dpi(top), dpi(right), dpi(bottom)) }
 
     private fun toast(message: String) {
         Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-    }
-
-    override fun onDestroy() {
-        runCatching { unregisterReceiver(receiver) }
-        io.shutdown()
-        super.onDestroy()
     }
 
     companion object {
