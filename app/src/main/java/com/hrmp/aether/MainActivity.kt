@@ -646,6 +646,10 @@ class MainActivity : Activity() {
         return sv
     }
 
+    private fun ensureServersLoaded() {
+        if (serversState == ServersState.IDLE && token.isNotBlank()) loadServers()
+    }
+
     private fun rebuildServerList(popIndex: Int) {
         val box = serverListBox ?: return
         box.removeAllViews()
