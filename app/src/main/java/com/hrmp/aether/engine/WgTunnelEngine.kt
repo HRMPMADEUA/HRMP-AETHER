@@ -24,9 +24,7 @@ object WgTunnelEngine {
         scope.launch {
             try {
                 val app = context.applicationContext
-                var parsed = Config.parseQuickString(raw)
-                if (amnezia) parsed = AmneziaConfigNormalizer.ensureAmneziaCompatibility(parsed)
-                parsed.validate()
+                val parsed = buildConfig(raw, amnezia)
                 if (backend == null) {
                     monitor = AndroidNetworkMonitor(app)
                     backend = TunnelBackend(scope, TirexApplicationProvider(app), monitor!!)
@@ -45,8 +43,26 @@ object WgTunnelEngine {
                 withContext(Dispatchers.Main) { callback(if (amnezia) "AmneziaWG connected." else "WireGuard connected.", true) }
             } catch (e: Throwable) {
                 isActive = false
-                withContext(Dispatchers.Main) { callback("WireGuard / AmneziaWG failed: ${e.message ?: e.javaClass.simpleName}", false) }
+                withContext(Dispatchers.Main) { callback("WireGuard / AmneziaWG failed: " + ConfigSanitizer.redact(e.message ?: e.javaClass.simpleName), false) }
             }
+        }
+    }
+
+    /**
+     * Plain WireGuard is parsed untouched. AmneziaWG configs are sanitized first (invalid I1..I5
+     * signature values are dropped). If the engine still reports INVALID_SIGNATURE_FORMAT after the
+     * compatibility normalizer ran, the config is retried once without the normalizer so we can tell
+     * whether the normalizer is the one introducing the value.
+     */
+    private fun buildConfig(raw: String, amnezia: Boolean): Config {
+        if (!amnezia) return Config.parseQuickString(raw).also { it.validate() }
+        val clean = ConfigSanitizer.sanitizeAmnezia(raw).text
+        return try {
+            AmneziaConfigNormalizer.ensureAmneziaCompatibility(Config.parseQuickString(clean)).also { it.validate() }
+        } catch (e: Throwable) {
+            if (e.message.orEmpty().contains("INVALID_SIGNATURE_FORMAT")) {
+                Config.parseQuickString(clean).also { it.validate() }
+            } else throw e
         }
     }
 
