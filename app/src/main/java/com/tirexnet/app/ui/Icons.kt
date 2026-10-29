@@ -12,7 +12,7 @@ import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
 
-enum class Icon { HOME, SERVERS, STATS, PROFILE, POWER, REFRESH, GEAR, CHEVRON, SEARCH, LOGOUT, COPY, TRASH, CHECK, INFO, SHIELD }
+enum class Icon { HOME, SERVERS, STATS, PROFILE, POWER, REFRESH, GEAR, CHEVRON, SEARCH, LOGOUT, COPY, TRASH, CHECK, INFO, SHIELD, SUN, MOON, PLUS, GLOBE, BACK, FILE, PASTE, EDIT, BOLT }
 
 /** Vector icons drawn with plain strokes. `s` is the half extent; paint must be STROKE with round caps. */
 object Icons {
@@ -127,6 +127,62 @@ object Icons {
                 path.moveTo(0f, -.95f * s); path.lineTo(.8f * s, -.6f * s); path.lineTo(.7f * s, .3f * s)
                 path.quadTo(.5f * s, .75f * s, 0f, .98f * s); path.quadTo(-.5f * s, .75f * s, -.7f * s, .3f * s)
                 path.lineTo(-.8f * s, -.6f * s); path.close()
+                c.drawPath(path, p)
+            }
+            Icon.SUN -> {
+                c.drawCircle(0f, 0f, .38f * s, p)
+                for (i in 0 until 8) {
+                    val a = Math.toRadians(i * 45.0)
+                    val ca = cos(a).toFloat(); val sa = sin(a).toFloat()
+                    c.drawLine(ca * .62f * s, sa * .62f * s, ca * .92f * s, sa * .92f * s, p)
+                }
+            }
+            Icon.MOON -> {
+                path.reset()
+                path.moveTo(.35f * s, -.85f * s)
+                path.cubicTo(-.7f * s, -.75f * s, -.95f * s, .55f * s, -.05f * s, .85f * s)
+                path.cubicTo(.5f * s, 1.0f * s, .95f * s, .6f * s, .9f * s, .25f * s)
+                path.cubicTo(.3f * s, .4f * s, -.1f * s, -.3f * s, .35f * s, -.85f * s)
+                c.drawPath(path, p)
+            }
+            Icon.PLUS -> {
+                c.drawLine(-.7f * s, 0f, .7f * s, 0f, p)
+                c.drawLine(0f, -.7f * s, 0f, .7f * s, p)
+            }
+            Icon.GLOBE -> {
+                c.drawCircle(0f, 0f, .9f * s, p)
+                c.drawLine(-.9f * s, 0f, .9f * s, 0f, p)
+                rect.set(-.4f * s, -.9f * s, .4f * s, .9f * s)
+                c.drawOval(rect, p)
+            }
+            Icon.BACK -> {
+                path.reset()
+                path.moveTo(.2f * s, -.75f * s); path.lineTo(-.5f * s, 0f); path.lineTo(.2f * s, .75f * s)
+                c.drawPath(path, p)
+            }
+            Icon.FILE -> {
+                path.reset()
+                path.moveTo(-.55f * s, -.9f * s); path.lineTo(.2f * s, -.9f * s); path.lineTo(.6f * s, -.5f * s)
+                path.lineTo(.6f * s, .9f * s); path.lineTo(-.55f * s, .9f * s); path.close()
+                path.moveTo(.2f * s, -.9f * s); path.lineTo(.2f * s, -.5f * s); path.lineTo(.6f * s, -.5f * s)
+                c.drawPath(path, p)
+            }
+            Icon.PASTE -> {
+                rect.set(-.7f * s, -.75f * s, .7f * s, .95f * s)
+                c.drawRoundRect(rect, .14f * s, .14f * s, p)
+                rect.set(-.3f * s, -.95f * s, .3f * s, -.55f * s)
+                c.drawRoundRect(rect, .1f * s, .1f * s, p)
+            }
+            Icon.EDIT -> {
+                path.reset()
+                path.moveTo(-.7f * s, .8f * s); path.lineTo(-.7f * s, .4f * s); path.lineTo(.4f * s, -.7f * s)
+                path.lineTo(.8f * s, -.3f * s); path.lineTo(-.3f * s, .8f * s); path.close()
+                c.drawPath(path, p)
+            }
+            Icon.BOLT -> {
+                path.reset()
+                path.moveTo(.2f * s, -.95f * s); path.lineTo(-.6f * s, .15f * s); path.lineTo(0f, .15f * s)
+                path.lineTo(-.2f * s, .95f * s); path.lineTo(.6f * s, -.2f * s); path.lineTo(0f, -.2f * s); path.close()
                 c.drawPath(path, p)
             }
         }
