@@ -9,23 +9,32 @@ import android.view.View
 import android.widget.TextView
 
 object Palette {
-    val bg0 = Color.rgb(2, 5, 14)
-    val bg1 = Color.rgb(5, 11, 28)
-    val bg2 = Color.rgb(10, 20, 48)
-    val cyan = Color.rgb(0, 224, 255)
-    val ice = Color.rgb(160, 222, 255)
-    val violet = Color.rgb(142, 96, 255)
-    val blue = Color.rgb(48, 118, 255)
-    val mint = Color.rgb(0, 238, 190)
-    val amber = Color.rgb(255, 184, 77)
-    val red = Color.rgb(255, 92, 120)
-    val text = Color.rgb(238, 245, 255)
-    val muted = Color.rgb(138, 157, 190)
-    val dim = Color.rgb(86, 104, 138)
-    val glassTop = Color.argb(52, 150, 200, 255)
-    val glassBottom = Color.argb(16, 90, 120, 230)
-    val stroke = Color.argb(64, 130, 190, 255)
-    val strokeActive = Color.argb(190, 0, 224, 255)
+    /** Single source of truth for the theme. Changed only by MainActivity.applyTheme(), which re-renders. */
+    @Volatile var dark: Boolean = true
+
+    private fun pick(d: Int, l: Int) = if (dark) d else l
+
+    val bg0 get() = pick(Color.rgb(2, 5, 14), Color.rgb(244, 247, 253))
+    val bg1 get() = pick(Color.rgb(5, 11, 28), Color.rgb(228, 236, 250))
+    val bg2 get() = pick(Color.rgb(10, 20, 48), Color.rgb(214, 226, 247))
+    val cyan get() = pick(Color.rgb(0, 224, 255), Color.rgb(0, 140, 190))
+    val ice get() = pick(Color.rgb(160, 222, 255), Color.rgb(40, 96, 160))
+    val violet get() = pick(Color.rgb(142, 96, 255), Color.rgb(104, 60, 220))
+    val blue get() = pick(Color.rgb(48, 118, 255), Color.rgb(30, 90, 220))
+    val mint get() = pick(Color.rgb(0, 238, 190), Color.rgb(0, 150, 118))
+    val amber get() = pick(Color.rgb(255, 184, 77), Color.rgb(200, 120, 0))
+    val red get() = pick(Color.rgb(255, 92, 120), Color.rgb(212, 40, 72))
+    val text get() = pick(Color.rgb(238, 245, 255), Color.rgb(14, 24, 48))
+    val muted get() = pick(Color.rgb(138, 157, 190), Color.rgb(84, 100, 130))
+    val dim get() = pick(Color.rgb(86, 104, 138), Color.rgb(128, 142, 168))
+    val glassTop get() = pick(Color.argb(52, 150, 200, 255), Color.argb(235, 255, 255, 255))
+    val glassBottom get() = pick(Color.argb(16, 90, 120, 230), Color.argb(200, 238, 244, 255))
+    val stroke get() = pick(Color.argb(64, 130, 190, 255), Color.argb(90, 70, 110, 180))
+    val strokeActive get() = pick(Color.argb(190, 0, 224, 255), Color.argb(220, 0, 140, 190))
+    /** Fill behind text inputs. */
+    val fieldFill get() = pick(Color.argb(70, 6, 14, 34), Color.argb(255, 255, 255, 255))
+    /** Text colour on top of the cyan->mint primary button. */
+    val onPrimary get() = Color.rgb(2, 10, 24)
 
     fun glass(
         ctx: Context,
