@@ -10,6 +10,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -24,13 +25,15 @@ import android.text.Editable
 import android.text.InputType
 import android.text.TextUtils
 import android.text.TextWatcher
-import android.util.Base64
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.animation.DecelerateInterpolator
+import android.view.inputmethod.EditorInfo
 import android.widget.EditText
+import android.widget.HorizontalScrollView
+import android.widget.ProgressBar
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -38,6 +41,17 @@ import android.widget.TextView
 import android.widget.Toast
 import com.tirexnet.app.engine.ConfigDetector
 import com.tirexnet.app.engine.ConfigEngine
+import com.tirexnet.app.engine.ConfigSanitizer
+import com.tirexnet.app.engine.FieldKind
+import com.tirexnet.app.engine.ManualOutcome
+import com.tirexnet.app.engine.ManualProfile
+import com.tirexnet.app.engine.ManualProtocol
+import com.tirexnet.app.engine.PingKind
+import com.tirexnet.app.engine.PingResult
+import com.tirexnet.app.engine.PingTester
+import com.tirexnet.app.engine.ProfileMeta
+import com.tirexnet.app.engine.ProfileParser
+import com.tirexnet.app.engine.TrafficMonitor
 import com.tirexnet.app.engine.WgTunnelEngine
 import com.tirexnet.app.engine.XrayVpnService
 import com.tirexnet.app.ui.AmbientBackground
@@ -69,8 +83,12 @@ import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
 
-    private data class ServerItem(val name: String, val raw: String, val engine: ConfigEngine, val host: String, val port: String, val local: Boolean = false)
-    private data class Endpoint(val name: String, val host: String, val port: String)
+    /**
+     * [meta] holds the endpoint (host/port) that engines and the latency probe need.
+     * It must never be rendered. [country] is an ISO-3166 alpha-2 code from trusted metadata, or "".
+     */
+    private data class ServerItem(val name: String, val raw: String, val engine: ConfigEngine, val meta: ProfileMeta, val local: Boolean = false, val country: String = "")
+    private class PingHolder(val text: TextView, val button: FrameLayout, val spinner: ProgressBar, val icon: IconView)
     private enum class ServersState { IDLE, LOADING, ERROR, READY }
 
     private val api = "https://hrmp.hrmpdownloader.kdns.fr"
@@ -107,7 +125,28 @@ class MainActivity : Activity() {
     private var serversState = ServersState.IDLE
     private var serversError = ""
     private var serverQuery = ""
-    private var settingConfig = false
+    private var addOverlay: View? = null
+    private var rootRef: FrameLayout? = null
+    private var insetBox = intArrayOf(0, 0, 0, 0)
+    private val pingHolders = HashMap<String, PingHolder>()
+    private var homePing: TextView? = null
+    private var homeFlag: FrameLayout? = null
+    private var speedDown: TextView? = null
+    private var speedUp: TextView? = null
+    private var speedTotals: TextView? = null
+    private var speedNote: TextView? = null
+    private val traffic = TrafficMonitor()
+    private var addStatus: TextView? = null
+    private var addScroll: ScrollView? = null
+    private var manualProtoRow: LinearLayout? = null
+    private var manualFieldsBox: LinearLayout? = null
+    private var manualError: TextView? = null
+    private var manualSaveBtn: TextView? = null
+    private var rawInput: EditText? = null
+    private var manualProtocol = ManualProtocol.VLESS
+    private var manualCountry = ""
+    private val manualValues = HashMap<String, String>()
+    private val manualFieldViews = HashMap<String, EditText>()
 
     // ---- views (rebuilt by render())
     private var tabViews: List<View> = emptyList()
@@ -120,7 +159,6 @@ class MainActivity : Activity() {
     private var chipText: TextView? = null
     private var chipDot: View? = null
     private var homeServerName: TextView? = null
-    private var homeServerMeta: TextView? = null
     private var homeAccName: TextView? = null
     private var homeAccStatus: TextView? = null
     private var homeExpiry: TextView? = null
@@ -139,9 +177,6 @@ class MainActivity : Activity() {
     private var profExpiry: TextView? = null
     private var profUsage: TextView? = null
     private var serverListBox: LinearLayout? = null
-    private var editorBox: LinearLayout? = null
-    private var configInput: EditText? = null
-    private var editorEngine: TextView? = null
     private var settingsAnchor: View? = null
     private var profileScroll: ScrollView? = null
     private var usernameInput: EditText? = null
@@ -166,15 +201,38 @@ class MainActivity : Activity() {
         }
     }
 
+    /** Live speed: runs only while connected, resumed and the Statistics tab is visible. */
+    private val speedTick = object : Runnable {
+        override fun run() {
+            if (state == OrbState.CONNECTED && resumed && currentTab == 2) {
+                bindSpeed(traffic.sample())
+                handler.postDelayed(this, 1000)
+            }
+        }
+    }
+
+    /** Connection ping: one probe right after connecting, then at most once a minute while visible. */
+    private val pingTick = object : Runnable {
+        override fun run() {
+            if (state == OrbState.CONNECTED && resumed) {
+                measureSelectedPing(force = true)
+                handler.postDelayed(this, 60_000L)
+            }
+        }
+    }
+
     // =====================================================================
     // Lifecycle
     // =====================================================================
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Theme is restored before any view is built, so Activity re-creation never resets it.
+        Palette.dark = prefs.getBoolean("theme_dark", true)
         if (Build.VERSION.SDK_INT >= 30) window.setDecorFitsSystemWindows(false)
         window.statusBarColor = Color.TRANSPARENT
         window.navigationBarColor = Color.TRANSPARENT
+        applySystemBars()
 
         token = prefs.getString("token", "") ?: ""
         statusMessage = prefs.getString("connection_message", "") ?: ""
@@ -197,11 +255,14 @@ class MainActivity : Activity() {
         resumed = true
         reconcileState()
         updateConnectionUi()
+        refreshPolling()
     }
 
     override fun onPause() {
         resumed = false
         handler.removeCallbacks(tick)
+        handler.removeCallbacks(speedTick)
+        handler.removeCallbacks(pingTick)
         super.onPause()
     }
 
@@ -214,7 +275,50 @@ class MainActivity : Activity() {
 
     @Suppress("DEPRECATION")
     override fun onBackPressed() {
-        if (token.isNotBlank() && currentTab != 0) showTab(0) else super.onBackPressed()
+        when {
+            addOverlay != null -> closeAddServer()
+            token.isNotBlank() && currentTab != 0 -> showTab(0)
+            else -> super.onBackPressed()
+        }
+    }
+
+    // =====================================================================
+    // Theme
+    // =====================================================================
+
+    private fun toggleTheme() {
+        Palette.dark = !Palette.dark
+        prefs.edit().putBoolean("theme_dark", Palette.dark).apply()
+        applySystemBars()
+        render() // every view reads Palette at build time; connection state lives in fields and survives
+    }
+
+    /** Dark icons on light backgrounds and vice versa. */
+    private fun applySystemBars() {
+        if (Build.VERSION.SDK_INT >= 30) {
+            val mask = android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+                android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+            window.insetsController?.setSystemBarsAppearance(if (Palette.dark) 0 else mask, mask)
+        } else {
+            @Suppress("DEPRECATION")
+            val flags = window.decorView.systemUiVisibility
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = if (Palette.dark) flags and View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv()
+            else flags or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+        }
+    }
+
+    /** (Re)starts or stops the periodic jobs according to state, visibility and tab. */
+    private fun refreshPolling() {
+        handler.removeCallbacks(speedTick)
+        handler.removeCallbacks(pingTick)
+        if (state == OrbState.CONNECTED && resumed) {
+            handler.postDelayed(pingTick, 300L)
+            if (currentTab == 2) {
+                traffic.sample() // totals keep accumulating; the speed shown starts from the next sample
+                handler.postDelayed(speedTick, 1000L)
+            }
+        }
     }
 
     /** The only source of truth for "connected" is an engine that confirmed the tunnel. */
@@ -235,7 +339,10 @@ class MainActivity : Activity() {
 
     private fun render() {
         shownTabs.clear()
+        addOverlay = null
+        pingHolders.clear()
         val rootFrame = FrameLayout(this)
+        rootRef = rootFrame
         rootFrame.setBackgroundColor(Palette.bg0)
         rootFrame.addView(AmbientBackground(this), FrameLayout.LayoutParams(MATCH, MATCH))
 
@@ -265,7 +372,7 @@ class MainActivity : Activity() {
         rootFrame.setOnApplyWindowInsetsListener { _, insets ->
             var l = 0; var t = 0; var r = 0; var b = 0
             if (Build.VERSION.SDK_INT >= 30) {
-                val i = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+                val i = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout() or WindowInsets.Type.ime())
                 l = i.left; t = i.top; r = i.right; b = i.bottom
             } else {
                 @Suppress("DEPRECATION")
@@ -278,6 +385,8 @@ class MainActivity : Activity() {
                 b = insets.systemWindowInsetBottom
             }
             column.setPadding(l, t, r, b)
+            insetBox = intArrayOf(l, t, r, b)
+            addOverlay?.setPadding(l, t, r, b)
             insets
         }
         rootFrame.requestApplyInsets()
@@ -316,17 +425,20 @@ class MainActivity : Activity() {
             chipText = t
             chip.addView(t, lp(WRAP, WRAP, 0, 0, 7))
             row.addView(chip, lp(WRAP, WRAP, 0, 0, 0, 8))
-            row.addView(roundButton(Icon.PROFILE) { showTab(3) }, lp(dpi(38), dpi(38), 0, 0, 0, 6))
-            row.addView(roundButton(Icon.GEAR) { showTab(3); scrollToSettings() }, lp(dpi(38), dpi(38)))
+            row.addView(
+                roundButton(if (Palette.dark) Icon.SUN else Icon.MOON, if (Palette.dark) "Switch to light theme" else "Switch to dark theme") { toggleTheme() },
+                lp(dpi(38), dpi(38), 0, 0, 0, 6)
+            )
+            row.addView(roundButton(Icon.GEAR, "Settings") { showTab(3); scrollToSettings() }, lp(dpi(38), dpi(38)))
         }
         return row
     }
 
-    private fun roundButton(icon: Icon, onClick: () -> Unit): View {
+    private fun roundButton(icon: Icon, description: String = icon.name, onClick: () -> Unit): View {
         val f = FrameLayout(this).apply {
             background = Palette.glass(this@MainActivity, 19f)
             isClickable = true
-            contentDescription = icon.name
+            contentDescription = description
             setOnClickListener { onClick() }
             pressable(0.92f)
         }
@@ -376,6 +488,7 @@ class MainActivity : Activity() {
         }
         nav?.select(index, animate)
         if (index == 1) ensureServersLoaded()
+        refreshPolling()
     }
 
     private fun staggerIn(group: ViewGroup) {
@@ -415,13 +528,16 @@ class MainActivity : Activity() {
         // selected server
         val serverCard = GlassCard(this, 20f, pad = 14).apply { isClickable = true; setOnClickListener { showTab(1) }; pressable(0.98f) }
         val srow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        srow.addView(badge(Icon.SERVERS), lp(dpi(44), dpi(44)))
+        val hf = flagBox(44, 14f, "", Palette.cyan)
+        homeFlag = hf
+        srow.addView(hf, lp(dpi(44), dpi(44)))
         val sinfo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(12), 0, dpi(8), 0) }
         sinfo.addView(tv("SELECTED SERVER", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
         homeServerName = tv("—", 15f, Palette.text, 1).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
         sinfo.addView(homeServerName!!, lp(MATCH, WRAP, 4))
-        homeServerMeta = tv("", 11f, Palette.muted, 0).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
-        sinfo.addView(homeServerMeta!!, lp(MATCH, WRAP, 2))
+        // Ping is its own line and is independent from the VPN connection status above.
+        homePing = tv("", 11f, Palette.muted, 1).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
+        sinfo.addView(homePing!!, lp(MATCH, WRAP, 3))
         srow.addView(sinfo, LinearLayout.LayoutParams(0, WRAP, 1f))
         srow.addView(IconView(this, Icon.CHEVRON, Palette.muted), lp(dpi(22), dpi(22)))
         serverCard.addView(srow)
@@ -478,9 +594,10 @@ class MainActivity : Activity() {
         val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         val ht = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         ht.addView(tv("Servers", 26f, Palette.text, 2))
-        ht.addView(tv("کانفیگ‌های اشتراک تو", 12f, Palette.muted, 0), lp(WRAP, WRAP, 4))
+        ht.addView(tv("کانفیگ‌های اشتراک و پروفایل‌های ذخیره‌شده", 12f, Palette.muted, 0), lp(WRAP, WRAP, 4))
         head.addView(ht, LinearLayout.LayoutParams(0, WRAP, 1f))
-        head.addView(roundButton(Icon.REFRESH) { loadServers() }, lp(dpi(42), dpi(42)))
+        head.addView(roundButton(Icon.BOLT, "Test ping of all servers") { testAllPings() }, lp(dpi(42), dpi(42), 0, 0, 0, 8))
+        head.addView(roundButton(Icon.REFRESH, "Reload servers") { loadServers() }, lp(dpi(42), dpi(42)))
         col.addView(head, lp(MATCH, WRAP, 6))
 
         val search = LinearLayout(this).apply {
@@ -514,64 +631,25 @@ class MainActivity : Activity() {
         serverListBox = box
         col.addView(box, lp(MATCH, WRAP, 10))
 
-        // manual import
+        // Add / import: Paste and File save automatically; Manual opens the Add Server page.
         val imp = GlassCard(this, 20f, pad = 14)
-        imp.addView(tv("IMPORT CONFIG", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
+        imp.addView(tv("ADD SERVER", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
         val brow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        brow.addView(ghostButton("Paste") { pasteClipboard() }, LinearLayout.LayoutParams(0, dpi(44), 1f).apply { rightMargin = dpi(4) })
-        brow.addView(ghostButton("File") { pickFile() }, LinearLayout.LayoutParams(0, dpi(44), 1f).apply { leftMargin = dpi(4); rightMargin = dpi(4) })
-        brow.addView(ghostButton("Edit") { toggleEditor() }, LinearLayout.LayoutParams(0, dpi(44), 1f).apply { leftMargin = dpi(4) })
+        brow.addView(ghostButton("Paste") { pasteClipboard() }, LinearLayout.LayoutParams(0, dpi(46), 1f).apply { rightMargin = dpi(4) })
+        brow.addView(ghostButton("File") { pickFile() }, LinearLayout.LayoutParams(0, dpi(46), 1f).apply { leftMargin = dpi(4); rightMargin = dpi(4) })
+        brow.addView(ghostButton("Manual") { openAddServer() }, LinearLayout.LayoutParams(0, dpi(46), 1f).apply { leftMargin = dpi(4) })
         imp.addView(brow, lp(MATCH, WRAP, 10))
-        imp.addView(ghostButton("Add to Servers") { saveCurrentConfigAsProfile() }, lp(MATCH, dpi(44), 8))
-
-        val editor = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE; setPadding(0, dpi(10), 0, 0) }
-        editorBox = editor
-        val input = EditText(this).apply {
-            hint = "VLESS / VMess / Trojan / Shadowsocks / WireGuard"
-            textSize = 12f
-            setTextColor(Palette.text)
-            setHintTextColor(Palette.dim)
-            gravity = Gravity.TOP or Gravity.START
-            minLines = 4; maxLines = 8
-            setPadding(dpi(12), dpi(10), dpi(12), dpi(10))
-            background = Palette.glass(this@MainActivity, 14f, Palette.stroke, Color.argb(70, 6, 14, 34), Color.argb(70, 6, 14, 34))
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-            setText(currentConfig())
-            addTextChangedListener(object : TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
-                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {
-                    if (settingConfig) return
-                    prefs.edit().putString("last_config", s?.toString().orEmpty()).apply()
-                    onConfigChanged()
-                }
-                override fun afterTextChanged(s: Editable?) = Unit
-            })
-        }
-        configInput = input
-        editor.addView(input, lp(MATCH, WRAP))
-        editorEngine = tv("", 10.5f, Palette.mint, 1)
-        editor.addView(editorEngine!!, lp(WRAP, WRAP, 8))
-        imp.addView(editor)
+        imp.addView(tv("کانفیگ پیست‌شده یا واردشده از فایل خودکار ذخیره می‌شود.", 10.5f, Palette.muted, 0), lp(MATCH, WRAP, 10))
         col.addView(imp, lp(MATCH, WRAP, 10))
-        editorEngine?.text = engineLabel(currentConfig())
 
         rebuildServerList(-1)
         return sv
     }
 
-    private fun toggleEditor() {
-        val e = editorBox ?: return
-        e.visibility = if (e.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-        if (e.visibility == View.VISIBLE) configInput?.requestFocus()
-    }
-
-    private fun ensureServersLoaded() {
-        if (serversState == ServersState.IDLE && token.isNotBlank()) loadServers()
-    }
-
     private fun rebuildServerList(popIndex: Int) {
         val box = serverListBox ?: return
         box.removeAllViews()
+        pingHolders.clear()
         when (serversState) {
             ServersState.IDLE, ServersState.LOADING -> {
                 for (i in 0 until 3) box.addView(SkeletonView(this), lp(MATCH, dpi(76), if (i == 0) 0 else 10))
@@ -588,14 +666,15 @@ class MainActivity : Activity() {
                     box.addView(EmptyArt(this), lp(dpi(190), dpi(190), 4).apply { gravity = Gravity.CENTER_HORIZONTAL })
                     box.addView(tv("No configurations yet", 16f, Palette.text, 1).apply { gravity = Gravity.CENTER }, lp(MATCH, WRAP, 6))
                     box.addView(
-                        tv("اشتراک هیچ کانفیگی برنگرداند. می‌توانی کانفیگ را دستی وارد کنی.", 12f, Palette.muted, 0).apply { gravity = Gravity.CENTER },
+                        tv("اشتراک هیچ کانفیگی برنگرداند. می‌توانی کانفیگ را پیست کنی، از فایل وارد کنی یا دستی اضافه کنی.", 12f, Palette.muted, 0).apply { gravity = Gravity.CENTER },
                         lp(MATCH, WRAP, 6, 0, 20, 20)
                     )
-                    box.addView(ghostButton("Reload") { loadServers() }, lp(MATCH, dpi(46), 14, 6, 60, 60))
+                    box.addView(primaryButton("Add server") { openAddServer() }, lp(MATCH, dpi(46), 14, 6, 60, 60))
                     return
                 }
                 val q = serverQuery.lowercase(Locale.US)
-                val list = servers.filter { q.isEmpty() || it.name.lowercase(Locale.US).contains(q) || it.host.lowercase(Locale.US).contains(q) }
+                // Search matches the visible name only; endpoints are never searchable or shown.
+                val list = servers.filter { q.isEmpty() || it.name.lowercase(Locale.US).contains(q) }
                 if (list.isEmpty()) {
                     box.addView(tv("No matching server", 12.5f, Palette.muted, 0).apply { gravity = Gravity.CENTER }, lp(MATCH, WRAP, 20, 10))
                     return
@@ -603,44 +682,28 @@ class MainActivity : Activity() {
                 val cur = currentConfig().trim()
                 for ((idx, item) in list.withIndex()) {
                     val sel = item.raw.trim() == cur
+                    val key = item.raw.trim()
                     val card = GlassCard(this, 18f, if (sel) Palette.strokeActive else Palette.stroke, pad = 12).apply {
                         isClickable = true
+                        contentDescription = item.name
                         if (sel) background = Palette.glass(this@MainActivity, 18f, Palette.strokeActive, Palette.withAlpha(Palette.cyan, 54), Palette.withAlpha(Palette.violet, 24))
                         setOnClickListener { selectServer(item, idx) }
                         pressable(0.98f)
                     }
                     val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-                    val accent = when (item.engine) {
-                        ConfigEngine.XRAY -> Palette.cyan
-                        ConfigEngine.WIREGUARD -> Palette.violet
-                        ConfigEngine.AMNEZIAWG -> Palette.mint
-                        else -> Palette.muted
-                    }
-                    val short = when (item.engine) { ConfigEngine.XRAY -> "XR"; ConfigEngine.WIREGUARD -> "WG"; ConfigEngine.AMNEZIAWG -> "AW"; else -> "?" }
-                    row.addView(
-                        tv(short, 13f, accent, 2).apply {
-                            gravity = Gravity.CENTER
-                            letterSpacing = 0.08f
-                            background = GradientDrawable().apply {
-                                cornerRadius = dp(14f); setColor(Palette.withAlpha(accent, 28)); setStroke(dpi(1), Palette.withAlpha(accent, 120))
-                            }
-                        },
-                        lp(dpi(46), dpi(46))
-                    )
+                    // Country flag takes the place of the old XR/WG/AW badge. The engine is still detected internally.
+                    row.addView(flagBox(46, 14f, item.country, if (sel) Palette.cyan else Palette.ice), lp(dpi(46), dpi(46)))
                     val info = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(12), 0, dpi(8), 0) }
-                    info.addView(tv("${flagEmoji(countryCodeFor(item.name + " " + item.host))}  ${item.name}", 14.5f, Palette.text, 1).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END })
-                    val meta = listOf(engineName(item.engine), item.host, item.port).filter { it.isNotBlank() }.joinToString("  •  ")
-                    info.addView(tv(meta, 10.5f, Palette.muted, 0).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }, lp(MATCH, WRAP, 4))
+                    info.addView(tv(item.name, 14.5f, Palette.text, 1).apply { maxLines = 2; ellipsize = TextUtils.TruncateAt.END })
+                    val sub = if (sel) "Selected" else if (item.local) "Saved on this phone" else ""
+                    if (sub.isNotEmpty()) info.addView(tv(sub, 10.5f, if (sel) Palette.cyan else Palette.muted, 0), lp(MATCH, WRAP, 4))
                     row.addView(info, LinearLayout.LayoutParams(0, WRAP, 1f))
-                    if (sel) {
-                        row.addView(
-                            FrameLayout(this).apply {
-                                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Palette.withAlpha(Palette.cyan, 50)); setStroke(dpi(1), Palette.cyan) }
-                                addView(IconView(this@MainActivity, Icon.CHECK, Palette.cyan), FrameLayout.LayoutParams(dpi(26), dpi(26)))
-                            },
-                            lp(dpi(26), dpi(26))
-                        )
-                    }
+
+                    val holder = buildPingControl(item)
+                    pingHolders[key] = holder
+                    row.addView(holder.text, lp(WRAP, WRAP, 0, 0, 0, 6))
+                    row.addView(holder.button, lp(dpi(44), dpi(44)))
+                    bindPing(key)
                     card.addView(row)
                     box.addView(card, lp(MATCH, WRAP, if (idx == 0) 0 else 10))
                     if (idx == popIndex) {
@@ -656,6 +719,138 @@ class MainActivity : Activity() {
         setConfig(item.raw)
         rebuildServerList(idx)
         toast("سرور انتخاب شد؛ روی دکمه‌ی اتصال بزن.")
+    }
+
+    // ---------------------------------------------------------- Flag + ping UI
+
+    /** Rounded square with the country flag, or a neutral globe when the country is unknown. */
+    private fun flagBox(sizeDp: Int, radiusDp: Float, country: String, accent: Int): FrameLayout {
+        val f = FrameLayout(this).apply {
+            background = GradientDrawable().apply {
+                cornerRadius = dp(radiusDp); setColor(Palette.withAlpha(accent, 28)); setStroke(dpi(1), Palette.withAlpha(accent, 120))
+            }
+        }
+        fillFlag(f, country, sizeDp)
+        return f
+    }
+
+    private fun fillFlag(box: FrameLayout?, country: String, sizeDp: Int) {
+        val f = box ?: return
+        f.removeAllViews()
+        val code = country.trim().uppercase(Locale.US)
+        if (code.length == 2 && code.all { it in 'A'..'Z' }) {
+            f.contentDescription = "Country $code"
+            f.addView(tv(flagEmoji(code), (sizeDp * 0.5f), Palette.text, 0).apply { gravity = Gravity.CENTER },
+                FrameLayout.LayoutParams(MATCH, MATCH))
+        } else {
+            f.contentDescription = "Country unknown"
+            f.addView(IconView(this, Icon.GLOBE, Palette.muted), FrameLayout.LayoutParams(dpi(sizeDp), dpi(sizeDp), Gravity.CENTER))
+        }
+    }
+
+    private fun buildPingControl(item: ServerItem): PingHolder {
+        val text = tv("", 12.5f, Palette.muted, 1).apply { gravity = Gravity.END; minWidth = dpi(52) }
+        val icon = IconView(this, Icon.REFRESH, Palette.ice)
+        val spinner = ProgressBar(this).apply {
+            isIndeterminate = true
+            indeterminateTintList = ColorStateList.valueOf(Palette.cyan)
+            visibility = View.GONE
+        }
+        val button = FrameLayout(this).apply {
+            background = Palette.glass(this@MainActivity, 14f)
+            isClickable = true
+            contentDescription = "Test ping for " + item.name
+            setOnClickListener { runPing(item, true) }
+            pressable(0.92f)
+            addView(icon, FrameLayout.LayoutParams(dpi(22), dpi(22), Gravity.CENTER))
+            addView(spinner, FrameLayout.LayoutParams(dpi(22), dpi(22), Gravity.CENTER))
+        }
+        return PingHolder(text, button, spinner, icon)
+    }
+
+    /** Fast < 100 ms, moderate < 250 ms, slow otherwise; unreachable/timeout are red. */
+    private fun pingStyle(r: PingResult?): Pair<String, Int> = when {
+        r == null -> "" to Palette.muted
+        r.kind == PingKind.OK -> "${r.ms} ms" to when {
+            r.ms < 100 -> Palette.mint
+            r.ms < 250 -> Palette.cyan
+            else -> Palette.amber
+        }
+        r.kind == PingKind.TIMEOUT -> "Timeout" to Palette.red
+        r.kind == PingKind.FAILED -> "Unreachable" to Palette.red
+        else -> "N/A" to Palette.muted
+    }
+
+    private fun bindPing(key: String) {
+        val h = pingHolders[key] ?: return
+        if (PingTester.isRunning(key)) {
+            h.spinner.visibility = View.VISIBLE
+            h.icon.visibility = View.GONE
+            h.text.text = ""
+            h.button.isEnabled = false
+        } else {
+            h.spinner.visibility = View.GONE
+            h.icon.visibility = View.VISIBLE
+            h.button.isEnabled = true
+            val (t, c) = pingStyle(PingTester.cached(key))
+            h.text.text = t
+            h.text.setTextColor(c)
+        }
+    }
+
+    /** One probe per profile at a time; a fresh cached value is reused unless [force] (manual retest). */
+    private fun runPing(item: ServerItem, force: Boolean) {
+        val key = item.raw.trim()
+        if (PingTester.isRunning(key)) return
+        PingTester.test(key, item.meta, force) {
+            if (isFinishing || isDestroyed) return@test
+            bindPing(key)
+            if (key == currentConfig().trim()) bindHomePing()
+        }
+        bindPing(key)
+    }
+
+    private fun testAllPings() {
+        val list = servers
+        if (list.isEmpty()) { toast("سروری برای تست وجود ندارد."); return }
+        list.forEach { runPing(it, false) }
+    }
+
+    private fun measureSelectedPing(force: Boolean) {
+        val item = selectedItem() ?: return
+        val key = item.raw.trim()
+        if (key.isEmpty()) return
+        PingTester.test(key, item.meta, force) {
+            if (isFinishing || isDestroyed) return@test
+            bindHomePing()
+            bindPing(key)
+        }
+        bindHomePing()
+    }
+
+    private fun bindHomePing() {
+        val v = homePing ?: return
+        val raw = currentConfig().trim()
+        if (raw.isEmpty()) { v.text = ""; return }
+        if (PingTester.isRunning(raw)) { v.text = "Ping: measuring…"; v.setTextColor(Palette.muted); return }
+        val r = PingTester.cached(raw)
+        if (r == null) { v.text = if (state == OrbState.CONNECTED) "Ping: measuring…" else "Ping: not tested"; v.setTextColor(Palette.muted); return }
+        val (t, c) = pingStyle(r)
+        v.text = when (r.kind) {
+            PingKind.OK -> "Ping: $t"
+            PingKind.UNSUPPORTED -> "Ping: not available"
+            else -> "Ping: $t"
+        }
+        v.setTextColor(c)
+    }
+
+    private fun selectedItem(): ServerItem? {
+        val raw = currentConfig().trim()
+        if (raw.isEmpty()) return null
+        servers.firstOrNull { it.raw.trim() == raw }?.let { return it }
+        val meta = ProfileParser.parse(raw)
+        val nm = if (meta.name.isBlank() || ProfileParser.looksTechnical(meta.name)) "Selected server" else meta.name
+        return ServerItem(nm, raw, meta.engine, meta)
     }
 
     // --------------------------------------------------------------- Stats
@@ -687,9 +882,18 @@ class MainActivity : Activity() {
 
         val speed = GlassCard(this, 18f, pad = 14)
         speed.addView(tv("LIVE SPEED", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
-        speed.addView(tv("Not measured", 15f, Palette.text, 1), lp(WRAP, WRAP, 8))
-        speed.addView(tv("سرعت لحظه‌ای در این نسخه اندازه‌گیری نمی‌شود، پس عددی نشان داده نمی‌شود.", 11f, Palette.muted, 0), lp(MATCH, WRAP, 6))
+        val speedRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        speedDown = tv("↓ —", 19f, Palette.mint, 2)
+        speedUp = tv("↑ —", 19f, Palette.cyan, 2)
+        speedRow.addView(speedDown!!, LinearLayout.LayoutParams(0, WRAP, 1f))
+        speedRow.addView(speedUp!!, LinearLayout.LayoutParams(0, WRAP, 1f))
+        speed.addView(speedRow, lp(MATCH, WRAP, 10))
+        speedTotals = tv("", 11.5f, Palette.muted, 0)
+        speed.addView(speedTotals!!, lp(MATCH, WRAP, 8))
+        speedNote = tv("", 10f, Palette.dim, 0)
+        speed.addView(speedNote!!, lp(MATCH, WRAP, 6))
         col.addView(speed, lp(MATCH, WRAP, 12))
+        bindSpeed(null)
 
         val log = GlassCard(this, 18f, pad = 14)
         val lrow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
@@ -703,6 +907,26 @@ class MainActivity : Activity() {
         log.addView(statsLog!!, lp(MATCH, WRAP, 8))
         col.addView(log, lp(MATCH, WRAP, 12))
         return sv
+    }
+
+    /** null = not connected. Everything shown comes from TrafficMonitor counters, never from estimates. */
+    private fun bindSpeed(sample: TrafficMonitor.Sample?) {
+        if (sample == null) {
+            speedDown?.text = "↓ —"; speedUp?.text = "↑ —"
+            speedTotals?.text = ""
+            speedNote?.text = "Connect to measure live speed."
+            return
+        }
+        if (!sample.available) {
+            speedDown?.text = "↓ —"; speedUp?.text = "↑ —"
+            speedTotals?.text = ""
+            speedNote?.text = "Traffic counters are not supported on this device, so speed cannot be shown."
+            return
+        }
+        speedDown?.text = "↓ " + TrafficMonitor.formatSpeed(sample.downBytesPerSec)
+        speedUp?.text = "↑ " + TrafficMonitor.formatSpeed(sample.upBytesPerSec)
+        speedTotals?.text = "Downloaded " + TrafficMonitor.formatBytes(sample.totalDown) + "  •  Uploaded " + TrafficMonitor.formatBytes(sample.totalUp)
+        speedNote?.text = "Measured from this app's network counters this session (encrypted traffic, includes protocol overhead)."
     }
 
     private fun metricTile(label: String, value: TextView): View {
@@ -825,7 +1049,7 @@ class MainActivity : Activity() {
         setPadding(dpi(16), 0, dpi(16), 0)
         inputType = if (password) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-        background = Palette.glass(this@MainActivity, 16f, Palette.stroke, Color.argb(70, 6, 14, 34), Color.argb(70, 6, 14, 34))
+        background = Palette.glass(this@MainActivity, 16f, Palette.stroke, Palette.fieldFill, Palette.fieldFill)
     }
 
     private fun primaryButton(label: String, onClick: () -> Unit): TextView = tv(label, 14f, Color.rgb(2, 10, 24), 2).apply {
@@ -886,7 +1110,9 @@ class MainActivity : Activity() {
         return if (e.isNotBlank()) e else engineName(ConfigDetector.detect(currentConfig()))
     }
 
-    private fun applyStatus(message: String, active: Boolean) {
+    private fun applyStatus(rawMessage: String, active: Boolean) {
+        // Engine errors may echo parts of the config (keys, hosts, links): scrub before storing or showing.
+        val message = ConfigSanitizer.redact(rawMessage)
         statusMessage = message
         val lower = message.lowercase(Locale.US)
         val next = when {
@@ -897,11 +1123,17 @@ class MainActivity : Activity() {
             else -> OrbState.CONNECTING
         }
         if (next == OrbState.CONNECTED) {
-            if (connectedAtRt == 0L) connectedAtRt = SystemClock.elapsedRealtime()
+            if (connectedAtRt == 0L) { connectedAtRt = SystemClock.elapsedRealtime(); traffic.reset() }
         } else connectedAtRt = 0L
+        val changed = state != next
         state = next
         prefs.edit().putString("connection_message", message).putBoolean("connection_active", active).apply()
         updateConnectionUi()
+        if (changed) {
+            if (next != OrbState.CONNECTED) bindSpeed(null)
+            bindHomePing()
+            refreshPolling()
+        }
     }
 
     // =====================================================================
@@ -996,12 +1228,8 @@ class MainActivity : Activity() {
             }
         } else if (requestCode == PICK_CONFIG && resultCode == RESULT_OK) {
             val uri = data?.data ?: return
-            try {
-                contentResolver.openInputStream(uri)?.use { setConfig(readLimited(it)) }
-                toast("کانفیگ وارد شد.")
-            } catch (e: Exception) {
-                toast("خطا در واردکردن فایل: " + (e.message ?: "unknown error"))
-            }
+            setAddStatus("Importing…", false)
+            importUri(uri)
         }
     }
 
@@ -1020,20 +1248,21 @@ class MainActivity : Activity() {
             val obj = array.optJSONObject(i) ?: continue
             val raw = obj.optString("raw", "").trim()
             if (raw.isBlank()) continue
-            val ep = endpointOf(raw)
-            val suppliedName = obj.optString("name", "").trim()
-            val name = serverDisplayName(suppliedName.ifBlank { ep.name }, raw, result.size + 1)
-            result.add(ServerItem(name, raw, ConfigDetector.detect(raw), ep.host, ep.port, true))
+            val meta = ProfileParser.parse(raw)
+            // Older versions saved the hostname as the name. Repair those on load and never display a hostname.
+            val name = ProfileParser.bestName(listOf(obj.optString("name", ""), meta.name), result.size + 1)
+            result.add(ServerItem(name, raw, meta.engine, meta, true, normalizeCountry(obj.optString("country", ""))))
         }
         return result
     }
 
-    private fun persistLocalProfiles(profiles: List<ServerItem>) {
+    /** Returns false when Android could not write the profiles, so callers never claim a save that failed. */
+    private fun persistLocalProfiles(profiles: List<ServerItem>): Boolean {
         val array = JSONArray()
         profiles.filter { it.local }.forEach { profile ->
-            array.put(JSONObject().put("name", profile.name).put("raw", profile.raw))
+            array.put(JSONObject().put("name", profile.name).put("raw", profile.raw).put("country", profile.country))
         }
-        prefs.edit().putString("saved_server_profiles", array.toString()).apply()
+        return prefs.edit().putString("saved_server_profiles", array.toString()).commit()
     }
 
     private fun mergeSavedAndRemote(remote: List<ServerItem>): List<ServerItem> {
@@ -1048,100 +1277,9 @@ class MainActivity : Activity() {
         return merged
     }
 
-    private fun saveCurrentConfigAsProfile() {
-        val raw = currentConfig().trim()
-        if (raw.isBlank()) {
-            toast("اول کانفیگ را با Paste یا File وارد کن.")
-            return
-        }
-        if (ConfigDetector.detect(raw) == ConfigEngine.UNKNOWN) {
-            toast("فرمت کانفیگ شناسایی نشد؛ یک کانفیگ پشتیبانی‌شده وارد کن.")
-            return
-        }
-
-        val ep = endpointOf(raw)
-        val suggested = serverDisplayName(ep.name, raw, loadLocalProfiles().size + 1)
-        val nameInput = EditText(this).apply {
-            hint = "Server name"
-            setSingleLine(true)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-            setText(suggested)
-            setSelection(text.length)
-            setPadding(dpi(14), dpi(10), dpi(14), dpi(10))
-        }
-
-        AlertDialog.Builder(this)
-            .setTitle("Add server profile")
-            .setMessage("این کانفیگ روی همین گوشی ذخیره می‌شود.")
-            .setView(nameInput)
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Add") { _, _ ->
-                val name = nameInput.text?.toString()?.trim().orEmpty()
-                    .ifBlank { serverDisplayName(ep.name, raw, loadLocalProfiles().size + 1) }
-                val saved = loadLocalProfiles().toMutableList()
-                val newProfile = ServerItem(name, raw, ConfigDetector.detect(raw), ep.host, ep.port, true)
-                val existing = saved.indexOfFirst { it.raw.trim() == raw }
-                if (existing >= 0) saved[existing] = newProfile else saved.add(0, newProfile)
-
-                persistLocalProfiles(saved)
-                val remote = servers.filterNot { it.local }
-                servers = mergeSavedAndRemote(remote)
-                serversState = ServersState.READY
-                serversError = ""
-                rebuildServerList(-1)
-                toast("پروفایل «$name» ذخیره شد.")
-            }
-            .show()
-    }
-
-    // If a link only contains a protocol label (or "Profile 1"), show its host instead.
-    private fun serverDisplayName(candidate: String, raw: String, index: Int): String {
-        val value = candidate.trim()
-        val generic = value.isBlank() || Regex(
-            "(?i)^(profile\\s*\\d*|server\\s*\\d*|vless|vmess|trojan|shadowsocks|wireguard|amneziawg|config|ss|ssr)$"
-        ).matches(value)
-        if (!generic) return value
-        val host = endpointOf(raw).host.trim()
-        return host.ifBlank { "Server $index" }
-    }
-
-    private fun countryCodeFor(value: String): String {
-        val lower = value.lowercase(Locale.US)
-        val aliases = listOf(
-            "DE" to listOf("germany", "deutschland", "frankfurt", "berlin", "munich", "dusseldorf", "düsseldorf"),
-            "IR" to listOf("iran", "tehran", "mashhad", "shiraz"),
-            "US" to listOf("united states", "unitedstates", "usa", "america", "new york", "los angeles", "chicago", "seattle"),
-            "GB" to listOf("united kingdom", "great britain", "england", "london", "manchester", "britain"),
-            "NL" to listOf("netherlands", "holland", "amsterdam", "rotterdam"),
-            "FR" to listOf("france", "paris", "marseille"),
-            "TR" to listOf("turkey", "türkiye", "turkiye", "istanbul", "ankara"),
-            "RU" to listOf("russia", "moscow", "st petersburg"),
-            "AE" to listOf("uae", "united arab emirates", "dubai", "abu dhabi", "emirates"),
-            "FI" to listOf("finland", "helsinki"),
-            "SE" to listOf("sweden", "stockholm"),
-            "CH" to listOf("switzerland", "zurich", "geneva"),
-            "CA" to listOf("canada", "toronto", "montreal", "vancouver"),
-            "JP" to listOf("japan", "tokyo", "osaka"),
-            "SG" to listOf("singapore"),
-            "PL" to listOf("poland", "warsaw"),
-            "UA" to listOf("ukraine", "kyiv", "kiev"),
-            "IT" to listOf("italy", "milan", "rome"),
-            "ES" to listOf("spain", "madrid", "barcelona"),
-            "BR" to listOf("brazil", "sao paulo"),
-            "AT" to listOf("austria", "vienna"),
-            "CZ" to listOf("czech", "prague"),
-            "RO" to listOf("romania", "bucharest"),
-            "HK" to listOf("hong kong")
-        )
-        for ((code, words) in aliases) {
-            if (words.any { lower.contains(it) }) return code
-        }
-        val codes = listOf("DE", "IR", "US", "GB", "NL", "FR", "TR", "RU", "AE", "FI", "SE", "CH", "CA", "JP", "SG", "PL", "UA", "IT", "ES", "BR", "AT", "CZ", "RO", "HK")
-        for (code in codes) {
-            val pattern = Regex("(^|[^a-z])" + code.lowercase(Locale.US) + "([^a-z]|$)", RegexOption.IGNORE_CASE)
-            if (pattern.containsMatchIn(value)) return code
-        }
-        return ""
+    private fun normalizeCountry(v: String): String {
+        val c = v.trim().uppercase(Locale.US)
+        return if (c.length == 2 && c.all { it in 'A'..'Z' }) c else ""
     }
 
     private fun flagEmoji(countryCode: String): String {
@@ -1152,22 +1290,106 @@ class MainActivity : Activity() {
         return String(first) + String(second)
     }
 
+    // ---------------------------------------------------------------- Import
+
+    private data class ImportOutcome(val added: List<ServerItem>, val duplicates: Int, val invalid: Int, val persisted: Boolean)
+
+    /** One structured config stays whole; otherwise every non-empty line is a separate share link. */
+    private fun splitConfigs(text: String): List<String> {
+        val t = text.trim()
+        if (t.isEmpty()) return emptyList()
+        if (t.startsWith("{") || t.contains("[interface]", ignoreCase = true)) return listOf(t)
+        return t.lineSequence().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.toList()
+    }
+
+    /** Parses, de-duplicates and saves. Runs off the main thread. Never logs or returns config content. */
+    private fun doImport(text: String, existingRaws: Set<String>, country: String = ""): ImportOutcome {
+        val candidates = splitConfigs(text)
+        val saved = loadLocalProfiles().toMutableList()
+        val known = HashSet<String>(existingRaws)
+        saved.forEach { known.add(it.raw.trim()) }
+        val added = ArrayList<ServerItem>()
+        var dup = 0
+        var bad = 0
+        for (c in candidates) {
+            val meta = ProfileParser.parse(c)
+            val structured = c.startsWith("{")
+            val ok = when (meta.engine) {
+                ConfigEngine.UNKNOWN -> false
+                ConfigEngine.XRAY -> structured || meta.host.isNotBlank()
+                else -> meta.host.isNotBlank()
+            }
+            if (!ok) { bad++; continue }
+            if (!known.add(c.trim())) { dup++; continue }
+            val name = ProfileParser.bestName(listOf(meta.name), saved.size + added.size + 1)
+            added.add(ServerItem(name, c.trim(), meta.engine, meta, true, country))
+        }
+        if (added.isEmpty()) return ImportOutcome(emptyList(), dup, bad, true)
+        val persisted = persistLocalProfiles(added + saved)
+        return ImportOutcome(if (persisted) added else emptyList(), dup, bad, persisted)
+    }
+
+    private fun importText(text: String, country: String = "") {
+        val existing = servers.map { it.raw.trim() }.toSet()
+        io.execute {
+            val outcome = doImport(text, existing, country)
+            runOnUiThread { if (!isFinishing && !isDestroyed) applyImport(outcome) }
+        }
+    }
+
+    private fun importUri(uri: Uri) {
+        val existing = servers.map { it.raw.trim() }.toSet()
+        io.execute {
+            val text = try {
+                contentResolver.openInputStream(uri)?.use { readLimited(it) }.orEmpty()
+            } catch (e: Exception) {
+                runOnUiThread { if (!isFinishing && !isDestroyed) importFailed("فایل خوانده نشد: " + ConfigSanitizer.redact(e.message)) }
+                return@execute
+            }
+            val outcome = doImport(text, existing)
+            runOnUiThread { if (!isFinishing && !isDestroyed) applyImport(outcome) }
+        }
+    }
+
+    private fun importFailed(message: String) {
+        toast(message)
+        setAddStatus(message, true)
+    }
+
+    private fun applyImport(o: ImportOutcome) {
+        if (!o.persisted) {
+            importFailed("ذخیره‌ی پروفایل ناموفق بود. حافظه‌ی برنامه قابل نوشتن نیست.")
+            return
+        }
+        if (o.added.isEmpty()) {
+            val msg = if (o.duplicates > 0 && o.invalid == 0) "این کانفیگ قبلاً در لیست هست."
+            else "کانفیگ پشتیبانی‌شده‌ای پیدا نشد. VLESS / VMess / Trojan / Shadowsocks / WireGuard / AmneziaWG لازم است."
+            importFailed(msg)
+            return
+        }
+        servers = mergeSavedAndRemote(servers.filterNot { it.local })
+        serversState = ServersState.READY
+        serversError = ""
+        if (currentConfig().isBlank()) setConfig(o.added[0].raw) else rebuildServerList(-1)
+        var msg = if (o.added.size == 1) "پروفایل «" + o.added[0].name + "» اضافه شد." else "${o.added.size} پروفایل اضافه شد."
+        if (o.duplicates > 0) msg += " (${o.duplicates} تکراری رد شد)"
+        if (o.invalid > 0) msg += " (${o.invalid} مورد نامعتبر)"
+        toast(msg)
+        if (addOverlay != null) { closeAddServer(); showTab(1) }
+    }
+
+    // ---------------------------------------------------------------- Selection
+
     private fun setConfig(raw: String) {
         prefs.edit().putString("last_config", raw).apply()
-        settingConfig = true
-        configInput?.setText(raw)
-        settingConfig = false
         onConfigChanged()
         if (serversState == ServersState.READY) rebuildServerList(-1)
     }
 
     private fun onConfigChanged() {
-        editorEngine?.text = engineLabel(currentConfig())
         bindServerSummary()
         statsEngine?.text = engineLabelShort()
     }
-
-    private fun engineLabel(raw: String) = "Detected engine: " + engineName(ConfigDetector.detect(raw))
 
     private fun engineName(engine: ConfigEngine): String = when (engine) {
         ConfigEngine.XRAY -> "XRAY"
@@ -1176,56 +1398,32 @@ class MainActivity : Activity() {
         else -> "NONE"
     }
 
+    /** Selected-server card: profile name, flag and ping only. No engine, host or port. */
     private fun bindServerSummary() {
-        val raw = currentConfig().trim()
-        if (raw.isBlank()) {
+        val item = selectedItem()
+        if (item == null) {
             homeServerName?.text = "No server selected"
-            homeServerMeta?.text = "برای انتخاب سرور بزن"
+            homePing?.text = "برای انتخاب سرور بزن"
+            homePing?.setTextColor(Palette.muted)
+            fillFlag(homeFlag, "", 44)
             return
         }
-        val ep = endpointOf(raw)
-        homeServerName?.text = ep.name
-        homeServerMeta?.text = listOf(engineName(ConfigDetector.detect(raw)), ep.host, ep.port).filter { it.isNotBlank() }.joinToString("  •  ")
-    }
-
-    private fun endpointOf(rawValue: String): Endpoint {
-        val raw = rawValue.trim()
-        val scheme = raw.substringBefore("://", "config").uppercase(Locale.US)
-        var name = ""; var host = ""; var port = ""
-        if (raw.startsWith("vmess://", true)) {
-            val payload = raw.substringAfter("://").substringBefore("#").trim()
-            val padded = payload + "=".repeat((4 - payload.length % 4) % 4)
-            val decoded = runCatching { String(Base64.decode(padded, Base64.DEFAULT), StandardCharsets.UTF_8) }.getOrNull()
-            val json = runCatching { JSONObject(decoded ?: "") }.getOrNull()
-            if (json != null) {
-                name = json.optString("ps", ""); host = json.optString("add", ""); port = json.optString("port", "")
-            }
-        } else {
-            val uri = runCatching { Uri.parse(raw) }.getOrNull()
-            host = uri?.host.orEmpty()
-            if (uri != null && uri.port > 0) port = uri.port.toString()
-            name = uri?.fragment.orEmpty()
-        }
-        if (host.isBlank()) {
-            val endpoint = Regex("(?im)^\\s*Endpoint\\s*=\\s*([^\\s#]+)").find(raw)?.groupValues?.getOrNull(1)
-            if (!endpoint.isNullOrBlank()) {
-                val clean = endpoint.substringAfter("@", endpoint)
-                host = clean.substringBeforeLast(":", clean)
-                if (clean.contains(":")) port = clean.substringAfterLast(":")
-            }
-        }
-        return Endpoint(name.ifBlank { scheme }, host, port)
+        homeServerName?.text = item.name
+        fillFlag(homeFlag, item.country, 44)
+        bindHomePing()
     }
 
     private fun pasteClipboard() {
         try {
             val manager = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             val clip: ClipData? = manager.primaryClip
-            if (clip == null || clip.itemCount == 0) { toast("کلیپ‌بورد خالی است."); return }
-            setConfig(clip.getItemAt(0).coerceToText(this)?.toString().orEmpty().trim())
-            toast("کانفیگ از کلیپ‌بورد وارد شد.")
+            if (clip == null || clip.itemCount == 0) { importFailed("کلیپ‌بورد خالی است."); return }
+            val text = clip.getItemAt(0).coerceToText(this)?.toString().orEmpty().trim()
+            if (text.isEmpty()) { importFailed("کلیپ‌بورد خالی است."); return }
+            setAddStatus("Importing…", false)
+            importText(text)
         } catch (_: Exception) {
-            toast("خواندن کلیپ‌بورد ناموفق بود.")
+            importFailed("خواندن کلیپ‌بورد ناموفق بود.")
         }
     }
 
@@ -1253,7 +1451,7 @@ class MainActivity : Activity() {
     }
 
     private fun clearConfig() {
-        AlertDialog.Builder(this)
+        dialogBuilder()
             .setMessage("کانفیگ ذخیره‌شده روی این گوشی پاک شود؟")
             .setPositiveButton("پاک کن") { _, _ -> setConfig(""); toast("کانفیگ پاک شد.") }
             .setNegativeButton("لغو", null)
@@ -1355,10 +1553,18 @@ class MainActivity : Activity() {
                         else -> ""
                     }.trim()
                     if (raw.isNotBlank()) {
-                        val ep = endpointOf(raw)
-                        val given = (item as? JSONObject)?.optString("name", "")?.takeIf { it.isNotBlank() }
-                        val displayName = serverDisplayName(given ?: ep.name, raw, remote.size + 1)
-                        remote.add(ServerItem(displayName, raw, ConfigDetector.detect(raw), ep.host, ep.port))
+                        val meta = ProfileParser.parse(raw)
+                        val obj = item as? JSONObject
+                        // Subscription display name first, then the name inside the config itself.
+                        // A hostname is never used as a title.
+                        val given = listOf("name", "remarks", "remark", "title", "ps", "label")
+                            .map { k -> obj?.optString(k, "").orEmpty() }
+                        val displayName = ProfileParser.bestName(given + meta.name, remote.size + 1)
+                        // Country only from explicit metadata supplied with the profile.
+                        val country = listOf("country_code", "countryCode", "cc", "country")
+                            .map { k -> normalizeCountry(obj?.optString(k, "").orEmpty()) }
+                            .firstOrNull { it.isNotEmpty() }.orEmpty()
+                        remote.add(ServerItem(displayName, raw, meta.engine, meta, false, country))
                     }
                 }
                 runOnUiThread {
@@ -1373,11 +1579,11 @@ class MainActivity : Activity() {
                     if (local.isNotEmpty()) {
                         servers = local
                         serversState = ServersState.READY
-                        serversError = e.message ?: "endpoint unavailable"
+                        serversError = ConfigSanitizer.redact(e.message ?: "endpoint unavailable")
                         rebuildServerList(-1)
                         toast("سرورهای آنلاین بارگذاری نشدند؛ پروفایل‌های ذخیره‌شده نمایش داده شدند.")
                     } else {
-                        serversError = e.message ?: "endpoint unavailable"
+                        serversError = ConfigSanitizer.redact(e.message ?: "endpoint unavailable")
                         serversState = ServersState.ERROR
                         rebuildServerList(-1)
                     }
@@ -1409,7 +1615,7 @@ class MainActivity : Activity() {
     }
 
     private fun confirmLogout() {
-        AlertDialog.Builder(this)
+        dialogBuilder()
             .setMessage("از حساب خارج می‌شوی؟")
             .setPositiveButton("خروج") { _, _ -> logout() }
             .setNegativeButton("لغو", null)
@@ -1504,7 +1710,7 @@ class MainActivity : Activity() {
     }
 
     private fun showPrivacy() {
-        AlertDialog.Builder(this)
+        dialogBuilder()
             .setTitle("Privacy")
             .setMessage(
                 "• فقط توکن نشست و کانفیگ انتخاب‌شده روی همین گوشی ذخیره می‌شود.\n" +
@@ -1516,11 +1722,289 @@ class MainActivity : Activity() {
     }
 
     // =====================================================================
+    // Add Server page (overlay): quick import, manual entry, raw editor
+    // =====================================================================
+
+    private fun openAddServer() {
+        val root = rootRef ?: return
+        if (addOverlay != null) return
+        manualValues.clear()
+        manualValues.putAll(ManualProfile.defaultsFor(manualProtocol))
+        manualCountry = ""
+
+        val page = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Palette.bg0)
+            isClickable = true // swallow touches so the page underneath is inert
+            setPadding(insetBox[0], insetBox[1], insetBox[2], insetBox[3])
+        }
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dpi(16), dpi(10), dpi(16), dpi(8))
+        }
+        bar.addView(roundButton(Icon.BACK, "Back") { closeAddServer() }, lp(dpi(44), dpi(44)))
+        val titles = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(12), 0, 0, 0) }
+        titles.addView(tv("Add server", 22f, Palette.text, 2))
+        titles.addView(tv("Import a config or enter one manually", 12f, Palette.muted, 0), lp(WRAP, WRAP, 3))
+        bar.addView(titles, LinearLayout.LayoutParams(0, WRAP, 1f))
+        page.addView(bar, lp(MATCH, WRAP))
+
+        val sv = ScrollView(this).apply { isVerticalScrollBarEnabled = false; overScrollMode = View.OVER_SCROLL_NEVER }
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(20), dpi(6), dpi(20), dpi(28)) }
+        sv.addView(col, FrameLayout.LayoutParams(MATCH, WRAP))
+        page.addView(sv, LinearLayout.LayoutParams(MATCH, 0, 1f))
+        addScroll = sv
+
+        // --- 1. Quick import (saved automatically)
+        val quick = GlassCard(this, 22f, pad = 16)
+        quick.addView(tv("QUICK IMPORT", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
+        quick.addView(tv("Valid configs are added to your list immediately. No extra confirmation.", 11.5f, Palette.muted, 0), lp(MATCH, WRAP, 6))
+        val tiles = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        tiles.addView(actionTile(Icon.PASTE, "Paste", "From clipboard") { pasteClipboard() },
+            LinearLayout.LayoutParams(0, dpi(92), 1f).apply { rightMargin = dpi(5) })
+        tiles.addView(actionTile(Icon.FILE, "File", "Import from file") { pickFile() },
+            LinearLayout.LayoutParams(0, dpi(92), 1f).apply { leftMargin = dpi(5) })
+        quick.addView(tiles, lp(MATCH, WRAP, 14))
+        val status = tv("", 12f, Palette.muted, 1).apply { visibility = View.GONE }
+        addStatus = status
+        quick.addView(status, lp(MATCH, WRAP, 12))
+        col.addView(quick, lp(MATCH, WRAP, 8))
+
+        // --- 2. Manual entry
+        val manual = GlassCard(this, 22f, pad = 16)
+        manual.addView(tv("MANUAL ENTRY", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
+        manual.addView(tv("Choose a protocol; only its fields are shown.", 11.5f, Palette.muted, 0), lp(MATCH, WRAP, 6))
+        val protoScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        val protoRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        protoScroll.addView(protoRow, FrameLayout.LayoutParams(WRAP, WRAP))
+        manualProtoRow = protoRow
+        manual.addView(protoScroll, lp(MATCH, WRAP, 12))
+        val fieldsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        manualFieldsBox = fieldsBox
+        manual.addView(fieldsBox, lp(MATCH, WRAP))
+        val err = tv("", 12f, Palette.red, 1).apply { visibility = View.GONE }
+        manualError = err
+        manual.addView(err, lp(MATCH, WRAP, 12))
+        val save = primaryButton("Save server") { saveManual() }
+        manualSaveBtn = save
+        manual.addView(save, lp(MATCH, dpi(52), 14))
+        col.addView(manual, lp(MATCH, WRAP, 14))
+
+        // --- 3. Raw editor
+        val rawCard = GlassCard(this, 22f, pad = 16)
+        rawCard.addView(tv("RAW CONFIG", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
+        rawCard.addView(tv("For advanced options: paste Xray JSON, a share link or a full WireGuard / AmneziaWG config.", 11.5f, Palette.muted, 0), lp(MATCH, WRAP, 6))
+        val raw = EditText(this).apply {
+            hint = "vless://…  |  { \"outbounds\": … }  |  [Interface] …"
+            textSize = 12f
+            setTextColor(Palette.text)
+            setHintTextColor(Palette.dim)
+            gravity = Gravity.TOP or Gravity.START
+            minLines = 4; maxLines = 9
+            setPadding(dpi(14), dpi(12), dpi(14), dpi(12))
+            background = Palette.glass(this@MainActivity, 14f, Palette.stroke, Palette.fieldFill, Palette.fieldFill)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            textDirection = View.TEXT_DIRECTION_FIRST_STRONG
+            contentDescription = "Raw configuration"
+        }
+        rawInput = raw
+        rawCard.addView(raw, lp(MATCH, WRAP, 12))
+        rawCard.addView(ghostButton("Validate & save") {
+            val t = rawInput?.text?.toString().orEmpty().trim()
+            if (t.isEmpty()) importFailed("چیزی برای ذخیره وارد نشده است.")
+            else { setAddStatus("Importing…", false); importText(t) }
+        }, lp(MATCH, dpi(48), 12))
+        col.addView(rawCard, lp(MATCH, WRAP, 14))
+
+        buildProtocolChips()
+        rebuildManualFields()
+
+        root.addView(page, FrameLayout.LayoutParams(MATCH, MATCH))
+        addOverlay = page
+        page.alpha = 0f
+        page.animate().alpha(1f).setDuration(200).start()
+        staggerIn(col)
+    }
+
+    private fun closeAddServer() {
+        val v = addOverlay ?: return
+        addOverlay = null
+        runCatching {
+            (getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+                .hideSoftInputFromWindow(v.windowToken, 0)
+        }
+        addStatus = null; manualFieldsBox = null; manualProtoRow = null; manualError = null
+        manualSaveBtn = null; rawInput = null; addScroll = null
+        manualFieldViews.clear()
+        v.animate().alpha(0f).setDuration(160).withEndAction { (v.parent as? ViewGroup)?.removeView(v) }.start()
+    }
+
+    private fun actionTile(icon: Icon, label: String, sub: String, onClick: () -> Unit): View {
+        val c = GlassCard(this, 18f, pad = 10).apply {
+            gravity = Gravity.CENTER
+            isClickable = true
+            contentDescription = label
+            setOnClickListener { onClick() }
+            pressable(0.96f)
+        }
+        c.addView(IconView(this, icon, Palette.cyan), LinearLayout.LayoutParams(dpi(28), dpi(28)).apply { gravity = Gravity.CENTER_HORIZONTAL })
+        c.addView(tv(label, 14f, Palette.text, 2).apply { gravity = Gravity.CENTER }, lp(MATCH, WRAP, 8))
+        c.addView(tv(sub, 10.5f, Palette.muted, 0).apply { gravity = Gravity.CENTER }, lp(MATCH, WRAP, 2))
+        return c
+    }
+
+    /** Progress and error line for imports. Success closes the page and the list shows the new profile. */
+    private fun setAddStatus(message: String, error: Boolean) {
+        val s = addStatus ?: return
+        s.text = message
+        s.setTextColor(if (error) Palette.red else Palette.cyan)
+        s.visibility = View.VISIBLE
+        manualSaveBtn?.apply {
+            isEnabled = error
+            alpha = if (error) 1f else 0.6f
+            text = if (error) "Save server" else "Saving…"
+        }
+    }
+
+    private fun chip(label: String, selected: Boolean, onClick: () -> Unit): TextView =
+        tv(label, 12.5f, if (selected) Palette.onPrimary else Palette.text, 1).apply {
+            gravity = Gravity.CENTER
+            minHeight = dpi(40)
+            setPadding(dpi(14), dpi(9), dpi(14), dpi(9))
+            background = if (selected)
+                GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(Palette.cyan, Palette.mint)).apply { cornerRadius = dp(20f) }
+            else Palette.glass(this@MainActivity, 20f)
+            isClickable = true
+            contentDescription = label
+            setOnClickListener { onClick() }
+            pressable(0.95f)
+        }
+
+    private fun buildProtocolChips() {
+        val row = manualProtoRow ?: return
+        row.removeAllViews()
+        for (p in ManualProtocol.values()) {
+            row.addView(chip(p.label, p == manualProtocol) {
+                if (p != manualProtocol) {
+                    val name = manualValues["name"].orEmpty()
+                    val address = manualValues["address"].orEmpty()
+                    manualProtocol = p
+                    manualValues.clear()
+                    manualValues.putAll(ManualProfile.defaultsFor(p))
+                    manualValues["name"] = name
+                    manualValues["address"] = address
+                    manualError?.visibility = View.GONE
+                    buildProtocolChips()
+                    rebuildManualFields()
+                }
+            }, lp(WRAP, WRAP, 0, 0, 0, 8))
+        }
+    }
+
+    private fun fieldBackground(error: Boolean) =
+        Palette.glass(this, 14f, if (error) Palette.red else Palette.stroke, Palette.fieldFill, Palette.fieldFill)
+
+    private fun rebuildManualFields() {
+        val box = manualFieldsBox ?: return
+        box.removeAllViews()
+        manualFieldViews.clear()
+        for (f in ManualProfile.fields(manualProtocol)) {
+            val cond = f.showWhen
+            if (cond != null && !cond(manualValues)) continue
+            box.addView(tv(f.label + if (f.required) " *" else "", 11f, Palette.muted, 1), lp(MATCH, WRAP, 12))
+            if (f.kind == FieldKind.CHOICE) {
+                val hs = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+                val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                hs.addView(r, FrameLayout.LayoutParams(WRAP, WRAP))
+                val current = manualValues[f.key].orEmpty()
+                for (c in f.choices) {
+                    r.addView(chip(if (c.isEmpty()) "none" else c, c == current) {
+                        manualValues[f.key] = c
+                        rebuildManualFields() // dependent fields (TLS, Reality, transport) appear/disappear
+                    }, lp(WRAP, WRAP, 0, 0, 0, 8))
+                }
+                box.addView(hs, lp(MATCH, WRAP, 6))
+            } else {
+                val et = EditText(this).apply {
+                    hint = f.hint
+                    textSize = 14f
+                    setTextColor(Palette.text)
+                    setHintTextColor(Palette.dim)
+                    setSingleLine(true)
+                    setPadding(dpi(14), 0, dpi(14), 0)
+                    background = fieldBackground(false)
+                    inputType = when (f.kind) {
+                        FieldKind.NUMBER -> InputType.TYPE_CLASS_NUMBER
+                        FieldKind.SECRET -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                        else -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                    }
+                    imeOptions = EditorInfo.IME_ACTION_NEXT
+                    textDirection = View.TEXT_DIRECTION_FIRST_STRONG // Persian and English both render correctly
+                    contentDescription = f.label
+                    setText(manualValues[f.key].orEmpty())
+                    addTextChangedListener(object : TextWatcher {
+                        override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                        override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                        override fun afterTextChanged(s: Editable?) { manualValues[f.key] = s?.toString().orEmpty() }
+                    })
+                }
+                manualFieldViews[f.key] = et
+                box.addView(et, lp(MATCH, dpi(50), 6))
+            }
+        }
+        // Optional flag source for manual profiles (the only reliable country metadata we have for them).
+        box.addView(tv("Country code (optional)", 11f, Palette.muted, 1), lp(MATCH, WRAP, 12))
+        val cc = EditText(this).apply {
+            hint = "e.g. DE, US, TR"
+            textSize = 14f
+            setTextColor(Palette.text)
+            setHintTextColor(Palette.dim)
+            setSingleLine(true)
+            filters = arrayOf<android.text.InputFilter>(android.text.InputFilter.LengthFilter(2))
+            setPadding(dpi(14), 0, dpi(14), 0)
+            background = fieldBackground(false)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            imeOptions = EditorInfo.IME_ACTION_DONE
+            contentDescription = "Country code"
+            setText(manualCountry)
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                override fun afterTextChanged(s: Editable?) { manualCountry = s?.toString().orEmpty() }
+            })
+        }
+        box.addView(cc, lp(MATCH, dpi(50), 6))
+    }
+
+    private fun saveManual() {
+        val values = HashMap(manualValues)
+        for ((_, v) in manualFieldViews) v.background = fieldBackground(false)
+        when (val out = ManualProfile.build(manualProtocol, values)) {
+            is ManualOutcome.Invalid -> {
+                manualError?.apply { text = out.message; visibility = View.VISIBLE }
+                manualFieldViews[out.key]?.let { it.background = fieldBackground(true); it.requestFocus() }
+            }
+            is ManualOutcome.Ok -> {
+                manualError?.visibility = View.GONE
+                setAddStatus("Saving…", false)
+                importText(out.raw, normalizeCountry(manualCountry))
+            }
+        }
+    }
+
+    // =====================================================================
     // Small helpers
     // =====================================================================
 
     private fun lp(w: Int, h: Int, top: Int = 0, bottom: Int = 0, left: Int = 0, right: Int = 0): LinearLayout.LayoutParams =
         LinearLayout.LayoutParams(w, h).apply { setMargins(dpi(left), dpi(top), dpi(right), dpi(bottom)) }
+
+    /** Dialogs follow the in-app theme instead of always using the system dark one. */
+    private fun dialogBuilder(): AlertDialog.Builder = AlertDialog.Builder(
+        this,
+        if (Palette.dark) android.R.style.Theme_Material_Dialog_Alert else android.R.style.Theme_Material_Light_Dialog_Alert
+    )
 
     private fun toast(message: String) {
         Toast.makeText(this, message, Toast.LENGTH_LONG).show()
