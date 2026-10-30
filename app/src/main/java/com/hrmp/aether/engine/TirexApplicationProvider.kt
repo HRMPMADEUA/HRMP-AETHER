@@ -33,17 +33,10 @@ class TirexApplicationProvider(context: Context) : AndroidApplicationProvider {
     )
 
     override suspend fun buildVpnPersistentNotification(status: BackendStatus): Notification =
-        notification(status.activeTunnels.values.firstOrNull()?.tunnel?.name?.let { "$it connected" } ?: "Secure tunnel active")
+        TirexNotifier.buildConnected(context).also { TirexNotifier.startUpdates(context, vpnNotificationId) }
 
     override suspend fun buildProxyPersistentNotification(status: BackendStatus): Notification = notification("TIREXNET secure tunnel")
     override fun refreshStatusUi() = Unit
 
-    private fun notification(message: String): Notification {
-        val pending = PendingIntent.getActivity(context, 14, Intent(context, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(context, channel)
-            else @Suppress("DEPRECATION") Notification.Builder(context)
-        return builder.setContentTitle("TIREXNET").setContentText(message)
-            .setSmallIcon(android.R.drawable.stat_sys_warning).setContentIntent(pending).setOngoing(true).build()
-    }
+    private fun notification(message: String): Notification = TirexNotifier.build(context, "TIREXNET", message, false)
 }
