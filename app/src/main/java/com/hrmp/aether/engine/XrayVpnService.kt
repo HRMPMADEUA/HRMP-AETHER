@@ -272,31 +272,8 @@ class XrayVpnService : VpnService() {
         }
     }
 
-    private fun makeNotification(message: String): Notification {
-        val pending = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE or
-                PendingIntent.FLAG_UPDATE_CURRENT
-        )
-
-        val builder =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                Notification.Builder(this, CHANNEL)
-            } else {
-                @Suppress("DEPRECATION")
-                Notification.Builder(this)
-            }
-
-        return builder
-            .setContentTitle("TIREXNET")
-            .setContentText(message)
-            .setSmallIcon(android.R.drawable.stat_sys_warning)
-            .setContentIntent(pending)
-            .setOngoing(true)
-            .build()
-    }
+    private fun makeNotification(message: String): Notification =
+        TirexNotifier.build(this, "TIREXNET", message, false)
 
     private fun startForegroundCompat() {
         val notification = makeNotification(
@@ -330,6 +307,15 @@ class XrayVpnService : VpnService() {
         active: Boolean
     ) {
         isActive = active
+        if (active) {
+            // Same notification id as the foreground one: name + live speed + Disconnect, refreshed in place.
+            runCatching {
+                getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, TirexNotifier.buildConnected(this))
+            }
+            TirexNotifier.startUpdates(this, NOTIFICATION_ID)
+        } else {
+            TirexNotifier.stopUpdates()
+        }
 
         getSharedPreferences("tirexnet", MODE_PRIVATE)
             .edit()
