@@ -228,6 +228,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         installCrashRecorder()
+        PingTester.networkProvider = { phoneNetwork() }
         val lastCrash = prefs.getString("last_crash", "").orEmpty()
         if (lastCrash.isNotBlank()) { showCrashScreen(lastCrash); return }
         // Theme is restored before any view is built, so Activity re-creation never resets it.
@@ -842,6 +843,7 @@ class MainActivity : Activity() {
             else -> Palette.amber
         }
         r.kind == PingKind.TIMEOUT -> "Timeout" to Palette.red
+        r.kind == PingKind.FAILED && r.method == PingTester.METHOD_OFFLINE -> "No network" to Palette.muted
         r.kind == PingKind.FAILED -> "Unreachable" to Palette.red
         else -> "N/A" to Palette.muted
     }
@@ -915,7 +917,22 @@ class MainActivity : Activity() {
         servers.firstOrNull { it.raw.trim() == raw }?.let { return it }
         val meta = ProfileParser.parse(raw)
         val nm = if (meta.name.isBlank() || ProfileParser.looksTechnical(meta.name)) "Selected server" else meta.name
-        return ServerItem(nm, raw, meta.engine, meta)
+        return ServerItem(nm, raw, meta.engine, meta, false, ProfileParser.flagCountryOf(nm))
+    }
+
+    /** The phone's real internet connection (Wi-Fi, mobile data, ethernet): never the VPN. Null = no internet. */
+    @Suppress("DEPRECATION")
+    private fun phoneNetwork(): android.net.Network? {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager ?: return null
+        var best: android.net.Network? = null
+        for (n in cm.allNetworks) {
+            val c = cm.getNetworkCapabilities(n) ?: continue
+            if (!c.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue
+            if (c.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) continue
+            if (c.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)) return n
+            if (best == null) best = n
+        }
+        return best
     }
 
     // --------------------------------------------------------------- Stats
@@ -1316,7 +1333,8 @@ class MainActivity : Activity() {
             val meta = ProfileParser.parse(raw)
             // Older versions saved the hostname as the name. Repair those on load and never display a hostname.
             val name = ProfileParser.bestName(listOf(obj.optString("name", ""), meta.name), result.size + 1)
-            result.add(ServerItem(name, raw, meta.engine, meta, true, normalizeCountry(obj.optString("country", ""))))
+            result.add(ServerItem(name, raw, meta.engine, meta, true,
+                normalizeCountry(obj.optString("country", "")).ifEmpty { ProfileParser.flagCountryOf(name) }))
         }
         return result
     }
@@ -1387,7 +1405,7 @@ class MainActivity : Activity() {
             if (!ok) { bad++; continue }
             if (!known.add(c.trim())) { dup++; continue }
             val name = ProfileParser.bestName(listOf(meta.name), saved.size + added.size + 1)
-            added.add(ServerItem(name, c.trim(), meta.engine, meta, true, country))
+            added.add(ServerItem(name, c.trim(), meta.engine, meta, true, country.ifEmpty { ProfileParser.flagCountryOf(name) }))
         }
         if (added.isEmpty()) return ImportOutcome(emptyList(), dup, bad, true)
         val persisted = persistLocalProfiles(added + saved)
@@ -1622,13 +1640,20 @@ class MainActivity : Activity() {
                         val obj = item as? JSONObject
                         // Subscription display name first, then the name inside the config itself.
                         // A hostname is never used as a title.
-                        val given = listOf("name", "remarks", "remark", "title", "ps", "label")
-                            .map { k -> obj?.optString(k, "").orEmpty() }
+                        val keys = listOf("name", "remarks", "remark", "title", "ps", "label", "display_name", "displayName")
+                        val extra = ArrayList<String>()
+                        obj?.keys()?.forEach { k ->
+                            val kl = k.lowercase(Locale.US)
+                            if (k !in keys && listOf("name", "remark", "title", "label", "tag", "note", "desc").any { kl.contains(it) }) extra.add(k)
+                        }
+                        val given = (keys + extra).map { k -> obj?.optString(k, "").orEmpty() }
                         val displayName = ProfileParser.bestName(given + meta.name, remote.size + 1)
                         // Country only from explicit metadata supplied with the profile.
-                        val country = listOf("country_code", "countryCode", "cc", "country")
+                        val explicit = listOf("country_code", "countryCode", "cc", "country")
                             .map { k -> normalizeCountry(obj?.optString(k, "").orEmpty()) }
                             .firstOrNull { it.isNotEmpty() }.orEmpty()
+                        // No explicit field: use the flag already written in the profile name.
+                        val country = explicit.ifEmpty { ProfileParser.flagCountryOf(displayName) }
                         remote.add(ServerItem(displayName, raw, meta.engine, meta, false, country))
                     }
                 }
