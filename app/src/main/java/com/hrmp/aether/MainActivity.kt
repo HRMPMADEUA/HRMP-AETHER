@@ -51,6 +51,8 @@ import com.tirexnet.app.engine.PingResult
 import com.tirexnet.app.engine.PingTester
 import com.tirexnet.app.engine.ProfileMeta
 import com.tirexnet.app.engine.ProfileParser
+import com.tirexnet.app.engine.TirexActions
+import com.tirexnet.app.engine.TirexNotifier
 import com.tirexnet.app.engine.TrafficMonitor
 import com.tirexnet.app.engine.WgTunnelEngine
 import com.tirexnet.app.engine.XrayVpnService
@@ -228,6 +230,9 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         installCrashRecorder()
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 77)
         PingTester.networkProvider = { phoneNetwork() }
         val lastCrash = prefs.getString("last_crash", "").orEmpty()
         if (lastCrash.isNotBlank()) { showCrashScreen(lastCrash); return }
@@ -251,6 +256,10 @@ class MainActivity : Activity() {
         reconcileState()
         render()
         applySystemBars() // after setContentView: the decor view exists now
+        if (intent?.getBooleanExtra(TirexActions.EXTRA_AUTO_CONNECT, false) == true) {
+            intent.removeExtra(TirexActions.EXTRA_AUTO_CONNECT)
+            handler.postDelayed({ if (state == OrbState.DISCONNECTED) connect() }, 600L)
+        }
         if (token.isNotBlank()) loadAccount()
     }
 
@@ -1245,7 +1254,9 @@ class MainActivity : Activity() {
         }
         pendingRaw = raw
         pendingEngine = engine
-        prefs.edit().putString("active_engine", engine.name).apply()
+        // The notification and the Quick Settings tile show this name; they can run without the app window.
+        prefs.edit().putString("active_engine", engine.name)
+            .putString(TirexNotifier.KEY_PROFILE_NAME, selectedItem()?.name.orEmpty()).apply()
 
         val permission = VpnService.prepare(this)
         if (permission != null) {
