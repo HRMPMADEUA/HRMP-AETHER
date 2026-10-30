@@ -2096,4 +2096,56 @@ class MainActivity : Activity() {
             setHintTextColor(Palette.dim)
             setSingleLine(true)
             filters = arrayOf<android.text.InputFilter>(android.text.InputFilter.LengthFilter(2))
-   
+            setPadding(dpi(14), 0, dpi(14), 0)
+            background = fieldBackground(false)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            imeOptions = EditorInfo.IME_ACTION_DONE
+            contentDescription = "Country code"
+            setText(manualCountry)
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                override fun afterTextChanged(s: Editable?) { manualCountry = s?.toString().orEmpty() }
+            })
+        }
+        box.addView(cc, lp(MATCH, dpi(50), 6))
+    }
+
+    private fun saveManual() {
+        val values = HashMap(manualValues)
+        for ((_, v) in manualFieldViews) v.background = fieldBackground(false)
+        when (val out = ManualProfile.build(manualProtocol, values)) {
+            is ManualOutcome.Invalid -> {
+                manualError?.apply { text = out.message; visibility = View.VISIBLE }
+                manualFieldViews[out.key]?.let { it.background = fieldBackground(true); it.requestFocus() }
+            }
+            is ManualOutcome.Ok -> {
+                manualError?.visibility = View.GONE
+                setAddStatus("Saving…", false)
+                importText(out.raw, normalizeCountry(manualCountry))
+            }
+        }
+    }
+
+    // =====================================================================
+    // Small helpers
+    // =====================================================================
+
+    private fun lp(w: Int, h: Int, top: Int = 0, bottom: Int = 0, left: Int = 0, right: Int = 0): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(w, h).apply { setMargins(dpi(left), dpi(top), dpi(right), dpi(bottom)) }
+
+    /** Dialogs follow the in-app theme instead of always using the system dark one. */
+    private fun dialogBuilder(): AlertDialog.Builder = AlertDialog.Builder(
+        this,
+        if (Palette.dark) android.R.style.Theme_Material_Dialog_Alert else android.R.style.Theme_Material_Light_Dialog_Alert
+    )
+
+    private fun toast(message: String) {
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+    }
+
+    companion object {
+        private const val VPN_REQUEST = 71
+        private const val PICK_CONFIG = 72
+    }
+}
