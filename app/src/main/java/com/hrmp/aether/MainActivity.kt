@@ -227,12 +227,14 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        installCrashRecorder()
+        val lastCrash = prefs.getString("last_crash", "").orEmpty()
+        if (lastCrash.isNotBlank()) { showCrashScreen(lastCrash); return }
         // Theme is restored before any view is built, so Activity re-creation never resets it.
         Palette.dark = prefs.getBoolean("theme_dark", true)
         if (Build.VERSION.SDK_INT >= 30) window.setDecorFitsSystemWindows(false)
         window.statusBarColor = Color.TRANSPARENT
         window.navigationBarColor = Color.TRANSPARENT
-        applySystemBars()
 
         token = prefs.getString("token", "") ?: ""
         statusMessage = prefs.getString("connection_message", "") ?: ""
@@ -247,11 +249,13 @@ class MainActivity : Activity() {
 
         reconcileState()
         render()
+        applySystemBars() // after setContentView: the decor view exists now
         if (token.isNotBlank()) loadAccount()
     }
 
     override fun onResume() {
         super.onResume()
+        if (crashScreenShown) return
         resumed = true
         reconcileState()
         updateConnectionUi()
@@ -286,6 +290,59 @@ class MainActivity : Activity() {
     // Theme
     // =====================================================================
 
+    // =====================================================================
+    // Crash recorder: stores a redacted stack trace so the next launch can show it
+    // instead of silently closing. Nothing is sent anywhere.
+    // =====================================================================
+
+    private var crashScreenShown = false
+
+    private fun installCrashRecorder() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            runCatching {
+                val trace = android.util.Log.getStackTraceString(error)
+                    .lineSequence().take(18).joinToString("\n") { ConfigSanitizer.redact(it) }
+                prefs.edit().putString("last_crash", trace).commit()
+            }
+            previous?.uncaughtException(thread, error)
+        }
+    }
+
+    private fun showCrashScreen(trace: String) {
+        crashScreenShown = true
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(20), dpi(48), dpi(20), dpi(20)) }
+        col.addView(TextView(this).apply {
+            text = "The app closed unexpectedly last time"
+            textSize = 18f
+            setTextColor(Color.WHITE)
+        })
+        col.addView(TextView(this).apply {
+            text = trace
+            textSize = 11f
+            setTextColor(Color.rgb(255, 190, 120))
+            setTextIsSelectable(true)
+            setPadding(0, dpi(12), 0, dpi(12))
+        })
+        val copy = TextView(this).apply {
+            text = "Copy error"; textSize = 15f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
+            setBackgroundColor(Color.rgb(30, 70, 140)); setPadding(0, dpi(14), 0, dpi(14))
+            setOnClickListener {
+                val m = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                m.setPrimaryClip(ClipData.newPlainText("TIREXNET error", trace))
+            }
+        }
+        val go = TextView(this).apply {
+            text = "Continue to app"; textSize = 15f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
+            setBackgroundColor(Color.rgb(40, 40, 60)); setPadding(0, dpi(14), 0, dpi(14))
+            setOnClickListener { prefs.edit().remove("last_crash").commit(); recreate() }
+        }
+        col.addView(copy, lp(MATCH, WRAP, 4))
+        col.addView(go, lp(MATCH, WRAP, 12))
+        val sv = ScrollView(this).apply { setBackgroundColor(Color.rgb(8, 12, 24)); addView(col) }
+        setContentView(sv)
+    }
+
     private fun toggleTheme() {
         Palette.dark = !Palette.dark
         prefs.edit().putBoolean("theme_dark", Palette.dark).apply()
@@ -295,6 +352,10 @@ class MainActivity : Activity() {
 
     /** Dark icons on light backgrounds and vice versa. */
     private fun applySystemBars() {
+        runCatching { applySystemBarsUnsafe() }
+    }
+
+    private fun applySystemBarsUnsafe() {
         if (Build.VERSION.SDK_INT >= 30) {
             val mask = android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
                 android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
