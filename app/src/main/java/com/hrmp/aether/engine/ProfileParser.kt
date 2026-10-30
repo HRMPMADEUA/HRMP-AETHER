@@ -83,9 +83,30 @@ object ProfileParser {
     fun bestName(candidates: List<String>, fallbackIndex: Int): String {
         for (c in candidates) {
             val v = cleanName(c)
-            if (v.isNotBlank() && !looksTechnical(v)) return v
+            if (v.isNotBlank() && !looksTechnical(v) && !isPlaceholder(v)) return v
         }
         return "Server $fallbackIndex"
+    }
+
+    /** Generic auto-numbered titles such as "Profile 3" or "Server 2" are not real names. */
+    fun isPlaceholder(v: String): Boolean =
+        Regex("(?i)^(profile|server|config|configuration|node|پروفایل|سرور|کانفیگ)\\s*[#-]?\\s*\\d*$").matches(v.trim())
+
+    /** ISO country code of the first flag emoji (two regional-indicator symbols) in [name], or "". */
+    fun flagCountryOf(name: String): String {
+        var i = 0
+        while (i < name.length) {
+            val a = name.codePointAt(i)
+            val n = Character.charCount(a)
+            if (a in 0x1F1E6..0x1F1FF && i + n < name.length) {
+                val b = name.codePointAt(i + n)
+                if (b in 0x1F1E6..0x1F1FF) {
+                    return String(charArrayOf(('A' + (a - 0x1F1E6)), ('A' + (b - 0x1F1E6))))
+                }
+            }
+            i += n
+        }
+        return ""
     }
 
     /** True for values like "vless", "dd3.example.ir", "1.2.3.4:443", UUIDs, "Profile 3". */
