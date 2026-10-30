@@ -1,5 +1,6 @@
 package com.tirexnet.app.engine
 
+import android.net.Network
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -49,6 +50,15 @@ object PingTester {
     private val cache = ConcurrentHashMap<String, PingResult>()
     private val waiting = HashMap<String, MutableList<(PingResult) -> Unit>>()
 
+    /**
+     * Supplies the phone's own internet connection (Wi-Fi/cellular, never the VPN), so a server can be
+     * tested without being connected and while the VPN is on. Set once by the Activity.
+     */
+    @Volatile var networkProvider: (() -> Network?)? = null
+
+    /** Returned when the phone has no usable internet connection at all. */
+    const val METHOD_OFFLINE = "offline"
+
     fun cached(key: String): PingResult? = cache[key]
 
     fun isRunning(key: String): Boolean = synchronized(waiting) { waiting.containsKey(key) }
@@ -62,41 +72,46 @@ object PingTester {
             main.post { onResult(hit!!) }
             return
         }
+        val network = try { networkProvider?.invoke() } catch (_: Throwable) { null }
         synchronized(waiting) {
             val list = waiting[key]
             if (list != null) { list.add(onResult); return } // duplicate request: join the running one
             waiting[key] = mutableListOf(onResult)
         }
         pool.execute {
-            val result = try { measure(meta) } catch (_: Throwable) { PingResult(PingKind.FAILED, method = "error") }
-            cache[key] = result
+            val result = try { measure(meta, network, networkProvider != null) } catch (_: Throwable) { PingResult(PingKind.FAILED, method = "error") }
+            if (result.method == METHOD_OFFLINE) cache.remove(key) else cache[key] = result
             val callbacks = synchronized(waiting) { waiting.remove(key) ?: mutableListOf() }
             main.post { callbacks.forEach { it(result) } }
         }
     }
 
-    private fun measure(meta: ProfileMeta): PingResult {
+    private fun measure(meta: ProfileMeta, network: Network?, needNetwork: Boolean): PingResult {
         if (meta.host.isBlank()) return PingResult(PingKind.FAILED, method = "no endpoint")
+        if (needNetwork && network == null) return PingResult(PingKind.FAILED, method = METHOD_OFFLINE)
         return when (meta.engine) {
-            ConfigEngine.XRAY -> tcpConnect(meta)
+            ConfigEngine.XRAY -> tcpConnect(meta, network)
             ConfigEngine.WIREGUARD, ConfigEngine.AMNEZIAWG -> icmp(meta.host)
             else -> PingResult(PingKind.UNSUPPORTED)
         }
     }
 
-    private fun resolve(host: String): InetAddress? {
-        val f = resolver.submit(Callable<InetAddress?> { try { InetAddress.getByName(host) } catch (_: Throwable) { null } })
+    private fun resolve(host: String, network: Network?): InetAddress? {
+        val f = resolver.submit(Callable<InetAddress?> {
+            try { if (network != null) network.getByName(host) else InetAddress.getByName(host) } catch (_: Throwable) { null }
+        })
         return try { f.get(RESOLVE_TIMEOUT_MS, TimeUnit.MILLISECONDS) } catch (_: TimeoutException) { f.cancel(true); null } catch (_: Throwable) { null }
     }
 
-    private fun tcpConnect(meta: ProfileMeta): PingResult {
+    private fun tcpConnect(meta: ProfileMeta, network: Network?): PingResult {
         val port = if (meta.port in 1..65535) meta.port else 443
-        val addr = resolve(meta.host) ?: return PingResult(PingKind.FAILED, method = "dns")
+        val addr = resolve(meta.host, network) ?: return PingResult(PingKind.FAILED, method = "dns")
         var best = Long.MAX_VALUE
         var timedOut = false
         for (attempt in 0 until 2) {
             val s = Socket()
             try {
+                network?.bindSocket(s) // leave through the phone's own connection, not through the VPN tunnel
                 val t0 = SystemClock.elapsedRealtimeNanos()
                 s.connect(InetSocketAddress(addr, port), CONNECT_TIMEOUT_MS)
                 val dt = (SystemClock.elapsedRealtimeNanos() - t0) / 1_000_000L
