@@ -1606,7 +1606,7 @@ class MainActivity : Activity() {
                 }
             } catch (e: Exception) {
                 if (e.message.orEmpty().contains("401")) {
-                    prefs.edit().remove("token").apply()
+                    prefs.edit().remove("token").remove("remote_servers_cache").apply()
                     token = ""
                     runOnUiThread { render(); toast("نشست منقضی شده؛ دوباره وارد شو.") }
                 } else {
@@ -1620,6 +1620,29 @@ class MainActivity : Activity() {
         }
     }
 
+    // Last successfully downloaded subscription list, kept on the phone for offline use.
+    private fun saveRemoteCache(remote: List<ServerItem>) {
+        val arr = JSONArray()
+        remote.forEach { arr.put(JSONObject().put("name", it.name).put("raw", it.raw).put("country", it.country)) }
+        prefs.edit().putString("remote_servers_cache", arr.toString()).apply()
+    }
+
+    private fun loadRemoteCache(): List<ServerItem> {
+        val text = prefs.getString("remote_servers_cache", "[]") ?: "[]"
+        val arr = runCatching { JSONArray(text) }.getOrElse { JSONArray() }
+        val out = ArrayList<ServerItem>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val raw = o.optString("raw", "").trim()
+            if (raw.isEmpty()) continue
+            val meta = ProfileParser.parse(raw)
+            val name = ProfileParser.bestName(listOf(o.optString("name", ""), meta.name), out.size + 1)
+            out.add(ServerItem(name, raw, meta.engine, meta, false,
+                normalizeCountry(o.optString("country", "")).ifEmpty { ProfileParser.flagCountryOf(name) }))
+        }
+        return out
+    }
+
     private fun loadServers() {
         if (token.isBlank()) {
             servers = loadLocalProfiles()
@@ -1628,7 +1651,15 @@ class MainActivity : Activity() {
             if (servers.isEmpty()) toast("ابتدا وارد حساب شو یا یک پروفایل محلی ذخیره کن.")
             return
         }
-        serversState = ServersState.LOADING
+        // Show the last downloaded list right away (works with no internet / without a VPN),
+        // then refresh it in the background. The skeleton is only used on the very first load.
+        val cached = loadRemoteCache()
+        if (cached.isNotEmpty() && servers.isEmpty()) {
+            servers = mergeSavedAndRemote(cached)
+            serversState = ServersState.READY
+        } else if (servers.isEmpty()) {
+            serversState = ServersState.LOADING
+        }
         rebuildServerList(-1)
         val t = token
         io.execute {
@@ -1668,6 +1699,7 @@ class MainActivity : Activity() {
                         remote.add(ServerItem(displayName, raw, meta.engine, meta, false, country))
                     }
                 }
+                if (remote.isNotEmpty()) saveRemoteCache(remote) // keep for the next launch without internet
                 runOnUiThread {
                     servers = mergeSavedAndRemote(remote)
                     serversState = ServersState.READY
@@ -1676,13 +1708,14 @@ class MainActivity : Activity() {
                 }
             } catch (e: Exception) {
                 runOnUiThread {
-                    val local = loadLocalProfiles()
-                    if (local.isNotEmpty()) {
-                        servers = local
+                    // No internet / server unreachable: fall back to the saved list and local profiles.
+                    val offline = mergeSavedAndRemote(loadRemoteCache())
+                    if (offline.isNotEmpty()) {
+                        servers = offline
                         serversState = ServersState.READY
                         serversError = ConfigSanitizer.redact(e.message ?: "endpoint unavailable")
                         rebuildServerList(-1)
-                        toast("سرورهای آنلاین بارگذاری نشدند؛ پروفایل‌های ذخیره‌شده نمایش داده شدند.")
+                        toast("اتصال به سرور برقرار نشد؛ لیست ذخیره‌شده‌ی قبلی نمایش داده شد.")
                     } else {
                         serversError = ConfigSanitizer.redact(e.message ?: "endpoint unavailable")
                         serversState = ServersState.ERROR
@@ -1726,7 +1759,7 @@ class MainActivity : Activity() {
     private fun logout() {
         val old = token
         token = ""
-        prefs.edit().remove("token").apply()
+        prefs.edit().remove("token").remove("remote_servers_cache").apply()
         accUser = ""; accStatus = ""; accPanelUser = ""; usedBytes = -1L; limitBytes = 0L; expireText = ""
         servers = emptyList(); serversState = ServersState.IDLE; currentTab = 0
         io.execute { runCatching { request("POST", "/api/logout", old, JSONObject()) } }
@@ -2063,56 +2096,4 @@ class MainActivity : Activity() {
             setHintTextColor(Palette.dim)
             setSingleLine(true)
             filters = arrayOf<android.text.InputFilter>(android.text.InputFilter.LengthFilter(2))
-            setPadding(dpi(14), 0, dpi(14), 0)
-            background = fieldBackground(false)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-            imeOptions = EditorInfo.IME_ACTION_DONE
-            contentDescription = "Country code"
-            setText(manualCountry)
-            addTextChangedListener(object : TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
-                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
-                override fun afterTextChanged(s: Editable?) { manualCountry = s?.toString().orEmpty() }
-            })
-        }
-        box.addView(cc, lp(MATCH, dpi(50), 6))
-    }
-
-    private fun saveManual() {
-        val values = HashMap(manualValues)
-        for ((_, v) in manualFieldViews) v.background = fieldBackground(false)
-        when (val out = ManualProfile.build(manualProtocol, values)) {
-            is ManualOutcome.Invalid -> {
-                manualError?.apply { text = out.message; visibility = View.VISIBLE }
-                manualFieldViews[out.key]?.let { it.background = fieldBackground(true); it.requestFocus() }
-            }
-            is ManualOutcome.Ok -> {
-                manualError?.visibility = View.GONE
-                setAddStatus("Saving…", false)
-                importText(out.raw, normalizeCountry(manualCountry))
-            }
-        }
-    }
-
-    // =====================================================================
-    // Small helpers
-    // =====================================================================
-
-    private fun lp(w: Int, h: Int, top: Int = 0, bottom: Int = 0, left: Int = 0, right: Int = 0): LinearLayout.LayoutParams =
-        LinearLayout.LayoutParams(w, h).apply { setMargins(dpi(left), dpi(top), dpi(right), dpi(bottom)) }
-
-    /** Dialogs follow the in-app theme instead of always using the system dark one. */
-    private fun dialogBuilder(): AlertDialog.Builder = AlertDialog.Builder(
-        this,
-        if (Palette.dark) android.R.style.Theme_Material_Dialog_Alert else android.R.style.Theme_Material_Light_Dialog_Alert
-    )
-
-    private fun toast(message: String) {
-        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-    }
-
-    companion object {
-        private const val VPN_REQUEST = 71
-        private const val PICK_CONFIG = 72
-    }
-}
+   
