@@ -1345,7 +1345,7 @@ class MainActivity : Activity() {
             // Older versions saved the hostname as the name. Repair those on load and never display a hostname.
             val name = ProfileParser.bestName(listOf(obj.optString("name", ""), meta.name), result.size + 1)
             result.add(ServerItem(name, raw, meta.engine, meta, true,
-                normalizeCountry(obj.optString("country", "")).ifEmpty { ProfileParser.flagCountryOf(name) }))
+                ProfileParser.flagCountryOf(name)))
         }
         return result
     }
@@ -1416,7 +1416,7 @@ class MainActivity : Activity() {
             if (!ok) { bad++; continue }
             if (!known.add(c.trim())) { dup++; continue }
             val name = ProfileParser.bestName(listOf(meta.name), saved.size + added.size + 1)
-            added.add(ServerItem(name, c.trim(), meta.engine, meta, true, country.ifEmpty { ProfileParser.flagCountryOf(name) }))
+            added.add(ServerItem(name, c.trim(), meta.engine, meta, true, ProfileParser.flagCountryOf(name)))
         }
         if (added.isEmpty()) return ImportOutcome(emptyList(), dup, bad, true)
         val persisted = persistLocalProfiles(added + saved)
@@ -1638,7 +1638,7 @@ class MainActivity : Activity() {
             val meta = ProfileParser.parse(raw)
             val name = ProfileParser.bestName(listOf(o.optString("name", ""), meta.name), out.size + 1)
             out.add(ServerItem(name, raw, meta.engine, meta, false,
-                normalizeCountry(o.optString("country", "")).ifEmpty { ProfileParser.flagCountryOf(name) }))
+                ProfileParser.flagCountryOf(name)))
         }
         return out
     }
@@ -1690,12 +1690,8 @@ class MainActivity : Activity() {
                         }
                         val given = (keys + extra).map { k -> obj?.optString(k, "").orEmpty() }
                         val displayName = ProfileParser.bestName(given + meta.name, remote.size + 1)
-                        // Country only from explicit metadata supplied with the profile.
-                        val explicit = listOf("country_code", "countryCode", "cc", "country")
-                            .map { k -> normalizeCountry(obj?.optString(k, "").orEmpty()) }
-                            .firstOrNull { it.isNotEmpty() }.orEmpty()
-                        // No explicit field: use the flag already written in the profile name.
-                        val country = explicit.ifEmpty { ProfileParser.flagCountryOf(displayName) }
+                        // Country is detected only from a flag emoji in the profile name.
+                        val country = ProfileParser.flagCountryOf(displayName)
                         remote.add(ServerItem(displayName, raw, meta.engine, meta, false, country))
                     }
                 }
