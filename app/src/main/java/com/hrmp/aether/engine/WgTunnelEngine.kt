@@ -67,6 +67,7 @@ object WgTunnelEngine {
     }
 
     fun stop(callback: (String, Boolean) -> Unit) {
+        TirexNotifier.stopUpdates()
         scope.launch {
             try {
                 backend?.stopAllActiveTunnels()?.getOrThrow()
