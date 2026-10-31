@@ -10,6 +10,10 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageInstaller
+import android.app.PendingIntent
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
@@ -33,6 +37,7 @@ import android.view.animation.DecelerateInterpolator
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -98,6 +103,7 @@ class MainActivity : Activity() {
     private class PingHolder(val text: TextView, val button: FrameLayout, val spinner: ProgressBar, val icon: IconView)
     private enum class ServersState { IDLE, LOADING, ERROR, READY }
 
+    private val api = "https://hrmp.hrmpdownloader.kdns.fr"
     private val io = Executors.newSingleThreadExecutor()
     private val handler = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("tirexnet", MODE_PRIVATE) }
@@ -1053,6 +1059,7 @@ class MainActivity : Activity() {
 
         val g1 = GlassCard(this, 20f, pad = 4)
         settingRow(g1, Icon.INFO, "Active engine", "تشخیص خودکار از روی کانفیگ", engineLabelShort()) { }
+        settingRow(g1, Icon.SHIELD, "Split tunneling", "انتخاب برنامه‌های داخل یا خارج تونل • Xray", splitSummary()) { showSplitTunnelDialog() }
         settingRow(g1, Icon.COPY, "Copy diagnostics", "بدون رمز و توکن", null) { copyDiagnostics() }
         settingRow(g1, Icon.TRASH, "Clear saved config", "پاک‌کردن کانفیگ ذخیره‌شده روی گوشی", null) { clearConfig() }
         col.addView(g1, lp(MATCH, WRAP))
@@ -1060,6 +1067,7 @@ class MainActivity : Activity() {
         val g2 = GlassCard(this, 20f, pad = 4)
         settingRow(g2, Icon.SHIELD, "Privacy", "چه چیزی روی گوشی ذخیره می‌شود", null) { showPrivacy() }
         settingRow(g2, Icon.INFO, "App version", packageName, versionName()) { }
+        settingRow(g2, Icon.REFRESH, "App updates", "بررسی نسخه جدید در GitHub و نصب APK", "Check") { checkForUpdates() }
         col.addView(g2, lp(MATCH, WRAP, 12))
         return sv
     }
@@ -1089,6 +1097,148 @@ class MainActivity : Activity() {
         row.addView(t, LinearLayout.LayoutParams(0, WRAP, 1f))
         if (value != null) row.addView(tv(value, 12f, Palette.cyan, 1))
         parent.addView(row, lp(MATCH, WRAP))
+    }
+
+    private fun splitSummary(): String {
+        val count = prefs.getStringSet("split_packages", emptySet())?.size ?: 0
+        return if (count == 0) "All apps • default" else "$count selected"
+    }
+
+    private fun showSplitTunnelDialog() {
+        val pm = packageManager
+        val selected = (prefs.getStringSet("split_packages", emptySet()) ?: emptySet()).toMutableSet()
+        var mode = prefs.getString("split_mode", "exclude") ?: "exclude"
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(16), dpi(10), dpi(16), dpi(4)) }
+        root.addView(tv("Choose how apps use the VPN", 14f, Palette.text, 2), lp(MATCH, WRAP, 4))
+        root.addView(tv("Include mode: only selected apps use the tunnel. Exclude mode: selected apps bypass it. Currently applied to Xray profiles; the WireGuard/AmneziaWG backend does not expose per-app routing.", 11f, Palette.muted, 0), lp(MATCH, WRAP, 6))
+        val modes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        fun modeButton(label: String, value: String): TextView = tv(label, 11f, if (mode == value) Palette.ice else Palette.muted, 2).apply {
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply { cornerRadius = dpi(12).toFloat(); setColor(if (mode == value) Palette.bg2 else Palette.bg1) ; setStroke(dpi(1), if (mode == value) Palette.cyan else Palette.stroke) }
+            setPadding(dpi(10), dpi(11), dpi(10), dpi(11))
+            setOnClickListener { mode = value; modes.removeAllViews(); modes.addView(modeButton("Only selected apps", "include"), LinearLayout.LayoutParams(0, WRAP, 1f).apply { rightMargin = dpi(5) }); modes.addView(modeButton("Exclude selected", "exclude"), LinearLayout.LayoutParams(0, WRAP, 1f).apply { leftMargin = dpi(5) }) }
+        }
+        modes.addView(modeButton("Only selected apps", "include"), LinearLayout.LayoutParams(0, WRAP, 1f).apply { rightMargin = dpi(5) })
+        modes.addView(modeButton("Exclude selected", "exclude"), LinearLayout.LayoutParams(0, WRAP, 1f).apply { leftMargin = dpi(5) })
+        root.addView(modes, lp(MATCH, WRAP, 12, 10))
+        val search = EditText(this).apply { hint = "Search installed apps"; textSize = 13f; singleLine = true; setPadding(dpi(12), dpi(9), dpi(12), dpi(9)); background = fieldBackground(false) }
+        root.addView(search, lp(MATCH, dpi(46), 2, 8))
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val scroll = ScrollView(this).apply { addView(list) }
+        root.addView(scroll, LinearLayout.LayoutParams(MATCH, dpi(350)))
+        val apps = runCatching { pm.getInstalledApplications(PackageManager.GET_META_DATA).filter { it.packageName != packageName && pm.getLaunchIntentForPackage(it.packageName) != null }.sortedBy { pm.getApplicationLabel(it).toString().lowercase(Locale.ROOT) } }.getOrDefault(emptyList())
+        fun renderApps(query: String) {
+            list.removeAllViews()
+            val filtered = apps.filter { pm.getApplicationLabel(it).toString().contains(query, true) }
+            filtered.forEach { info ->
+                val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dpi(8), dpi(7), dpi(8), dpi(7)); background = GradientDrawable().apply { cornerRadius = dpi(13).toFloat(); setColor(Palette.bg1) } }
+                val icon = ImageView(this).apply { setImageDrawable(runCatching { pm.getApplicationIcon(info) }.getOrNull()); scaleType = ImageView.ScaleType.FIT_CENTER }
+                row.addView(icon, lp(dpi(38), dpi(38)))
+                val labels = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(10), 0, dpi(4), 0) }
+                labels.addView(tv(pm.getApplicationLabel(info).toString(), 12.5f, Palette.text, 1))
+                labels.addView(tv(info.packageName, 9f, Palette.muted, 0))
+                row.addView(labels, LinearLayout.LayoutParams(0, WRAP, 1f))
+                val check = android.widget.CheckBox(this).apply { buttonTintList = ColorStateList.valueOf(Palette.cyan); isChecked = selected.contains(info.packageName); setOnCheckedChangeListener { _, checked -> if (checked) selected.add(info.packageName) else selected.remove(info.packageName) } }
+                row.addView(check, lp(WRAP, WRAP))
+                list.addView(row, lp(MATCH, WRAP, 3, 3))
+            }
+            if (filtered.isEmpty()) list.addView(tv("No matching apps", 12f, Palette.muted, 0).apply { gravity = Gravity.CENTER }, lp(MATCH, dpi(50)))
+        }
+        renderApps("")
+        search.addTextChangedListener(object : TextWatcher { override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {} ; override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { renderApps(s?.toString().orEmpty()) }; override fun afterTextChanged(s: Editable?) {} })
+        dialogBuilder().setTitle("SPLIT TUNNELING").setView(root)
+            .setNegativeButton("Cancel", null)
+            .setNeutralButton("Clear", null)
+            .setPositiveButton("Save", null)
+            .create().also { dialog ->
+                dialog.setOnShowListener {
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                        prefs.edit().putStringSet("split_packages", selected.toSet()).putString("split_mode", mode).apply()
+                        dialog.dismiss()
+                        toast("Split tunneling saved. Reconnect to apply.")
+                        render()
+                    }
+                    dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                        selected.clear(); mode = "exclude"
+                        prefs.edit().remove("split_packages").putString("split_mode", "exclude").apply()
+                        dialog.dismiss(); toast("Split tunneling reset."); render()
+                    }
+                }
+                dialog.show()
+            }
+    }
+
+    private fun isNewerVersion(remote: String, current: String): Boolean {
+        fun parts(value: String): List<Int> = Regex("\\d+").findAll(value).mapNotNull { it.value.toIntOrNull() }.toList()
+        val a = parts(remote); val b = parts(current)
+        if (a.isEmpty() || b.isEmpty()) return remote != current
+        for (i in 0 until maxOf(a.size, b.size)) {
+            val x = a.getOrElse(i) { 0 }; val y = b.getOrElse(i) { 0 }
+            if (x != y) return x > y
+        }
+        return false
+    }
+
+    private fun checkForUpdates() {
+        toast("Checking GitHub releases…")
+        io.execute {
+            try {
+                val url = URL("https://api.github.com/repos/HRMPMADEUA/TIREXNET/releases/latest")
+                val connection = (url.openConnection() as HttpURLConnection).apply { connectTimeout = 12000; readTimeout = 15000; setRequestProperty("Accept", "application/vnd.github+json"); setRequestProperty("User-Agent", "TIREXNET-Android") }
+                val body = connection.inputStream.bufferedReader().use { it.readText() }; connection.disconnect()
+                val release = JSONObject(body)
+                val tag = release.optString("tag_name", "").removePrefix("v")
+                val assets = release.optJSONArray("assets") ?: JSONArray()
+                var apkUrl = ""
+                var apkName = "TIREXNET.apk"
+                for (i in 0 until assets.length()) {
+                    val asset = assets.optJSONObject(i) ?: continue
+                    val name = asset.optString("name", "")
+                    if (name.endsWith(".apk", true)) { apkUrl = asset.optString("browser_download_url", ""); apkName = name; break }
+                }
+                runOnUiThread {
+                    if (tag.isBlank()) toast("GitHub release version was not found.")
+                    else if (!isNewerVersion(tag, versionName())) toast("TIREXNET is up to date (${versionName()}).")
+                    else if (apkUrl.isBlank()) toast("Release $tag found, but no APK asset was uploaded.")
+                    else dialogBuilder().setTitle("TIREXNET update available")
+                        .setMessage("Installed: ${versionName()}\nLatest: $tag\n\nDownload and install $apkName?")
+                        .setNegativeButton("Later", null)
+                        .setPositiveButton("Download & install") { _, _ -> downloadAndInstall(apkUrl, apkName) }.show()
+                }
+            } catch (e: Throwable) {
+                runOnUiThread { toast("Update check failed: ${e.message ?: "GitHub unavailable"}") }
+            }
+        }
+    }
+
+    private fun downloadAndInstall(apkUrl: String, apkName: String) {
+        if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
+            toast("Allow TIREXNET to install updates, then tap Check again.")
+            startActivity(Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+            return
+        }
+        toast("Downloading update…")
+        io.execute {
+            var sessionId = -1
+            try {
+                val connection = (URL(apkUrl).openConnection() as HttpURLConnection).apply { connectTimeout = 15000; readTimeout = 30000; setRequestProperty("User-Agent", "TIREXNET-Android") }
+                if (connection.responseCode !in 200..299) error("Download HTTP ${connection.responseCode}")
+                val installer = packageManager.packageInstaller
+                val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply { setAppPackageName(packageName) }
+                sessionId = installer.createSession(params)
+                installer.openSession(sessionId).use { session ->
+                    session.openWrite("base.apk", 0, -1).use { output -> connection.inputStream.use { input -> input.copyTo(output) }; session.fsync(output) }
+                    val intent = Intent(this, AppInstallReceiver::class.java).setAction(AppInstallReceiver.ACTION_RESULT)
+                    val pending = PendingIntent.getBroadcast(this, sessionId, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE)
+                    session.commit(pending.intentSender)
+                }
+                connection.disconnect()
+                runOnUiThread { toast("Download complete. Android installer opened.") }
+            } catch (e: Throwable) {
+                if (sessionId >= 0) runCatching { packageManager.packageInstaller.abandonSession(sessionId) }
+                runOnUiThread { toast("Update install failed: ${e.message ?: "unknown error"}") }
+            }
+        }
     }
 
     private fun scrollToSettings() {
@@ -1580,7 +1730,7 @@ class MainActivity : Activity() {
                 val response = request("POST", "/api/login", null, JSONObject().put("username", user).put("password", pass))
                 val newToken = response.optString("token")
                 require(newToken.isNotBlank()) { response.optString("error", "Login token is missing.") }
-                prefs.edit().putString("token", newToken).remove("token_base").apply()
+                prefs.edit().putString("token", newToken).putString("token_base", lastBase).apply()
                 token = newToken
                 runOnUiThread {
                     currentTab = 0
@@ -1598,7 +1748,7 @@ class MainActivity : Activity() {
         }
     }
 
-    /** Account creation is provisioned by the administrator; app API traffic remains Worker-only. */
+    /** Creates an account on the first reachable server (Iranian server, then Worker) and signs in. */
     private fun register() {
         val user = usernameInput?.text?.toString().orEmpty().trim()
         val pass = passwordInput?.text?.toString().orEmpty()
@@ -1617,7 +1767,7 @@ class MainActivity : Activity() {
                     newToken = response.optString("token")
                 }
                 require(newToken.isNotBlank()) { "Token is missing." }
-                prefs.edit().putString("token", newToken).remove("token_base").apply()
+                prefs.edit().putString("token", newToken).putString("token_base", lastBase).apply()
                 token = newToken
                 runOnUiThread {
                     registerMode = false
@@ -1630,7 +1780,7 @@ class MainActivity : Activity() {
                 }
             } catch (e: Exception) {
                 val msg = when ((e as? ApiHttpException)?.code) {
-                    403, 404, 405 -> "ثبت‌نام مستقیم غیرفعال است؛ برای ساخت حساب با مدیر تماس بگیر."
+                    404, 405 -> "ثبت‌نام روی این سرور فعال نیست."
                     409 -> "این نام کاربری قبلاً ثبت شده است."
                     null -> "ثبت‌نام ناموفق بود: " + ConfigSanitizer.redact(e.message ?: "network error")
                     else -> "ثبت‌نام ناموفق بود (HTTP ${(e as ApiHttpException).code})."
@@ -1785,34 +1935,47 @@ class MainActivity : Activity() {
         }
     }
 
-    @Volatile private var lastBase = ApiConfig.WORKER_BASE
+    @Volatile private var lastBase = ""
+    @Volatile private var iranDownUntil = 0L
 
     /**
-     * Strict Cloudflare-only routing. Login, account refresh, subscription refresh,
-     * profile downloads, and logout can never fall back to the Iranian VPS.
+     * Tries the Iranian server first and falls back to the Worker when it cannot be reached (network error,
+     * timeout, 502-504). A token only works on the server that issued it, so authenticated calls go to that
+     * server first, and a 401 from any other server is never treated as "session expired".
      */
     private fun request(method: String, path: String, bearer: String?, body: JSONObject?): JSONObject {
-        val base = ApiConfig.WORKER_BASE
-        return try {
-            val result = requestOnce(base, method, path, bearer, body)
-            lastBase = base
-            result
-        } catch (e: ApiHttpException) {
-            // HTTP errors are application responses and must not trigger a fallback.
-            throw e
-        } catch (e: java.io.IOException) {
-            throw ApiUnavailableException("Cloudflare Worker connection failed: ${e.message ?: "network error"}")
+        val all = listOf(ApiConfig.IRAN_BASE, ApiConfig.WORKER_BASE).filter { it.isNotBlank() }
+        val tokenBase = prefs.getString("token_base", "").orEmpty().ifBlank { ApiConfig.WORKER_BASE } // old tokens came from the Worker
+        val order = if (!bearer.isNullOrBlank() && tokenBase in all) listOf(tokenBase) + all.filter { it != tokenBase } else all
+        var last: Exception? = null
+        for ((i, base) in order.withIndex()) {
+            val hasNext = i < order.lastIndex
+            val isIran = base == ApiConfig.IRAN_BASE
+            if (isIran && hasNext && SystemClock.elapsedRealtime() < iranDownUntil) continue
+            try {
+                val r = requestOnce(base, method, path, bearer, body, if (hasNext) ApiConfig.FAST_FAIL_TIMEOUT_MS else ApiConfig.NORMAL_TIMEOUT_MS)
+                if (isIran) iranDownUntil = 0L
+                lastBase = base
+                return r
+            } catch (e: ApiHttpException) {
+                if (e.code in 502..504 && hasNext) { if (isIran) iranDownUntil = SystemClock.elapsedRealtime() + ApiConfig.IRAN_RETRY_AFTER_MS; last = e; continue }
+                if (e.code == 401 && !bearer.isNullOrBlank() && base != tokenBase) { last = ApiUnavailableException("Session belongs to another server."); continue }
+                throw e
+            } catch (e: java.io.IOException) {
+                if (isIran) iranDownUntil = SystemClock.elapsedRealtime() + ApiConfig.IRAN_RETRY_AFTER_MS
+                last = e
+            }
         }
+        throw (last as? java.io.IOException) ?: ApiUnavailableException(last?.message ?: "No server available.")
     }
 
-    private fun requestOnce(base: String, method: String, path: String, bearer: String?, body: JSONObject?): JSONObject {
+    private fun requestOnce(base: String, method: String, path: String, bearer: String?, body: JSONObject?, timeoutMs: Int): JSONObject {
         val c = URL(base + path).openConnection() as HttpURLConnection
         try {
             c.requestMethod = method
-            c.connectTimeout = ApiConfig.CONNECT_TIMEOUT_MS
-            c.readTimeout = ApiConfig.READ_TIMEOUT_MS
+            c.connectTimeout = timeoutMs
+            c.readTimeout = ApiConfig.NORMAL_TIMEOUT_MS
             c.setRequestProperty("Accept", "application/json")
-            c.setRequestProperty("X-Client", "HRMP-AETHER-Android")
             if (!bearer.isNullOrBlank()) c.setRequestProperty("Authorization", "Bearer $bearer")
             if (body != null) {
                 c.doOutput = true
@@ -1820,8 +1983,7 @@ class MainActivity : Activity() {
                 c.outputStream.use { it.write(body.toString().toByteArray(StandardCharsets.UTF_8)) }
             }
             val code = c.responseCode
-            val responseText = (if (code in 200..299) c.inputStream else c.errorStream)
-                ?.bufferedReader()?.use { it.readText() }.orEmpty()
+            val responseText = (if (code in 200..299) c.inputStream else c.errorStream)?.bufferedReader()?.use { it.readText() }.orEmpty()
             if (code !in 200..299) throw ApiHttpException(code, responseText)
             return JSONObject(responseText)
         } finally {
