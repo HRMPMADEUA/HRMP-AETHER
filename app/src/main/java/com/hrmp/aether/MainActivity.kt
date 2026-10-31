@@ -40,6 +40,9 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.tirexnet.app.engine.ConfigDetector
+import com.tirexnet.app.engine.ApiConfig
+import com.tirexnet.app.engine.ApiHttpException
+import com.tirexnet.app.engine.ApiUnavailableException
 import com.tirexnet.app.engine.ConfigEngine
 import com.tirexnet.app.engine.ConfigSanitizer
 import com.tirexnet.app.engine.FieldKind
@@ -186,6 +189,8 @@ class MainActivity : Activity() {
     private var usernameInput: EditText? = null
     private var passwordInput: EditText? = null
     private var loginButton: TextView? = null
+    private var confirmInput: EditText? = null
+    private var registerMode = false
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -1105,10 +1110,23 @@ class MainActivity : Activity() {
         passwordInput = field("Password", true)
         card.addView(usernameInput!!, lp(MATCH, dpi(54)))
         card.addView(passwordInput!!, lp(MATCH, dpi(54), 10))
-        val btn = primaryButton("Sign in") { login() }
+        if (registerMode) {
+            confirmInput = field("Confirm password", true)
+            card.addView(confirmInput!!, lp(MATCH, dpi(54), 10))
+        }
+        val btn = primaryButton(if (registerMode) "Create account" else "Sign in") { if (registerMode) register() else login() }
         loginButton = btn
         card.addView(btn, lp(MATCH, dpi(54), 16))
         col.addView(card, lp(MATCH, WRAP, 26))
+        col.addView(
+            tv(if (registerMode) "حساب داری؟ وارد شو" else "حساب نداری؟ ثبت‌نام کن", 13.5f, Palette.cyan, 1).apply {
+                gravity = Gravity.CENTER
+                minHeight = dpi(48)
+                isClickable = true
+                setOnClickListener { registerMode = !registerMode; render() }
+            },
+            lp(MATCH, WRAP, 10)
+        )
         col.addView(
             tv("احراز هویت از طریق سرویس TIREXNET انجام می‌شود.", 10.5f, Palette.dim, 0).apply { gravity = Gravity.CENTER },
             lp(MATCH, WRAP, 16)
@@ -1563,7 +1581,7 @@ class MainActivity : Activity() {
                 val response = request("POST", "/api/login", null, JSONObject().put("username", user).put("password", pass))
                 val newToken = response.optString("token")
                 require(newToken.isNotBlank()) { response.optString("error", "Login token is missing.") }
-                prefs.edit().putString("token", newToken).apply()
+                prefs.edit().putString("token", newToken).putString("token_base", lastBase).apply()
                 token = newToken
                 runOnUiThread {
                     currentTab = 0
@@ -1576,6 +1594,51 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     loginButton?.apply { text = "Sign in"; alpha = 1f; isEnabled = true }
                     toast("ورود ناموفق بود: " + (e.message ?: "network error"))
+                }
+            }
+        }
+    }
+
+    /** Creates an account on the first reachable server (Iranian server, then Worker) and signs in. */
+    private fun register() {
+        val user = usernameInput?.text?.toString().orEmpty().trim()
+        val pass = passwordInput?.text?.toString().orEmpty()
+        val confirm = confirmInput?.text?.toString().orEmpty()
+        if (!Regex("^[A-Za-z0-9_.-]{3,32}$").matches(user)) { toast("نام کاربری ۳ تا ۳۲ حرف انگلیسی، عدد یا _ . - باشد."); return }
+        if (pass.length < 8) { toast("رمز عبور حداقل ۸ کاراکتر باشد."); return }
+        if (pass != confirm) { toast("تکرار رمز عبور یکسان نیست."); return }
+        loginButton?.apply { text = "Creating…"; alpha = 0.6f; isEnabled = false }
+        io.execute {
+            try {
+                val body = JSONObject().put("username", user).put("password", pass)
+                var response = request("POST", "/api/register", null, body)
+                var newToken = response.optString("token")
+                if (newToken.isBlank()) { // server created the account but did not return a token: sign in with it
+                    response = request("POST", "/api/login", null, body)
+                    newToken = response.optString("token")
+                }
+                require(newToken.isNotBlank()) { "Token is missing." }
+                prefs.edit().putString("token", newToken).putString("token_base", lastBase).apply()
+                token = newToken
+                runOnUiThread {
+                    registerMode = false
+                    currentTab = 0
+                    serversState = ServersState.IDLE
+                    servers = emptyList()
+                    render()
+                    loadAccount()
+                    toast("حساب ساخته شد.")
+                }
+            } catch (e: Exception) {
+                val msg = when ((e as? ApiHttpException)?.code) {
+                    404, 405 -> "ثبت‌نام روی این سرور فعال نیست."
+                    409 -> "این نام کاربری قبلاً ثبت شده است."
+                    null -> "ثبت‌نام ناموفق بود: " + ConfigSanitizer.redact(e.message ?: "network error")
+                    else -> "ثبت‌نام ناموفق بود (HTTP ${(e as ApiHttpException).code})."
+                }
+                runOnUiThread {
+                    loginButton?.apply { text = "Create account"; alpha = 1f; isEnabled = true }
+                    toast(msg)
                 }
             }
         }
@@ -1603,7 +1666,7 @@ class MainActivity : Activity() {
                 }
             } catch (e: Exception) {
                 if (e.message.orEmpty().contains("401")) {
-                    prefs.edit().remove("token").remove("remote_servers_cache").apply()
+                    prefs.edit().remove("token").remove("token_base").remove("remote_servers_cache").apply()
                     token = ""
                     runOnUiThread { render(); toast("نشست منقضی شده؛ دوباره وارد شو.") }
                 } else {
@@ -1723,12 +1786,46 @@ class MainActivity : Activity() {
         }
     }
 
+    @Volatile private var lastBase = ""
+    @Volatile private var iranDownUntil = 0L
+
+    /**
+     * Tries the Iranian server first and falls back to the Worker when it cannot be reached (network error,
+     * timeout, 502-504). A token only works on the server that issued it, so authenticated calls go to that
+     * server first, and a 401 from any other server is never treated as "session expired".
+     */
     private fun request(method: String, path: String, bearer: String?, body: JSONObject?): JSONObject {
-        val c = URL(api + path).openConnection() as HttpURLConnection
+        val all = listOf(ApiConfig.IRAN_BASE, ApiConfig.WORKER_BASE).filter { it.isNotBlank() }
+        val tokenBase = prefs.getString("token_base", "").orEmpty().ifBlank { ApiConfig.WORKER_BASE } // old tokens came from the Worker
+        val order = if (!bearer.isNullOrBlank() && tokenBase in all) listOf(tokenBase) + all.filter { it != tokenBase } else all
+        var last: Exception? = null
+        for ((i, base) in order.withIndex()) {
+            val hasNext = i < order.lastIndex
+            val isIran = base == ApiConfig.IRAN_BASE
+            if (isIran && hasNext && SystemClock.elapsedRealtime() < iranDownUntil) continue
+            try {
+                val r = requestOnce(base, method, path, bearer, body, if (hasNext) ApiConfig.FAST_FAIL_TIMEOUT_MS else ApiConfig.NORMAL_TIMEOUT_MS)
+                if (isIran) iranDownUntil = 0L
+                lastBase = base
+                return r
+            } catch (e: ApiHttpException) {
+                if (e.code in 502..504 && hasNext) { if (isIran) iranDownUntil = SystemClock.elapsedRealtime() + ApiConfig.IRAN_RETRY_AFTER_MS; last = e; continue }
+                if (e.code == 401 && !bearer.isNullOrBlank() && base != tokenBase) { last = ApiUnavailableException("Session belongs to another server."); continue }
+                throw e
+            } catch (e: java.io.IOException) {
+                if (isIran) iranDownUntil = SystemClock.elapsedRealtime() + ApiConfig.IRAN_RETRY_AFTER_MS
+                last = e
+            }
+        }
+        throw (last as? java.io.IOException) ?: ApiUnavailableException(last?.message ?: "No server available.")
+    }
+
+    private fun requestOnce(base: String, method: String, path: String, bearer: String?, body: JSONObject?, timeoutMs: Int): JSONObject {
+        val c = URL(base + path).openConnection() as HttpURLConnection
         try {
             c.requestMethod = method
-            c.connectTimeout = 15000
-            c.readTimeout = 15000
+            c.connectTimeout = timeoutMs
+            c.readTimeout = ApiConfig.NORMAL_TIMEOUT_MS
             c.setRequestProperty("Accept", "application/json")
             if (!bearer.isNullOrBlank()) c.setRequestProperty("Authorization", "Bearer $bearer")
             if (body != null) {
@@ -1738,7 +1835,7 @@ class MainActivity : Activity() {
             }
             val code = c.responseCode
             val responseText = (if (code in 200..299) c.inputStream else c.errorStream)?.bufferedReader()?.use { it.readText() }.orEmpty()
-            if (code !in 200..299) throw IllegalStateException("HTTP $code: $responseText")
+            if (code !in 200..299) throw ApiHttpException(code, responseText)
             return JSONObject(responseText)
         } finally {
             c.disconnect()
@@ -1756,7 +1853,7 @@ class MainActivity : Activity() {
     private fun logout() {
         val old = token
         token = ""
-        prefs.edit().remove("token").remove("remote_servers_cache").apply()
+        prefs.edit().remove("token").remove("token_base").remove("remote_servers_cache").apply()
         accUser = ""; accStatus = ""; accPanelUser = ""; usedBytes = -1L; limitBytes = 0L; expireText = ""
         servers = emptyList(); serversState = ServersState.IDLE; currentTab = 0
         io.execute { runCatching { request("POST", "/api/logout", old, JSONObject()) } }
