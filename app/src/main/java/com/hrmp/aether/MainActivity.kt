@@ -103,7 +103,7 @@ class MainActivity : Activity() {
     private class PingHolder(val text: TextView, val button: FrameLayout, val spinner: ProgressBar, val icon: IconView)
     private enum class ServersState { IDLE, LOADING, ERROR, READY }
 
-    private val api = "https://hrmp.hrmpdownloader.kdns.fr"
+    private val api = "https://netherrap.extraservices.ir"
     private val io = Executors.newSingleThreadExecutor()
     private val handler = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("tirexnet", MODE_PRIVATE) }
@@ -1945,7 +1945,12 @@ class MainActivity : Activity() {
      */
     private fun request(method: String, path: String, bearer: String?, body: JSONObject?): JSONObject {
         val all = listOf(ApiConfig.IRAN_BASE, ApiConfig.WORKER_BASE).filter { it.isNotBlank() }
-        val tokenBase = prefs.getString("token_base", "").orEmpty().ifBlank { ApiConfig.WORKER_BASE } // old tokens came from the Worker
+        val tokenBase = prefs.getString("token_base", "").orEmpty().ifBlank { ApiConfig.WORKER_BASE }
+        // Tokens issued by the retired Worker cannot authenticate against the VPS database.
+        if (!bearer.isNullOrBlank() && tokenBase.isNotBlank() && tokenBase !in all) {
+            prefs.edit().remove("token").remove("token_base").remove("remote_servers_cache").apply()
+            throw ApiUnavailableException("سرور برنامه تغییر کرده؛ لطفاً دوباره وارد حساب شو.")
+        }
         val order = if (!bearer.isNullOrBlank() && tokenBase in all) listOf(tokenBase) + all.filter { it != tokenBase } else all
         var last: Exception? = null
         for ((i, base) in order.withIndex()) {
