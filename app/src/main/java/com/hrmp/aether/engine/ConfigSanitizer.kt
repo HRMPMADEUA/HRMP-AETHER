@@ -43,6 +43,9 @@ object ConfigSanitizer {
     /** Remove anything that looks like a key, token or share link from text meant for the UI/logs. */
     fun redact(message: String?): String {
         var s = message ?: return ""
+        // Certificates, keys and inline OpenVPN blocks never reach the UI or logs.
+        s = s.replace(Regex("(?s)-----BEGIN [A-Z ]+-----.*?(-----END [A-Z ]+-----|$)"), "<key hidden>")
+        s = s.replace(Regex("(?is)<(ca|cert|key|tls-auth|tls-crypt|tls-crypt-v2|secret)>.*?(</\\1>|$)"), "<block hidden>")
         s = s.replace(Regex("(?i)(vless|vmess|trojan|ss|ssr)://\\S+"), "<link hidden>")
         s = s.replace(Regex("(?im)(private\\s*key|preshared\\s*key|password|token)\\s*[=:]\\s*\\S+"), "$1=<hidden>")
         s = s.replace(Regex("[A-Za-z0-9+/_-]{40,}={0,2}"), "<hidden>")
