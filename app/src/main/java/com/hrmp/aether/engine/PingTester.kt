@@ -92,6 +92,7 @@ object PingTester {
         return when (meta.engine) {
             ConfigEngine.XRAY -> tcpConnect(meta, network)
             ConfigEngine.WIREGUARD, ConfigEngine.AMNEZIAWG -> icmp(meta.host)
+            ConfigEngine.OPENVPN -> if (meta.tcp) tcpConnect(meta, network) else icmp(meta.host)
             else -> PingResult(PingKind.UNSUPPORTED)
         }
     }
