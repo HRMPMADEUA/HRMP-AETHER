@@ -1121,7 +1121,7 @@ class MainActivity : Activity() {
         modes.addView(modeButton("Only selected apps", "include"), LinearLayout.LayoutParams(0, WRAP, 1f).apply { rightMargin = dpi(5) })
         modes.addView(modeButton("Exclude selected", "exclude"), LinearLayout.LayoutParams(0, WRAP, 1f).apply { leftMargin = dpi(5) })
         root.addView(modes, lp(MATCH, WRAP, 12, 10))
-        val search = EditText(this).apply { hint = "Search installed apps"; textSize = 13f; singleLine = true; setPadding(dpi(12), dpi(9), dpi(12), dpi(9)); background = fieldBackground(false) }
+        val search = EditText(this).apply { hint = "Search installed apps"; textSize = 13f; setSingleLine(true); setPadding(dpi(12), dpi(9), dpi(12), dpi(9)); background = fieldBackground(false) }
         root.addView(search, lp(MATCH, dpi(46), 2, 8))
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val scroll = ScrollView(this).apply { addView(list) }
