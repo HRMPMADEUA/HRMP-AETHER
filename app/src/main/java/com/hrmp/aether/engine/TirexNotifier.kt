@@ -124,13 +124,16 @@ object TirexActions {
     const val ACTION_DISCONNECT = "com.tirexnet.app.ACTION_DISCONNECT"
     const val EXTRA_AUTO_CONNECT = "auto_connect"
 
-    fun isConnected(): Boolean = XrayVpnService.isActive || WgTunnelEngine.isActive
+    fun isConnected(): Boolean = XrayVpnService.isActive || WgTunnelEngine.isActive || OpenVpnEngine.isActive
 
     fun disconnect(context: Context) {
         val app = context.applicationContext
         TirexNotifier.stopUpdates()
         if (WgTunnelEngine.isActive) {
             WgTunnelEngine.stop { message, active -> publish(app, message, active) }
+        }
+        if (OpenVpnEngine.isActive) {
+            OpenVpnEngine.stop { message, active -> publish(app, message, active) }
         }
         if (XrayVpnService.isActive) {
             app.startService(Intent(app, XrayVpnService::class.java).setAction(XrayVpnService.ACTION_STOP))
