@@ -125,10 +125,22 @@ class XrayVpnService : VpnService() {
             .addDnsServer("2606:4700:4700::1111")
 
         try {
-            builder.addDisallowedApplication(packageName)
+            val prefs = getSharedPreferences("tirexnet", MODE_PRIVATE)
+            val selected = prefs.getStringSet("split_packages", emptySet()).orEmpty()
+            val mode = prefs.getString("split_mode", "exclude") ?: "exclude"
+            if (mode == "include") {
+                selected.forEach { pkg ->
+                    if (pkg != packageName) runCatching { builder.addAllowedApplication(pkg) }
+                }
+            } else {
+                builder.addDisallowedApplication(packageName)
+                selected.forEach { pkg ->
+                    if (pkg != packageName) runCatching { builder.addDisallowedApplication(pkg) }
+                }
+            }
         } catch (e: Exception) {
             throw IllegalStateException(
-                "Could not exclude the app from its own tunnel: ${e.message}",
+                "Could not apply split-tunnel app selection: ${e.message}",
                 e
             )
         }
