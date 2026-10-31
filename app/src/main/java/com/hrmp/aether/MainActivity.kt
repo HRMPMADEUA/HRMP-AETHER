@@ -98,7 +98,6 @@ class MainActivity : Activity() {
     private class PingHolder(val text: TextView, val button: FrameLayout, val spinner: ProgressBar, val icon: IconView)
     private enum class ServersState { IDLE, LOADING, ERROR, READY }
 
-    private val api = "https://hrmp.hrmpdownloader.kdns.fr"
     private val io = Executors.newSingleThreadExecutor()
     private val handler = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("tirexnet", MODE_PRIVATE) }
@@ -1809,7 +1808,15 @@ class MainActivity : Activity() {
                 lastBase = base
                 return r
             } catch (e: ApiHttpException) {
-                if (e.code in 502..504 && hasNext) { if (isIran) iranDownUntil = SystemClock.elapsedRealtime() + ApiConfig.IRAN_RETRY_AFTER_MS; last = e; continue }
+                // Cloudflare Tunnel failures (notably HTTP 530 / Error 1033), missing routes
+                // (404), and upstream/server errors must try the other configured backend.
+                // Keep 400/401/403 as real application/auth errors; never mask bad credentials.
+                val retryableBackendError = e.code == 404 || e.code in 500..599
+                if (retryableBackendError && hasNext) {
+                    if (isIran) iranDownUntil = SystemClock.elapsedRealtime() + ApiConfig.IRAN_RETRY_AFTER_MS
+                    last = e
+                    continue
+                }
                 if (e.code == 401 && !bearer.isNullOrBlank() && base != tokenBase) { last = ApiUnavailableException("Session belongs to another server."); continue }
                 throw e
             } catch (e: java.io.IOException) {
