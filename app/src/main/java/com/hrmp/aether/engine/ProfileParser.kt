@@ -15,7 +15,9 @@ data class ProfileMeta(
     val name: String,
     val host: String,
     val port: Int,
-    val engine: ConfigEngine
+    val engine: ConfigEngine,
+    /** OpenVPN only: true when the profile uses TCP (so the latency probe can use a TCP connect). */
+    val tcp: Boolean = false
 )
 
 /**
@@ -32,6 +34,7 @@ object ProfileParser {
         var name = ""
         var host = ""
         var port = 0
+        var tcp = false
         val lower = raw.lowercase(Locale.US)
         try {
             when {
@@ -60,6 +63,14 @@ object ProfileParser {
                     host = jsonString(raw, "address")
                     port = jsonString(raw, "port").toIntOrNull() ?: 0
                 }
+                engine == ConfigEngine.OPENVPN -> {
+                    name = openVpnName(raw)
+                    val m = Regex("(?im)^\\s*remote\\s+(\\S+)(?:\\s+(\\d+))?(?:\\s+(\\S+))?").find(raw)
+                    host = m?.groupValues?.get(1).orEmpty()
+                    port = m?.groupValues?.get(2)?.toIntOrNull() ?: Regex("(?im)^\\s*port\\s+(\\d+)").find(raw)?.groupValues?.get(1)?.toIntOrNull() ?: 1194
+                    val proto = (m?.groupValues?.get(3).orEmpty().ifEmpty { Regex("(?im)^\\s*proto\\s+(\\S+)").find(raw)?.groupValues?.get(1).orEmpty() }).lowercase(Locale.US)
+                    tcp = proto.startsWith("tcp")
+                }
                 engine == ConfigEngine.WIREGUARD || engine == ConfigEngine.AMNEZIAWG -> {
                     name = wireGuardName(raw)
                     val ep = Regex("(?im)^\\s*Endpoint\\s*=\\s*(\\S+)").find(raw)?.groupValues?.get(1).orEmpty()
@@ -70,7 +81,7 @@ object ProfileParser {
         } catch (_: Throwable) {
             // Malformed input: fall through with whatever was parsed so far.
         }
-        return ProfileMeta(cleanName(name), host.trim(), port, engine)
+        return ProfileMeta(cleanName(name), host.trim(), port, engine, tcp)
     }
 
     /** Display name that never falls back to a hostname, IP, port, UUID or scheme. */
@@ -139,6 +150,20 @@ object ProfileParser {
         URLDecoder.decode(s.replace("+", "%2B"), "UTF-8")
     } catch (_: Throwable) {
         s // malformed % sequence: keep the text as typed instead of losing the name
+    }
+
+    /** OpenVPN has no name field: use `setenv FRIENDLY_NAME`, a "# Name = X" comment, or the first plain comment. */
+    private fun openVpnName(raw: String): String {
+        Regex("(?im)^\\s*setenv\\s+FRIENDLY_NAME\\s+\"?([^\"\\r\\n]+)\"?").find(raw)?.let { return it.groupValues[1].trim() }
+        for (line in raw.lineSequence()) {
+            val t = line.trim()
+            if (t.isEmpty()) continue
+            if (!t.startsWith("#") && !t.startsWith(";")) break
+            val body = t.trimStart('#', ';', ' ').trim()
+            val m = Regex("(?i)^(name|title|remarks?|profile)\\s*[=:]\\s*(.+)$").find(body)
+            if (m != null) return m.groupValues[2].trim()
+        }
+        return ""
     }
 
     private fun wireGuardName(raw: String): String {
