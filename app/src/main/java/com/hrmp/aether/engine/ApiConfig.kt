@@ -5,15 +5,14 @@ import java.io.IOException
 /**
  * Backend addresses, tried in this order.
  *
- * IRAN_BASE : the Iranian server. HTTPS only (login and tokens travel through it); include the port when it is
- *             not 443, e.g. "https://37.202.229.138:8443". Leave "" to disable it.
- * WORKER_BASE: the existing Cloudflare Worker, used when the Iranian server cannot be reached.
+ * SERVER_BASE: the direct TIREXNET VPS endpoint. HTTPS only.
+ * WORKER_BASE: disabled; all app API traffic now goes to the VPS.
  *
  * Never put server logins (SSH/panel passwords) in the app: anyone can unpack an APK.
  */
 object ApiConfig {
-    const val IRAN_BASE = "https://37.202.229.138"
-    const val WORKER_BASE = "https://hrmp.hrmpdownloader.kdns.fr"
+    const val IRAN_BASE = "https://netherrap.extraservices.ir"
+    const val WORKER_BASE = ""
 
     /** After a network failure the Iranian server is skipped for this long, so every request does not wait for its timeout. */
     const val IRAN_RETRY_AFTER_MS = 5 * 60 * 1000L
