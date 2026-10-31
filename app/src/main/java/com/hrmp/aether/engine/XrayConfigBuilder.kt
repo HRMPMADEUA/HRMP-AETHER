@@ -476,13 +476,17 @@ object XrayConfigBuilder {
         val stream = JSONObject()
             .put("network", network)
 
-        when (
-            q.get(
-                "security",
-                if (q.get("tls") == "tls") "tls"
-                else defaultSecurity
-            )
-        ) {
+        // Empty query values such as security= must be treated as
+        // an explicit request for no transport security.
+        val rawSecurity = q.get("security")
+        val security = when {
+            rawSecurity.isBlank() && uri.toString().contains("security=") -> "none"
+            rawSecurity.isBlank() && q.get("tls").equals("tls", true) -> "tls"
+            rawSecurity.isBlank() -> defaultSecurity
+            else -> rawSecurity.trim().lowercase()
+        }
+
+        when (security) {
             "tls" -> {
                 val tls = JSONObject()
                     .put(
@@ -596,13 +600,46 @@ object XrayConfigBuilder {
                         .put("path", q.get("path", "/"))
                         .put(
                             "host",
-                            JSONArray().put(
-                                q.get("host", host)
-                            )
+                            JSONArray().put(q.get("host", host))
                         )
                 )
             }
+
+            "tcp" -> {
+                // Legacy VLESS links may carry headerType=http while
+                // network remains tcp. Xray expects tcpSettings.header.
+                val headerType = q.get("headerType", q.get("header_type"))
+                    .trim().lowercase()
+                if (headerType == "http") {
+                    val headerHost = q.get("host", host).trim()
+                    val headers = JSONObject()
+                        .put("Host", JSONArray().put(headerHost))
+                        .put("User-Agent", JSONArray().put("Mozilla/5.0"))
+                        .put("Accept", JSONArray().put("*/*"))
+                        .put("Connection", JSONArray().put("keep-alive"))
+
+                    val request = JSONObject()
+                        .put("version", "1.1")
+                        .put("method", "GET")
+                        .put("path", JSONArray().put("/"))
+                        .put("headers", headers)
+
+                    stream.put(
+                        "tcpSettings",
+                        JSONObject().put(
+                            "header",
+                            JSONObject()
+                                .put("type", "http")
+                                .put("request", request)
+                        )
+                    )
+                }
+            }
         }
+
+        // Be explicit: Xray's default for VLESS TCP without TLS/Reality
+        // is security=none. This also handles links containing security=.
+        stream.put("security", security.ifBlank { "none" })
 
         return stream
     }
