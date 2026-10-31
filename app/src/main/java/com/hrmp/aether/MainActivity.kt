@@ -1580,7 +1580,7 @@ class MainActivity : Activity() {
                 val response = request("POST", "/api/login", null, JSONObject().put("username", user).put("password", pass))
                 val newToken = response.optString("token")
                 require(newToken.isNotBlank()) { response.optString("error", "Login token is missing.") }
-                prefs.edit().putString("token", newToken).putString("token_base", lastBase).apply()
+                prefs.edit().putString("token", newToken).remove("token_base").apply()
                 token = newToken
                 runOnUiThread {
                     currentTab = 0
@@ -1598,7 +1598,7 @@ class MainActivity : Activity() {
         }
     }
 
-    /** Creates an account on the first reachable server (Iranian server, then Worker) and signs in. */
+    /** Account creation is provisioned by the administrator; app API traffic remains Worker-only. */
     private fun register() {
         val user = usernameInput?.text?.toString().orEmpty().trim()
         val pass = passwordInput?.text?.toString().orEmpty()
@@ -1617,7 +1617,7 @@ class MainActivity : Activity() {
                     newToken = response.optString("token")
                 }
                 require(newToken.isNotBlank()) { "Token is missing." }
-                prefs.edit().putString("token", newToken).putString("token_base", lastBase).apply()
+                prefs.edit().putString("token", newToken).remove("token_base").apply()
                 token = newToken
                 runOnUiThread {
                     registerMode = false
@@ -1630,7 +1630,7 @@ class MainActivity : Activity() {
                 }
             } catch (e: Exception) {
                 val msg = when ((e as? ApiHttpException)?.code) {
-                    404, 405 -> "ثبت‌نام روی این سرور فعال نیست."
+                    403, 404, 405 -> "ثبت‌نام مستقیم غیرفعال است؛ برای ساخت حساب با مدیر تماس بگیر."
                     409 -> "این نام کاربری قبلاً ثبت شده است."
                     null -> "ثبت‌نام ناموفق بود: " + ConfigSanitizer.redact(e.message ?: "network error")
                     else -> "ثبت‌نام ناموفق بود (HTTP ${(e as ApiHttpException).code})."
@@ -1785,55 +1785,34 @@ class MainActivity : Activity() {
         }
     }
 
-    @Volatile private var lastBase = ""
-    @Volatile private var iranDownUntil = 0L
+    @Volatile private var lastBase = ApiConfig.WORKER_BASE
 
     /**
-     * Tries the Iranian server first and falls back to the Worker when it cannot be reached (network error,
-     * timeout, 502-504). A token only works on the server that issued it, so authenticated calls go to that
-     * server first, and a 401 from any other server is never treated as "session expired".
+     * Strict Cloudflare-only routing. Login, account refresh, subscription refresh,
+     * profile downloads, and logout can never fall back to the Iranian VPS.
      */
     private fun request(method: String, path: String, bearer: String?, body: JSONObject?): JSONObject {
-        val all = listOf(ApiConfig.IRAN_BASE, ApiConfig.WORKER_BASE).filter { it.isNotBlank() }
-        val tokenBase = prefs.getString("token_base", "").orEmpty().ifBlank { ApiConfig.WORKER_BASE } // old tokens came from the Worker
-        val order = if (!bearer.isNullOrBlank() && tokenBase in all) listOf(tokenBase) + all.filter { it != tokenBase } else all
-        var last: Exception? = null
-        for ((i, base) in order.withIndex()) {
-            val hasNext = i < order.lastIndex
-            val isIran = base == ApiConfig.IRAN_BASE
-            if (isIran && hasNext && SystemClock.elapsedRealtime() < iranDownUntil) continue
-            try {
-                val r = requestOnce(base, method, path, bearer, body, if (hasNext) ApiConfig.FAST_FAIL_TIMEOUT_MS else ApiConfig.NORMAL_TIMEOUT_MS)
-                if (isIran) iranDownUntil = 0L
-                lastBase = base
-                return r
-            } catch (e: ApiHttpException) {
-                // Cloudflare Tunnel failures (notably HTTP 530 / Error 1033), missing routes
-                // (404), and upstream/server errors must try the other configured backend.
-                // Keep 400/401/403 as real application/auth errors; never mask bad credentials.
-                val retryableBackendError = e.code == 404 || e.code in 500..599
-                if (retryableBackendError && hasNext) {
-                    if (isIran) iranDownUntil = SystemClock.elapsedRealtime() + ApiConfig.IRAN_RETRY_AFTER_MS
-                    last = e
-                    continue
-                }
-                if (e.code == 401 && !bearer.isNullOrBlank() && base != tokenBase) { last = ApiUnavailableException("Session belongs to another server."); continue }
-                throw e
-            } catch (e: java.io.IOException) {
-                if (isIran) iranDownUntil = SystemClock.elapsedRealtime() + ApiConfig.IRAN_RETRY_AFTER_MS
-                last = e
-            }
+        val base = ApiConfig.WORKER_BASE
+        return try {
+            val result = requestOnce(base, method, path, bearer, body)
+            lastBase = base
+            result
+        } catch (e: ApiHttpException) {
+            // HTTP errors are application responses and must not trigger a fallback.
+            throw e
+        } catch (e: java.io.IOException) {
+            throw ApiUnavailableException("Cloudflare Worker connection failed: ${e.message ?: "network error"}")
         }
-        throw (last as? java.io.IOException) ?: ApiUnavailableException(last?.message ?: "No server available.")
     }
 
-    private fun requestOnce(base: String, method: String, path: String, bearer: String?, body: JSONObject?, timeoutMs: Int): JSONObject {
+    private fun requestOnce(base: String, method: String, path: String, bearer: String?, body: JSONObject?): JSONObject {
         val c = URL(base + path).openConnection() as HttpURLConnection
         try {
             c.requestMethod = method
-            c.connectTimeout = timeoutMs
-            c.readTimeout = ApiConfig.NORMAL_TIMEOUT_MS
+            c.connectTimeout = ApiConfig.CONNECT_TIMEOUT_MS
+            c.readTimeout = ApiConfig.READ_TIMEOUT_MS
             c.setRequestProperty("Accept", "application/json")
+            c.setRequestProperty("X-Client", "HRMP-AETHER-Android")
             if (!bearer.isNullOrBlank()) c.setRequestProperty("Authorization", "Bearer $bearer")
             if (body != null) {
                 c.doOutput = true
@@ -1841,7 +1820,8 @@ class MainActivity : Activity() {
                 c.outputStream.use { it.write(body.toString().toByteArray(StandardCharsets.UTF_8)) }
             }
             val code = c.responseCode
-            val responseText = (if (code in 200..299) c.inputStream else c.errorStream)?.bufferedReader()?.use { it.readText() }.orEmpty()
+            val responseText = (if (code in 200..299) c.inputStream else c.errorStream)
+                ?.bufferedReader()?.use { it.readText() }.orEmpty()
             if (code !in 200..299) throw ApiHttpException(code, responseText)
             return JSONObject(responseText)
         } finally {
