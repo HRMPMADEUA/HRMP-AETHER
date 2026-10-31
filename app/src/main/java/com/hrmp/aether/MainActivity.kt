@@ -46,6 +46,7 @@ import com.tirexnet.app.engine.FieldKind
 import com.tirexnet.app.engine.ManualOutcome
 import com.tirexnet.app.engine.ManualProfile
 import com.tirexnet.app.engine.ManualProtocol
+import com.tirexnet.app.engine.OpenVpnEngine
 import com.tirexnet.app.engine.PingKind
 import com.tirexnet.app.engine.PingResult
 import com.tirexnet.app.engine.PingTester
@@ -60,6 +61,7 @@ import com.tirexnet.app.ui.AmbientBackground
 import com.tirexnet.app.ui.BrandMark
 import com.tirexnet.app.ui.ConnectOrb
 import com.tirexnet.app.ui.EmptyArt
+import com.tirexnet.app.ui.FlagBadge
 import com.tirexnet.app.ui.GlassCard
 import com.tirexnet.app.ui.GlassNavBar
 import com.tirexnet.app.ui.Icon
@@ -132,7 +134,7 @@ class MainActivity : Activity() {
     private var insetBox = intArrayOf(0, 0, 0, 0)
     private val pingHolders = HashMap<String, PingHolder>()
     private var homePing: TextView? = null
-    private var homeFlag: FrameLayout? = null
+    private var homeFlag: FlagBadge? = null
     private var speedDown: TextView? = null
     private var speedUp: TextView? = null
     private var speedTotals: TextView? = null
@@ -601,7 +603,7 @@ class MainActivity : Activity() {
         val srow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         val hf = flagBox(44, 14f, "", Palette.cyan)
         homeFlag = hf
-        srow.addView(hf, lp(dpi(44), dpi(44)))
+        srow.addView(hf, lp(dpi(50), dpi(50)))
         val sinfo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(12), 0, dpi(8), 0) }
         sinfo.addView(tv("SELECTED SERVER", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
         homeServerName = tv("—", 15f, Palette.text, 1).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
@@ -767,7 +769,7 @@ class MainActivity : Activity() {
                     }
                     val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
                     // Country flag takes the place of the old XR/WG/AW badge. The engine is still detected internally.
-                    row.addView(flagBox(46, 14f, item.country, if (sel) Palette.cyan else Palette.ice), lp(dpi(46), dpi(46)))
+                    row.addView(flagBox(46, 14f, item.country, if (sel) Palette.cyan else Palette.ice).also { it.setSelectedState(sel) }, lp(dpi(50), dpi(50)))
                     val info = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(12), 0, dpi(8), 0) }
                     info.addView(tv(item.name, 14.5f, Palette.text, 1).apply { maxLines = 2; ellipsize = TextUtils.TruncateAt.END })
                     val sub = if (sel) "Selected" else if (item.local) "Saved on this phone" else ""
@@ -799,28 +801,11 @@ class MainActivity : Activity() {
     // ---------------------------------------------------------- Flag + ping UI
 
     /** Rounded square with the country flag, or a neutral globe when the country is unknown. */
-    private fun flagBox(sizeDp: Int, radiusDp: Float, country: String, accent: Int): FrameLayout {
-        val f = FrameLayout(this).apply {
-            background = GradientDrawable().apply {
-                cornerRadius = dp(radiusDp); setColor(Palette.withAlpha(accent, 28)); setStroke(dpi(1), Palette.withAlpha(accent, 120))
-            }
-        }
-        fillFlag(f, country, sizeDp)
-        return f
-    }
+    private fun flagBox(sizeDp: Int, radiusDp: Float, country: String, accent: Int): FlagBadge =
+        FlagBadge(this).also { it.setAccent(accent); it.setCountry(country) }
 
-    private fun fillFlag(box: FrameLayout?, country: String, sizeDp: Int) {
-        val f = box ?: return
-        f.removeAllViews()
-        val code = country.trim().uppercase(Locale.US)
-        if (code.length == 2 && code.all { it in 'A'..'Z' }) {
-            f.contentDescription = "Country $code"
-            f.addView(tv(flagEmoji(code), (sizeDp * 0.5f), Palette.text, 0).apply { gravity = Gravity.CENTER },
-                FrameLayout.LayoutParams(MATCH, MATCH))
-        } else {
-            f.contentDescription = "Country unknown"
-            f.addView(IconView(this, Icon.GLOBE, Palette.muted), FrameLayout.LayoutParams(dpi(sizeDp), dpi(sizeDp), Gravity.CENTER))
-        }
+    private fun fillFlag(box: FlagBadge?, country: String, sizeDp: Int) {
+        box?.setCountry(country)
     }
 
     private fun buildPingControl(item: ServerItem): PingHolder {
@@ -1248,7 +1233,7 @@ class MainActivity : Activity() {
         }
         val engine = ConfigDetector.detect(raw)
         if (engine == ConfigEngine.UNKNOWN) {
-            toast("فرمت کانفیگ شناسایی نشد. VLESS / VMess / Trojan / Shadowsocks یا WireGuard لازم است.")
+            toast("فرمت کانفیگ شناسایی نشد. VLESS / VMess / Trojan / Shadowsocks / WireGuard یا OpenVPN لازم است.")
             showTab(1)
             return
         }
@@ -1286,6 +1271,12 @@ class MainActivity : Activity() {
                     runOnUiThread { applyStatus(message, active) }
                 }
             }
+            ConfigEngine.OPENVPN -> {
+                applyStatus("در حال راه‌اندازی OpenVPN…", false)
+                OpenVpnEngine.start(this, pendingRaw) { message, active ->
+                    runOnUiThread { applyStatus(message, active) }
+                }
+            }
             else -> toast("یک پروفایل پشتیبانی‌شده انتخاب کن.")
         }
     }
@@ -1299,6 +1290,10 @@ class MainActivity : Activity() {
         if (engine == "WIREGUARD" || engine == "AMNEZIAWG" || WgTunnelEngine.isActive) {
             issued = true
             WgTunnelEngine.stop { message, active -> runOnUiThread { applyStatus(message, active) } }
+        }
+        if (engine == "OPENVPN" || OpenVpnEngine.isActive) {
+            issued = true
+            OpenVpnEngine.stop { message, active -> runOnUiThread { applyStatus(message, active) } }
         }
         if (engine == "XRAY" || XrayVpnService.isActive) {
             issued = true
@@ -1345,7 +1340,7 @@ class MainActivity : Activity() {
             // Older versions saved the hostname as the name. Repair those on load and never display a hostname.
             val name = ProfileParser.bestName(listOf(obj.optString("name", ""), meta.name), result.size + 1)
             result.add(ServerItem(name, raw, meta.engine, meta, true,
-                ProfileParser.flagCountryOf(name)))
+                normalizeCountry(obj.optString("country", "")).ifEmpty { ProfileParser.flagCountryOf(name) }))
         }
         return result
     }
@@ -1392,7 +1387,8 @@ class MainActivity : Activity() {
     private fun splitConfigs(text: String): List<String> {
         val t = text.trim()
         if (t.isEmpty()) return emptyList()
-        if (t.startsWith("{") || t.contains("[interface]", ignoreCase = true)) return listOf(t)
+        if (t.startsWith("{") || t.contains("[interface]", ignoreCase = true) ||
+            ConfigDetector.detect(t) == ConfigEngine.OPENVPN) return listOf(t)
         return t.lineSequence().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.toList()
     }
 
@@ -1416,7 +1412,7 @@ class MainActivity : Activity() {
             if (!ok) { bad++; continue }
             if (!known.add(c.trim())) { dup++; continue }
             val name = ProfileParser.bestName(listOf(meta.name), saved.size + added.size + 1)
-            added.add(ServerItem(name, c.trim(), meta.engine, meta, true, ProfileParser.flagCountryOf(name)))
+            added.add(ServerItem(name, c.trim(), meta.engine, meta, true, country.ifEmpty { ProfileParser.flagCountryOf(name) }))
         }
         if (added.isEmpty()) return ImportOutcome(emptyList(), dup, bad, true)
         val persisted = persistLocalProfiles(added + saved)
@@ -1457,7 +1453,7 @@ class MainActivity : Activity() {
         }
         if (o.added.isEmpty()) {
             val msg = if (o.duplicates > 0 && o.invalid == 0) "این کانفیگ قبلاً در لیست هست."
-            else "کانفیگ پشتیبانی‌شده‌ای پیدا نشد. VLESS / VMess / Trojan / Shadowsocks / WireGuard / AmneziaWG لازم است."
+            else "کانفیگ پشتیبانی‌شده‌ای پیدا نشد. VLESS / VMess / Trojan / Shadowsocks / WireGuard / AmneziaWG / OpenVPN لازم است."
             importFailed(msg)
             return
         }
@@ -1489,6 +1485,7 @@ class MainActivity : Activity() {
         ConfigEngine.XRAY -> "XRAY"
         ConfigEngine.WIREGUARD -> "WIREGUARD"
         ConfigEngine.AMNEZIAWG -> "AMNEZIAWG"
+        ConfigEngine.OPENVPN -> "OPENVPN"
         else -> "NONE"
     }
 
@@ -1638,7 +1635,7 @@ class MainActivity : Activity() {
             val meta = ProfileParser.parse(raw)
             val name = ProfileParser.bestName(listOf(o.optString("name", ""), meta.name), out.size + 1)
             out.add(ServerItem(name, raw, meta.engine, meta, false,
-                ProfileParser.flagCountryOf(name)))
+                normalizeCountry(o.optString("country", "")).ifEmpty { ProfileParser.flagCountryOf(name) }))
         }
         return out
     }
@@ -1690,8 +1687,12 @@ class MainActivity : Activity() {
                         }
                         val given = (keys + extra).map { k -> obj?.optString(k, "").orEmpty() }
                         val displayName = ProfileParser.bestName(given + meta.name, remote.size + 1)
-                        // Country is detected only from a flag emoji in the profile name.
-                        val country = ProfileParser.flagCountryOf(displayName)
+                        // Country only from explicit metadata supplied with the profile.
+                        val explicit = listOf("country_code", "countryCode", "cc", "country")
+                            .map { k -> normalizeCountry(obj?.optString(k, "").orEmpty()) }
+                            .firstOrNull { it.isNotEmpty() }.orEmpty()
+                        // No explicit field: use the flag already written in the profile name.
+                        val country = explicit.ifEmpty { ProfileParser.flagCountryOf(displayName) }
                         remote.add(ServerItem(displayName, raw, meta.engine, meta, false, country))
                     }
                 }
