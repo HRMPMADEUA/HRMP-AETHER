@@ -24,12 +24,12 @@ class AmbientBackground(ctx: Context) : View(ctx) {
     }
 
     private val blobs = listOf(
-        Blob(Palette.cyan, 0.050f, 0.037f, 0.0f, 1.3f, 0.78f),
-        Blob(Palette.violet, 0.041f, 0.056f, 2.1f, 0.4f, 0.85f),
-        Blob(Palette.blue, 0.033f, 0.045f, 4.2f, 2.6f, 0.62f)
+        Blob(Palette.cyan, 0.032f, 0.026f, 0.0f, 1.3f, 0.72f),
+        Blob(Palette.violet, 0.024f, 0.031f, 2.1f, 0.4f, 0.78f),
+        Blob(Palette.blue, 0.021f, 0.028f, 4.2f, 2.6f, 0.62f)
     )
 
-    private val starX = FloatArray(34)
+    private val starX = FloatArray(22)
     private val starY = FloatArray(34)
     private val starPh = FloatArray(34)
 
@@ -44,7 +44,7 @@ class AmbientBackground(ctx: Context) : View(ctx) {
         val m = min(w, h).toFloat()
         for (b in blobs) {
             val r = m * b.size
-            b.shader = RadialGradient(0f, 0f, r, Palette.withAlpha(b.color, 62), Color.TRANSPARENT, Shader.TileMode.CLAMP)
+            b.shader = RadialGradient(0f, 0f, r, Palette.withAlpha(b.color, 38), Color.TRANSPARENT, Shader.TileMode.CLAMP)
         }
     }
 
@@ -64,7 +64,7 @@ class AmbientBackground(ctx: Context) : View(ctx) {
         p.shader = null
         for (i in starX.indices) {
             val a = (34 + 34 * sin(t * 0.8f + starPh[i])).toInt()
-            p.color = Palette.withAlpha(Palette.ice, a)
+            p.color = Palette.withAlpha(Palette.ice, (a * 0.72f).toInt())
             c.drawCircle(starX[i] * width, starY[i] * height, dpf(if (i % 5 == 0) 1.3f else 0.8f), p)
         }
         if (isAttachedToWindow && windowVisible) postInvalidateDelayed(40)
