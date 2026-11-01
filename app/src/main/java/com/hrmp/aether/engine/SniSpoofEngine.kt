@@ -1,83 +1,129 @@
 package com.tirexnet.app.engine
 
 import android.content.Context
+import org.json.JSONObject
 import java.io.File
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.util.concurrent.TimeUnit
 
 /**
- * Root-only runner for the Patterniha-derived SNISPF Android/Linux engine.
- * The upstream engine is a TCP forwarder, not a SOCKS proxy; Xray's selected
- * outbound is pointed at its loopback listener while its real TLS SNI remains
- * unchanged. Raw wrong-sequence packet injection requires root/CAP_NET_RAW.
+ * Rootless Patterniha/SNISPF runner.
+ *
+ * TIREXNET intentionally selects SNISPF's stream-fragmentation method. The
+ * upstream wrong-sequence/raw-injection method needs CAP_NET_RAW/root, while
+ * fragment-only operation does not. Xray connects to this loopback TCP relay;
+ * its real TLS SNI is preserved in the base profile created by the wizard.
  */
 object SniSpoofEngine {
-    private const val ROOT_DIR = "/data/local/tmp/tirexnet-snispf"
-    private const val PID_FILE = "$ROOT_DIR/engine.pid"
+    @Volatile private var engineProcess: Process? = null
     @Volatile private var activePort: Int = 40443
+    private const val CONFIG_FILE = "patterniha-snispf.json"
+    private const val LOG_FILE = "patterniha-snispf.log"
 
     @Synchronized
     fun start(context: Context, rawProfile: String): String? {
         val profile = EngineProfiles.decodeSniSpoof(rawProfile)
-            ?: return "Patterniha SNI profile is invalid. Recreate it from a TLS/REALITY server profile."
+            ?: return "Patterniha profile is invalid. Recreate it from a TLS/REALITY server profile."
+
+        val current = engineProcess
+        if (current?.isAlive == true && activePort == profile.listenPort) return null
+        stopLocked()
+
         return try {
             val binary = File(context.applicationInfo.nativeLibraryDir, "libsnispf.so")
-            if (!binary.isFile) return "Patterniha engine is missing from this APK."
-            val config = org.json.JSONObject()
+            if (!binary.isFile || !binary.canRead()) {
+                return "Patterniha engine is missing from this APK. Rebuild with the SNISPF native step enabled."
+            }
+
+            val preferences = context.getSharedPreferences("tirexnet", Context.MODE_PRIVATE)
+            val fragmentDelay = preferences.getString("sni_fragment_delay", "0.08")
+                ?.toDoubleOrNull()?.coerceIn(0.01, 1.0) ?: 0.08
+            val strategy = preferences.getString("sni_fragment_strategy", "sni_split")
+                ?.takeIf { it in setOf("sni_split", "half", "multi", "tls_record_frag") } ?: "sni_split"
+
+            val config = JSONObject()
                 .put("LISTEN_HOST", "127.0.0.1")
                 .put("LISTEN_PORT", profile.listenPort)
                 .put("CONNECT_IP", profile.connectIp)
                 .put("CONNECT_PORT", profile.connectPort)
                 .put("FAKE_SNI", profile.fakeSni)
-                .put("BYPASS_METHOD", "wrong_seq")
-                .put("FRAGMENT_STRATEGY", "sni_split")
-                .put("FRAGMENT_DELAY", 0.05)
-                .put("INTERFACE", "auto")
+                // Rootless safe path. wrong_seq / combined raw injection are
+                // deliberately not selected because they require root access.
+                .put("BYPASS_METHOD", "fragment")
+                .put("FRAGMENT_STRATEGY", strategy)
+                .put("FRAGMENT_DELAY", fragmentDelay)
+                .put("USE_TTL_TRICK", false)
+                .put("INTERFACE", "")
                 .put("UTLS", "firefox")
                 .put("AUTOSTART", false)
-            val appConfig = File(context.filesDir, "patterniha-snispf.json")
-            appConfig.writeText(config.toString(2))
-            activePort = profile.listenPort
 
-            val dir = ROOT_DIR
-            val binTarget = "$dir/snispf"
-            val cfgTarget = "$dir/config.json"
-            val logTarget = "$dir/engine.log"
-            val pidTarget = PID_FILE
-            val script = buildString {
-                append("id -u | grep -qx 0 || exit 41; ")
-                append("mkdir -p ").append(q(dir)).append(" || exit 42; ")
-                append("cp ").append(q(binary.absolutePath)).append(' ').append(q(binTarget)).append(" || exit 43; ")
-                append("cp ").append(q(appConfig.absolutePath)).append(' ').append(q(cfgTarget)).append(" || exit 44; ")
-                append("chmod 700 ").append(q(binTarget)).append("; chmod 600 ").append(q(cfgTarget)).append("; ")
-                append("if [ -f ").append(q(pidTarget)).append(" ]; then kill \$(cat ").append(q(pidTarget)).append(") 2>/dev/null || true; fi; ")
-                append("nohup ").append(q(binTarget)).append(" --config ").append(q(cfgTarget))
-                    .append(" --quiet > ").append(q(logTarget)).append(" 2>&1 < /dev/null & ")
-                append("echo \$! > ").append(q(pidTarget)).append("; sleep 1; kill -0 \$(cat ").append(q(pidTarget)).append(")")
+            val app = context.applicationContext
+            val configFile = File(app.filesDir, CONFIG_FILE)
+            val logFile = File(app.filesDir, LOG_FILE)
+            configFile.writeText(config.toString(2))
+            logFile.delete()
+
+            // The Go binary is built as an Android ARM64 PIE and packaged in
+            // jniLibs. Android extracts native libraries as executable files.
+            val process = ProcessBuilder(
+                binary.absolutePath,
+                "--config", configFile.absolutePath,
+                "--no-raw",
+                "--quiet"
+            )
+                .directory(app.filesDir)
+                .redirectErrorStream(true)
+                .redirectOutput(logFile)
+                .start()
+
+            engineProcess = process
+            activePort = profile.listenPort
+            // Wait for the local relay socket, not just the Go process. This
+            // prevents Xray from racing ahead before SNISPF has bound its port.
+            var listening = false
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4)
+            while (System.nanoTime() < deadline && process.isAlive && !listening) {
+                try {
+                    Socket().use { socket ->
+                        socket.connect(InetSocketAddress("127.0.0.1", profile.listenPort), 180)
+                    }
+                    listening = true
+                } catch (_: Throwable) {
+                    Thread.sleep(80L)
+                }
             }
-            val process = ProcessBuilder("su", "-c", script).redirectErrorStream(true).start()
-            val output = process.inputStream.bufferedReader().use { it.readText() }.take(500)
-            if (!process.waitFor(10, TimeUnit.SECONDS) || process.exitValue() != 0) {
-                return if (output.isNotBlank()) "Root launch failed. Grant TIREXNET root access and retry." else "Root access is required for Patterniha packet injection."
+            if (!process.isAlive || !listening) {
+                val detail = runCatching { logFile.readText().takeLast(900).trim() }.getOrDefault("")
+                stopLocked()
+                return if (detail.isNotBlank()) {
+                    "Patterniha could not start: $detail"
+                } else if (listening) {
+                    "Patterniha process exited during startup."
+                } else {
+                    "Patterniha did not open its local relay port. Check the native library and profile settings."
+                }
             }
-            // Do not probe the listener with a TCP connect: SNISPF treats every
-            // accepted connection as a real flow and would emit an unnecessary
-            // fake ClientHello toward the upstream server. The root shell already
-            // verifies that the sidecar PID survives startup.
             null
-        } catch (_: Throwable) {
-            "Patterniha SNI engine could not start. Root access and a supported kernel are required."
+        } catch (t: Throwable) {
+            engineProcess = null
+            "Patterniha rootless fragmentation engine failed: ${t.message ?: t.javaClass.simpleName}"
         }
     }
 
     @Synchronized
-    fun stop() {
-        runCatching {
-            val script = "if [ -f '$PID_FILE' ]; then kill \$(cat '$PID_FILE') 2>/dev/null || true; rm -f '$PID_FILE'; fi"
-            ProcessBuilder("su", "-c", script).redirectErrorStream(true).start().waitFor(4, TimeUnit.SECONDS)
+    fun stop() = stopLocked()
+
+    private fun stopLocked() {
+        val process = engineProcess
+        engineProcess = null
+        if (process != null) {
+            runCatching { process.destroy() }
+            runCatching {
+                if (!process.waitFor(1200, TimeUnit.MILLISECONDS)) process.destroyForcibly()
+            }
         }
     }
 
     fun listenPort(): Int = activePort
-
-    private fun q(value: String): String = "'" + value.replace("'", "'\\''") + "'"
 }
