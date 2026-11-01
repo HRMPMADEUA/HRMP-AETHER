@@ -36,6 +36,9 @@ class XrayVpnService : VpnService() {
     @Volatile
     private var stopping = false
 
+    @Volatile
+    private var requestedEngine = "XRAY"
+
     override fun onCreate() {
         super.onCreate()
         createChannel()
@@ -53,6 +56,7 @@ class XrayVpnService : VpnService() {
             ACTION_STOP -> {
                 executor.execute {
                     stopTunnel()
+                    stopAuxiliaryEngines()
                     publishStatus("Disconnected.", false)
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
@@ -61,6 +65,7 @@ class XrayVpnService : VpnService() {
 
             ACTION_START -> {
                 val raw = intent.getStringExtra(EXTRA_CONFIG).orEmpty()
+                requestedEngine = intent.getStringExtra(EXTRA_ENGINE)?.takeIf { it.isNotBlank() } ?: "XRAY"
 
                 startForegroundCompat()
 
@@ -79,7 +84,7 @@ class XrayVpnService : VpnService() {
                         startTunnel(raw)
 
                         publishStatus(
-                            "Xray tunnel connected.",
+                            "TIREXNET tunnel connected.",
                             true
                         )
 
@@ -87,6 +92,7 @@ class XrayVpnService : VpnService() {
                         Log.e(TAG, "Xray start failed", e)
 
                         stopTunnel()
+                        stopAuxiliaryEngines()
 
                         publishStatus(
                             "Connection failed. Check the selected profile and try again.",
@@ -212,6 +218,12 @@ class XrayVpnService : VpnService() {
         isActive = true
     }
 
+    private fun stopAuxiliaryEngines() {
+        MhrvEngine.stop()
+        StormDnsEngine.stop()
+        SniSpoofEngine.stop()
+    }
+
     private fun stopTunnel() {
         stopping = true
 
@@ -298,7 +310,7 @@ class XrayVpnService : VpnService() {
             .putBoolean("connection_active", active)
             .putString(
                 "active_engine",
-                if (active) "XRAY" else ""
+                if (active) requestedEngine else ""
             )
             .apply()
 
@@ -313,6 +325,7 @@ class XrayVpnService : VpnService() {
     override fun onRevoke() {
         executor.execute {
             stopTunnel()
+            stopAuxiliaryEngines()
 
             publishStatus(
                 "VPN permission was revoked.",
@@ -328,6 +341,7 @@ class XrayVpnService : VpnService() {
 
     override fun onDestroy() {
         stopTunnel()
+        stopAuxiliaryEngines()
         clearStoredActiveFlag()
         executor.shutdown()
         super.onDestroy()
@@ -348,6 +362,7 @@ class XrayVpnService : VpnService() {
             "com.tirexnet.app.CONNECTION_STATUS"
 
         const val EXTRA_CONFIG = "config"
+        const val EXTRA_ENGINE = "engine"
         const val EXTRA_MESSAGE = "message"
         const val EXTRA_ACTIVE = "active"
 
