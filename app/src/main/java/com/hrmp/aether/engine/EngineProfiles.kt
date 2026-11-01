@@ -35,8 +35,8 @@ object EngineProfiles {
     /**
      * Validates official SlipNet share links without trying to reinterpret their
      * protocol payload. SlipNet owns the actual DNSTT/NoizDNS/VayDNS/Soar/
-     * Slipstream/SSH/NaiveProxy/DoH/Tor implementations; TIREXNET hands the
-     * original URI to the official SlipNet app so no fields are lost.
+     * Slipstream/SSH/NaiveProxy/DoH/Tor implementations. TIREXNET preserves
+     * the original URI as an imported profile until its native runtime is bundled.
      */
     fun decodeSlipNet(raw: String): SlipNetShareProfile? {
         val value = raw.trim()
