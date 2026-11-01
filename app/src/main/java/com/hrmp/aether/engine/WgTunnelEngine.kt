@@ -43,7 +43,7 @@ object WgTunnelEngine {
                 withContext(Dispatchers.Main) { callback(if (amnezia) "AmneziaWG connected." else "WireGuard connected.", true) }
             } catch (e: Throwable) {
                 isActive = false
-                withContext(Dispatchers.Main) { callback("WireGuard / AmneziaWG failed: " + ConfigSanitizer.redact(e.message ?: e.javaClass.simpleName), false) }
+                withContext(Dispatchers.Main) { callback("Connection failed. Check the selected profile and try again.", false) }
             }
         }
     }
@@ -74,7 +74,7 @@ object WgTunnelEngine {
                 isActive = false
                 withContext(Dispatchers.Main) { callback("VPN disconnected.", false) }
             } catch (e: Throwable) {
-                withContext(Dispatchers.Main) { callback("Disconnect failed: ${e.message ?: e.javaClass.simpleName}", isActive) }
+                withContext(Dispatchers.Main) { callback("Disconnect could not be completed. Please try again.", isActive) }
             }
         }
     }
