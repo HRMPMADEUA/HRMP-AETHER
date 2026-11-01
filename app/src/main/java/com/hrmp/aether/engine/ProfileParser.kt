@@ -38,6 +38,32 @@ object ProfileParser {
         val lower = raw.lowercase(Locale.US)
         try {
             when {
+                engine == ConfigEngine.MHRV -> {
+                    val profile = EngineProfiles.decodeMhrv(raw)
+                    name = profile?.name.orEmpty().ifBlank { "MHRV" }
+                    host = profile?.host.orEmpty()
+                    port = 443
+                }
+                engine == ConfigEngine.DNS_TUNNEL -> {
+                    val profile = EngineProfiles.decodeStormDns(raw)
+                    name = profile?.name.orEmpty().ifBlank { "DNS Tunnel" }
+                    host = profile?.host.orEmpty()
+                    port = 53
+                }
+                engine == ConfigEngine.SNI_SPOOF -> {
+                    val profile = EngineProfiles.decodeSniSpoof(raw)
+                    name = profile?.name.orEmpty().ifBlank { "Patterniha SNI" }
+                    host = profile?.connectIp.orEmpty()
+                    port = profile?.connectPort ?: 443
+                }
+                engine == ConfigEngine.SLIPNET -> {
+                    val profile = EngineProfiles.decodeSlipNet(raw)
+                    name = profile?.name.orEmpty().ifBlank { "SlipNet profile" }
+                    // SlipNet profiles may contain DNS resolver lists or a protocol chain;
+                    // they do not necessarily have one TCP endpoint to ping from TIREXNET.
+                    host = ""
+                    port = 0
+                }
                 lower.startsWith("vmess://") -> {
                     val json = decodeBase64(raw.substringAfter("://").substringBefore('#'))
                     if (json != null && json.trim().startsWith("{")) {
