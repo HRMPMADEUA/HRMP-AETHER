@@ -94,6 +94,30 @@ object XrayConfigBuilder {
             .toString()
     }
 
+    /** Build an Xray profile with one loopback-only SOCKS5 or HTTP inbound, without a TUN. */
+    fun buildProxy(input: String, proxyProtocol: String): String {
+        val config = JSONObject(build(input))
+        val protocol = if (proxyProtocol.equals("http", true)) "http" else "socks"
+        val settings = if (protocol == "socks") {
+            JSONObject().put("auth", "noauth").put("udp", true).put("userLevel", 8)
+        } else {
+            JSONObject().put("allowTransparent", false).put("userLevel", 8)
+        }
+        val inbound = JSONObject()
+            .put("tag", "tirexnet-local-proxy")
+            .put("listen", "127.0.0.1")
+            .put("port", 10880)
+            .put("protocol", protocol)
+            .put("settings", settings)
+        if (protocol == "socks") {
+            inbound.put("sniffing", JSONObject().put("enabled", true).put("destOverride", JSONArray().put("http").put("tls")))
+        }
+        // Do not expose any inbound configured in an imported JSON profile to the LAN.
+        config.put("inbounds", JSONArray().put(inbound))
+        if (!config.has("log")) config.put("log", JSONObject().put("loglevel", "warning"))
+        return config.toString()
+    }
+
     private fun tunInbound() =
         JSONObject()
             .put("tag", "tun")
