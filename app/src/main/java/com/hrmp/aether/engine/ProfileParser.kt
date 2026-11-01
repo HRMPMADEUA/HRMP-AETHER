@@ -50,6 +50,11 @@ object ProfileParser {
                     host = profile?.host.orEmpty()
                     port = 53
                 }
+                engine == ConfigEngine.DNS_CHANGER -> {
+                    name = DnsChangerProfiles.decode(raw)?.name.orEmpty().ifBlank { "DNS Profile" }
+                    host = ""
+                    port = 0
+                }
                 engine == ConfigEngine.SNI_SPOOF -> {
                     val profile = EngineProfiles.decodeSniSpoof(raw)
                     name = profile?.name.orEmpty().ifBlank { "Patterniha SNI" }
@@ -58,7 +63,7 @@ object ProfileParser {
                 }
                 engine == ConfigEngine.SLIPNET -> {
                     val profile = EngineProfiles.decodeSlipNet(raw)
-                    name = profile?.name.orEmpty().ifBlank { "SlipNet profile" }
+                    name = profile?.let { if (it.protocolName == "SlipNet profile") it.name else "${it.name} • ${it.protocolName}" }.orEmpty().ifBlank { "SlipNet profile" }
                     // SlipNet profiles may contain DNS resolver lists or a protocol chain;
                     // they do not necessarily have one TCP endpoint to ping from TIREXNET.
                     host = ""
@@ -85,9 +90,25 @@ object ProfileParser {
                 }
                 raw.startsWith("{") -> {
                     name = jsonString(raw, "remarks").ifBlank { jsonString(raw, "ps") }
-                    // Host/port of raw Xray JSON are only needed for latency probing.
-                    host = jsonString(raw, "address")
-                    port = jsonString(raw, "port").toIntOrNull() ?: 0
+                    // For locally generated Xray variants, read the primary outbound endpoint.
+                    val root = runCatching { org.json.JSONObject(raw) }.getOrNull()
+                    val outs = root?.optJSONArray("outbounds")
+                    if (outs != null) {
+                        for (i in 0 until outs.length()) {
+                            val out = outs.optJSONObject(i) ?: continue
+                            if (out.optString("tag").lowercase(Locale.US) in setOf("direct", "block") || out.optString("protocol").lowercase(Locale.US) in setOf("freedom", "blackhole")) continue
+                            val settings = out.optJSONObject("settings") ?: continue
+                            val vnext = settings.optJSONArray("vnext")?.optJSONObject(0)
+                            val server = vnext ?: settings.optJSONArray("servers")?.optJSONObject(0)
+                            if (server != null) {
+                                host = server.optString("address")
+                                port = server.optInt("port", 0)
+                                break
+                            }
+                        }
+                    }
+                    if (host.isBlank()) host = jsonString(raw, "address")
+                    if (port == 0) port = jsonString(raw, "port").toIntOrNull() ?: 0
                 }
                 engine == ConfigEngine.OPENVPN -> {
                     name = openVpnName(raw)
