@@ -57,6 +57,8 @@ import com.tirexnet.app.engine.ApiHttpException
 import com.tirexnet.app.engine.ApiUnavailableException
 import com.tirexnet.app.engine.ConfigEngine
 import com.tirexnet.app.engine.ConfigSanitizer
+import com.tirexnet.app.engine.DnsChangerProfiles
+import com.tirexnet.app.engine.DnsChangerVpnService
 import com.tirexnet.app.engine.FieldKind
 import com.tirexnet.app.engine.ManualOutcome
 import com.tirexnet.app.engine.ManualProfile
@@ -424,11 +426,15 @@ class MainActivity : Activity() {
 
     /** The only source of truth for "connected" is an engine that confirmed the tunnel. */
     private fun reconcileState() {
-        val real = XrayVpnService.isActive || WgTunnelEngine.isActive
+        val real = XrayVpnService.isActive || WgTunnelEngine.isActive || DnsChangerVpnService.isActive
         if (real && state != OrbState.CONNECTED) {
-            applyStatus(statusMessage.ifBlank { "Connected." }, true)
+            val message = prefs.getString("connection_message", "Connected.") ?: "Connected."
+            applyStatus(message.ifBlank { "Connected." }, true)
         } else if (!real && state == OrbState.CONNECTED) {
             applyStatus("Disconnected.", false)
+        } else if (!real && state == OrbState.CONNECTING && prefs.getString("active_engine", "") == "DNS_CHANGER") {
+            val message = prefs.getString("connection_message", "DNS Changer failed to start.") ?: "DNS Changer failed to start."
+            applyStatus(message, false)
         } else if (!real && prefs.getBoolean("connection_active", false)) {
             prefs.edit().putBoolean("connection_active", false).putString("active_engine", "").apply()
         }
@@ -607,13 +613,19 @@ class MainActivity : Activity() {
 
         // Large, soft gradient globe. Tap remains a shortcut; the slide control is the main action.
         val orbSize = minOf(dpi(236), resources.displayMetrics.widthPixels - dpi(88))
-        val orbHolder = FrameLayout(this)
-        val o = ConnectOrb(this)
+        // Put the globe directly in the vertical layout. No FrameLayout/card/halo
+        // is placed behind it, so the home screen has only the round globe itself.
+        val o = ConnectOrb(this).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            background = null
+            clipToOutline = false
+        }
         o.contentDescription = "Connection status globe"
         o.onToggle = { connectFromSlider() }
         orb = o
-        orbHolder.addView(o, FrameLayout.LayoutParams(orbSize, orbSize, Gravity.CENTER))
-        col.addView(orbHolder, lp(MATCH, dpi(260), 0))
+        col.addView(o, LinearLayout.LayoutParams(orbSize, orbSize).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+        })
 
         val region = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -639,7 +651,7 @@ class MainActivity : Activity() {
         statusTitle = title
         col.addView(title, lp(MATCH, WRAP, 28, 0, 0, 4))
 
-        val desc = tv("Choose a region and slide to start your connection.", 12.5f, Palette.muted, 0).apply {
+        val desc = tv("Choose ALL or a country, then slide to connect.", 12.5f, Palette.muted, 0).apply {
             gravity = Gravity.START
             maxLines = 3
             ellipsize = TextUtils.TruncateAt.END
@@ -728,7 +740,7 @@ class MainActivity : Activity() {
         OrbState.DISCONNECTED -> "Start your\nconnection"
     }
 
-    private fun regionLabel(): String = if (regionFilter == "ALL") "Fastest Region" else regionDisplayName(regionFilter)
+    private fun regionLabel(): String = if (regionFilter == "ALL") "ALL" else regionDisplayName(regionFilter)
 
     private fun regionDisplayName(code: String): String = runCatching {
         Locale("", code.uppercase(Locale.US)).getDisplayCountry(Locale.ENGLISH).ifBlank { code.uppercase(Locale.US) }
@@ -760,7 +772,7 @@ class MainActivity : Activity() {
                 regionFilter = pending
                 prefs.edit().putString("region_filter", regionFilter).apply()
                 if (regionFilter != "ALL") {
-                    val available = servers.firstOrNull { it.country.equals(regionFilter, true) && it.engine != ConfigEngine.SLIPNET }
+                    val available = servers.firstOrNull { it.country.equals(regionFilter, true) && it.engine !in setOf(ConfigEngine.SLIPNET, ConfigEngine.DNS_CHANGER) }
                     val current = selectedItem()
                     if (available != null && current?.raw?.trim() != available.raw.trim()) setConfig(available.raw)
                 }
@@ -772,7 +784,7 @@ class MainActivity : Activity() {
         }
         head.addView(apply)
         panel.addView(head, lp(MATCH, WRAP, 0, 16))
-        panel.addView(tv("Fastest Region keeps all available profiles eligible. Choose a country to filter the server list and Smart Connect.", 12.5f, Palette.muted, 0), lp(MATCH, WRAP, 0, 16))
+        panel.addView(tv("ALL keeps every available profile visible and eligible. Choose a country only when you want to filter the list.", 12.5f, Palette.muted, 0), lp(MATCH, WRAP, 0, 16))
 
         val listScroll = ScrollView(this).apply { isVerticalScrollBarEnabled = true; overScrollMode = View.OVER_SCROLL_NEVER }
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -806,7 +818,7 @@ class MainActivity : Activity() {
                 }
                 row.addView(icon, lp(dpi(42), dpi(42)))
             } else row.addView(flagBox(42, 8f, code, Palette.cyan), lp(dpi(42), dpi(42)))
-            row.addView(tv(if (fastest) "Fastest Region" else regionDisplayName(code), 14f, Palette.text, if (selected) 2 else 0).apply {
+            row.addView(tv(if (fastest) "ALL" else regionDisplayName(code), 14f, Palette.text, if (selected) 2 else 0).apply {
                 setPadding(dpi(12), 0, 0, 0)
             }, LinearLayout.LayoutParams(0, WRAP, 1f))
             row.addView(tv(if (selected) "✓" else "", 22f, Palette.text, 1).apply { gravity = Gravity.CENTER; minWidth = dpi(30) })
@@ -822,7 +834,7 @@ class MainActivity : Activity() {
             .distinct()
             .sortedBy { regionDisplayName(it) }
         if (countries.isEmpty()) {
-            panel.addView(tv("Country information will appear here when your subscription profiles include a region or flag. You can still choose Fastest Region.", 11.5f, Palette.muted, 0), lp(MATCH, WRAP, 12))
+            panel.addView(tv("Country information appears when profiles include region metadata. Choose ALL to show every available profile.", 11.5f, Palette.muted, 0), lp(MATCH, WRAP, 12))
         } else countries.forEach { addRegion(it) }
 
         dialog.setContentView(panel)
@@ -841,7 +853,7 @@ class MainActivity : Activity() {
         if (state != OrbState.CONNECTED && state != OrbState.CONNECTING && state != OrbState.DISCONNECTING) {
             if (regionFilter != "ALL") {
                 val current = selectedItem()
-                val candidates = servers.filter { it.country.equals(regionFilter, true) && it.engine != ConfigEngine.SLIPNET }
+                val candidates = servers.filter { it.country.equals(regionFilter, true) && it.engine !in setOf(ConfigEngine.SLIPNET, ConfigEngine.DNS_CHANGER) }
                 if (candidates.isEmpty()) {
                     toast("No supported server is available in ${regionDisplayName(regionFilter)}.")
                     showTab(1)
@@ -1007,8 +1019,9 @@ class MainActivity : Activity() {
                     if (sub.isNotEmpty()) info.addView(tv(sub, 10.5f, if (sel) Palette.cyan else Palette.muted, 0), lp(MATCH, WRAP, 4))
                     row.addView(info, LinearLayout.LayoutParams(0, WRAP, 1f))
 
-                    if (item.engine == ConfigEngine.SLIPNET) {
-                        row.addView(tv("SLIPNET", 9.5f, Palette.cyan, 2).apply {
+                    if (item.engine == ConfigEngine.SLIPNET || item.engine == ConfigEngine.DNS_CHANGER) {
+                        val slipBadge = if (item.engine == ConfigEngine.DNS_CHANGER) "DNS" else EngineProfiles.decodeSlipNet(item.raw)?.protocol?.let { if (it == "snowflake") "TOR" else "SLIPNET" } ?: "SLIPNET"
+                        row.addView(tv(slipBadge, 9.5f, Palette.cyan, 2).apply {
                             gravity = Gravity.CENTER
                             setPadding(dpi(9), dpi(7), dpi(9), dpi(7))
                             background = Palette.glass(this@MainActivity, 12f, Palette.strokeActive)
@@ -1300,7 +1313,7 @@ class MainActivity : Activity() {
         settingRow(g1, Icon.GLOBE, "SlipNet protocols & settings", "DNS tunnels, resolver pools, SSH chains, Slipstream, NaiveProxy and Tor", "Open") { showSlipNetDialog() }
         settingRow(g1, Icon.SHIELD, "Split tunneling", "Choose apps included in or excluded from Xray", splitSummary()) { showSplitTunnelDialog() }
         settingRow(g1, Icon.BOLT, "TLS server name", "Edit TLS / REALITY serverName on a local copy", null) { selectedItem()?.let { showSniDialog(it) } ?: toast("Select a server first.") }
-        settingRow(g1, Icon.SHIELD, "Patterniha SNI injection", "Original wrong-sequence packet method • rooted Android only", "Configure") { selectedItem()?.let { showPatternihaDialog(it) } ?: toast("Select a TLS/REALITY server first.") }
+        settingRow(g1, Icon.SHIELD, "Patterniha SNI fragmentation", "Rootless TLS fragmentation • creates a local profile", "Configure") { selectedItem()?.let { showPatternihaDialog(it) } ?: toast("Select a TLS/REALITY server first.") }
         settingRow(g1, Icon.GLOBE, "Website ping target", "HTTP response-time check for a URL you choose", "Change") { showPingUrlDialog() }
         settingRow(g1, Icon.SHIELD, "MHRV CA certificate", "Download it, then install it from Android Security settings", "Export") { exportMhrvCa() }
         settingRow(g1, Icon.COPY, "Connection logs", "Recent connection activity", "Open") { showConnectionLogs() }
@@ -1318,106 +1331,467 @@ class MainActivity : Activity() {
 
     private fun showSlipNetDialog() {
         val selected = selectedItem()?.takeIf { it.engine == ConfigEngine.SLIPNET }
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(18), dpi(12), dpi(18), dpi(8)) }
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpi(16), dpi(10), dpi(16), dpi(8))
+        }
         val scroll = ScrollView(this).apply { isVerticalScrollBarEnabled = false }
         val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         scroll.addView(body, FrameLayout.LayoutParams(MATCH, WRAP))
-        body.addView(tv("SLIPNET SETTINGS", 10f, Palette.cyan, 2).apply { letterSpacing = 0.16f }, lp(MATCH, WRAP, 2, 8))
-        body.addView(tv(
-            "Manage SlipNet preferences here. SlipNet share profiles can be imported in Servers with Paste or File. The SlipNet native tunnel runtime is not yet bundled in this TIREXNET build, so this panel does not open another app or pretend a tunnel is connected.",
-            11.5f, Palette.muted, 0
-        ).apply { setPadding(dpi(12), dpi(12), dpi(12), dpi(12)); background = Palette.glass(this@MainActivity, 14f) }, lp(MATCH, WRAP, 0, 14))
 
-        val protocolNames = listOf("Auto detect", "DNSTT", "NoizDNS", "VayDNS", "Soar", "Slipstream", "SSH", "NaiveProxy", "DoH", "Tor")
-        val protocolSpinner = Spinner(this).apply {
-            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, protocolNames)
-            val saved = prefs.getString("slipnet_protocol", "Auto detect") ?: "Auto detect"
-            setSelection(protocolNames.indexOf(saved).coerceAtLeast(0))
+        fun heading(title: String, subtitle: String = "") {
+            body.addView(tv(title.uppercase(Locale.US), 10f, Palette.cyan, 2).apply { letterSpacing = 0.13f }, lp(MATCH, WRAP, 14, 4))
+            if (subtitle.isNotBlank()) body.addView(tv(subtitle, 10.5f, Palette.muted, 0), lp(MATCH, WRAP, 0, 6))
         }
-        body.addView(tv("Preferred tunnel protocol", 12f, Palette.text, 1), lp(MATCH, WRAP, 2, 4))
-        body.addView(protocolSpinner, lp(MATCH, dpi(46), 0, 10))
-
-        fun inputField(label: String, key: String, hint: String, multiline: Boolean = false): EditText {
-            body.addView(tv(label, 12f, Palette.text, 1), lp(MATCH, WRAP, 5, 4))
-            val edit = EditText(this).apply {
-                setText(prefs.getString(key, "").orEmpty())
+        fun field(label: String, key: String, hint: String, default: String = "", multiline: Boolean = false, secret: Boolean = false, numeric: Boolean = false): EditText {
+            body.addView(tv(label, 11.5f, Palette.text, 1), lp(MATCH, WRAP, 7, 3))
+            return EditText(this).apply {
+                setText(prefs.all[key]?.toString() ?: default)
                 this.hint = hint
                 textSize = 12.5f
                 setTextColor(Palette.text)
                 setHintTextColor(Palette.dim)
                 background = fieldBackground(false)
-                setPadding(dpi(12), dpi(10), dpi(12), dpi(10))
-                if (multiline) {
-                    minLines = 2; maxLines = 4
-                    inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-                    gravity = Gravity.TOP or Gravity.START
-                } else {
-                    setSingleLine(true)
-                    inputType = InputType.TYPE_CLASS_TEXT
+                setPadding(dpi(12), dpi(9), dpi(12), dpi(9))
+                if (multiline) { minLines = 2; maxLines = 5; gravity = Gravity.TOP or Gravity.START }
+                else setSingleLine(true)
+                inputType = when {
+                    numeric -> InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+                    secret -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                    multiline -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                    else -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                 }
+                body.addView(this, lp(MATCH, if (multiline) dpi(84) else dpi(44), 0, 2))
             }
-            body.addView(edit, lp(MATCH, if (multiline) dpi(82) else dpi(44), 0, 4))
-            return edit
+        }
+        fun switch(label: String, key: String, default: Boolean): Switch {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dpi(3), 0, dpi(3))
+            }
+            row.addView(tv(label, 11.5f, Palette.text, 1), LinearLayout.LayoutParams(0, WRAP, 1f))
+            val control = Switch(this).apply { showText = false; isChecked = prefs.getBoolean(key, default) }
+            row.addView(control)
+            body.addView(row, lp(MATCH, WRAP, 3))
+            return control
+        }
+        fun spinner(label: String, key: String, entries: List<String>, default: String): Spinner {
+            body.addView(tv(label, 11.5f, Palette.text, 1), lp(MATCH, WRAP, 7, 2))
+            return Spinner(this).apply {
+                adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, entries)
+                val saved = prefs.getString(key, default) ?: default
+                setSelection(entries.indexOf(saved).coerceAtLeast(0))
+                body.addView(this, lp(MATCH, dpi(44), 0, 2))
+            }
         }
 
-        fun toggle(label: String, key: String, default: Boolean): Switch {
-            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dpi(4), 0, dpi(4)) }
-            val text = tv(label, 12f, Palette.text, 1)
-            row.addView(text, LinearLayout.LayoutParams(0, WRAP, 1f))
-            val sw = Switch(this).apply { showText = false; isChecked = prefs.getBoolean(key, default) }
-            row.addView(sw)
-            body.addView(row, lp(MATCH, WRAP, 4))
-            return sw
+        heading("SlipNet", "All preferences below are saved in TIREXNET. Protocol execution still needs SlipNet's native engines to be embedded; this build will not hand off to a separate app or report a false connection.")
+        val protocol = spinner("Preferred protocol", "slipnet_protocol", listOf("Auto detect", "DNSTT", "NoizDNS", "VayDNS", "Soar", "Slipstream", "SSH", "NaiveProxy", "VLESS", "DoH", "Tor"), "Auto detect")
+        val mtu = field("VPN MTU (512–1500)", "slipnet_mtu", "1280", "1280", numeric = true)
+        val maxTunnels = field("Max parallel tunnels (1–64)", "slipnet_max_tunnels", "4", "4", numeric = true)
+        val timeout = field("Connection timeout (seconds)", "slipnet_timeout", "20", "20", numeric = true)
+        val dnsTimeout = field("DNS timeout (milliseconds)", "slipnet_dns_timeout", "5000", "5000", numeric = true)
+        val connectionPoolSize = field("Connection pool size (1–128)", "slipnet_connection_pool_size", "16", "16", numeric = true)
+        val bufferSize = spinner("Network buffer size", "slipnet_buffer_size", listOf("32 KB", "64 KB", "128 KB", "256 KB", "512 KB"), "128 KB")
+        val keepAlive = field("Keep-alive interval (milliseconds)", "slipnet_keepalive_ms", "5000", "5000", numeric = true)
+        val dnsWorkers = spinner("DNS worker mode", "slipnet_dns_workers", listOf("Per-query (default)", "2 workers", "3 workers", "5 workers (fastest)"), "Per-query (default)")
+        dnsWorkers.setSelection(when ((prefs.getString("slipnet_dns_workers", "per_query") ?: "per_query").lowercase(Locale.US)) {
+            "two", "2", "2 workers" -> 1
+            "three", "3", "3 workers" -> 2
+            "five", "5", "5 workers (fastest)" -> 3
+            else -> 0
+        })
+        val congestion = spinner("Congestion control", "slipnet_congestion", listOf("BBR", "DCUBIC"), "BBR")
+        val uploadLimit = field("Upload limit (KB/s, 0 = unlimited)", "slipnet_upload_limit", "0", "0", numeric = true)
+        val downloadLimit = field("Download limit (KB/s, 0 = unlimited)", "slipnet_download_limit", "0", "0", numeric = true)
+        val gso = switch("Enable UDP GSO where supported", "slipnet_gso", false)
+        val disableQuic = switch("Disable QUIC fallback", "slipnet_disable_quic", true)
+        val blockIpv6 = switch("Block IPv6 to avoid leaks", "slipnet_block_ipv6", true)
+
+        heading("DNS & resolvers", "Used by DNSTT, NoizDNS, VayDNS and Soar profiles.")
+        val resolvers = field("Resolver pool (one IP:port per line)", "slipnet_resolvers", "1.1.1.1:53\n8.8.8.8:53", "1.1.1.1:53\n8.8.8.8:53", multiline = true)
+        val dnsTransport = spinner("DNS transport", "slipnet_dns_transport", listOf("UDP", "TCP", "DoT", "DoH"), "UDP")
+        val resolverMode = spinner("Resolver strategy", "slipnet_resolver_mode", listOf("Fast (round-robin)", "Reliable (fan-out)"), "Fast (round-robin)")
+        val dohUrl = field("DoH URL", "slipnet_doh_url", "https://dns.google/dns-query")
+        val autoResolver = switch("Automatically select working resolvers", "slipnet_auto_resolver", true)
+        val globalResolverEnabled = switch("Override profile resolvers globally", "slipnet_global_resolver_enabled", false)
+        val globalResolverList = field("Global resolver list (host:port, one per line)", "slipnet_global_resolver_list", "1.1.1.1:53\n8.8.8.8:53", "", multiline = true)
+        val dnsPoolEnabled = switch("Enable DNS pool", "slipnet_dns_pool_enabled", false)
+        val dnsPoolText = field("DNS pool entries (one per line)", "slipnet_dns_pool_text", "resolver.example:53", "", multiline = true)
+        val dnsPoolFullVerification = switch("Fully verify DNS pool entries", "slipnet_dns_pool_full_verification", false)
+        val resolverSpread = field("Round-robin spread count (1–5)", "slipnet_resolver_spread", "3", "3", numeric = true)
+        val autoTune = switch("Auto-tune DNS payload and query rate", "slipnet_dns_auto_tune", false)
+        val dnsPayload = field("DNS payload / KCP MTU (0 = auto)", "slipnet_dns_payload", "0", "0", numeric = true)
+        val qname = field("VayDNS maximum QNAME length", "slipnet_vay_qname", "101", "101", numeric = true)
+        val rps = field("VayDNS query rate limit (0 = unlimited)", "slipnet_vay_rps", "0", "0", numeric = true)
+        val vayCompat = switch("VayDNS DNSTT wire-format compatibility", "slipnet_vay_compat", false)
+        val vayRecordType = spinner("VayDNS DNS record type", "slipnet_vay_record_type", listOf("txt", "cname", "a", "aaaa", "mx", "ns", "srv", "null", "caa"), "txt")
+        val vayIdleTimeout = field("VayDNS idle timeout (seconds, 0 = default)", "slipnet_vay_idle", "0", "0", numeric = true)
+        val vayKeepalive = field("VayDNS keep-alive (seconds, 0 = default)", "slipnet_vay_keepalive", "0", "0", numeric = true)
+        val vayUdpTimeout = field("VayDNS UDP response timeout (ms, 0 = default)", "slipnet_vay_udp_timeout", "0", "0", numeric = true)
+        val vayMaxLabels = field("VayDNS maximum data labels (0 = unlimited)", "slipnet_vay_max_labels", "0", "0", numeric = true)
+        val vayClientId = field("VayDNS Client ID size (bytes, 0 = default)", "slipnet_vay_client_id", "0", "0", numeric = true)
+        val noizStealth = switch("NoizDNS stealth mode", "slipnet_noiz_stealth", false)
+        val soarDiscovery = switch("Soar resolver discovery", "slipnet_soar_discovery", false)
+        val soarCountry = field("Soar resolver country (ISO code; blank = global)", "slipnet_soar_country", "IR", "")
+        val soarTcpMode = spinner("Soar TCP/53 mode", "slipnet_soar_tcp_mode", listOf("auto", "on", "only", "off"), "auto")
+
+        heading("SSH chain", "SSH authentication, ciphers and channel limits.")
+        val sshChain = switch("Enable SSH chaining when profile supports it", "slipnet_ssh_chain", false)
+        val sshHost = field("SSH host", "slipnet_ssh_host", "ssh.example.com")
+        val sshPort = field("SSH port", "slipnet_ssh_port", "22", "22", numeric = true)
+        val sshUser = field("SSH username", "slipnet_ssh_username", "username")
+        val sshPassword = field("SSH password", "slipnet_ssh_password", "Password", secret = true)
+        val sshKey = field("SSH private key (optional)", "slipnet_ssh_private_key", "-----BEGIN OPENSSH PRIVATE KEY-----", multiline = true)
+        val sshChannels = field("SSH max channels", "slipnet_ssh_channels", "16", "16", numeric = true)
+        val sshChannelsCustom = switch("Use a custom SSH channel limit (off = automatic)", "slipnet_ssh_channels_custom", false)
+        val sshCipher = spinner("SSH cipher", "slipnet_ssh_cipher", listOf("Auto", "AES-128-GCM", "ChaCha20-Poly1305", "AES-128-CTR (Legacy)"), "Auto")
+        val sshCompression = switch("SSH compression", "slipnet_ssh_compression", false)
+        val preventDnsFallback = switch("Prevent DNS fallback outside the tunnel", "slipnet_prevent_dns_fallback", true)
+        val sshTlsSni = field("SSH-over-TLS SNI", "slipnet_ssh_tls_sni", "front.example.com")
+        val sshHttpProxyHost = field("SSH HTTP CONNECT proxy host", "slipnet_ssh_http_proxy_host", "proxy.example.com")
+        val sshHttpProxyPort = field("SSH HTTP CONNECT proxy port", "slipnet_ssh_http_proxy_port", "8080", "8080", numeric = true)
+        val sshHttpProxyCustomHost = field("SSH HTTP CONNECT Host header", "slipnet_ssh_http_proxy_custom_host", "")
+        val sshWsPath = field("SSH WebSocket path", "slipnet_ssh_ws_path", "/")
+        val sshWsHost = field("SSH WebSocket Host header", "slipnet_ssh_ws_host", "")
+        val sshWsUseTls = switch("Use TLS for SSH WebSocket (wss://)", "slipnet_ssh_ws_tls", true)
+        val sshPayload = field("SSH pre-handshake payload", "slipnet_ssh_payload", "", multiline = true)
+
+        heading("App & local proxy", "SlipNet-style app behavior and local proxy preferences.")
+        val autoConnectBoot = switch("Auto-connect on boot", "slipnet_auto_connect_boot", false)
+        val proxyOnly = switch("Proxy-only mode", "slipnet_proxy_only", false)
+        val killSwitch = switch("Kill switch", "slipnet_kill_switch", false)
+        val notificationTraffic = switch("Show traffic in notification", "slipnet_notification_traffic", true)
+        val proxyListenHost = field("Local proxy listen address", "slipnet_proxy_host", "127.0.0.1", "127.0.0.1")
+        val proxyListenPort = field("Local SOCKS port", "slipnet_proxy_port", "1080", "1080", numeric = true)
+        val proxyAuth = switch("Enable local proxy authentication", "slipnet_proxy_auth", false)
+        val proxyUsername = field("Local proxy username", "slipnet_proxy_user", "")
+        val proxyPassword = field("Local proxy password", "slipnet_proxy_pass", "", secret = true)
+        val httpProxyEnabled = switch("Enable local HTTP proxy", "slipnet_http_proxy_enabled", false)
+        val httpProxyPort = field("Local HTTP proxy port", "slipnet_http_proxy_port", "8080", "8080", numeric = true)
+        val sleepTimer = field("Auto-disconnect timer (minutes, 0 = off)", "slipnet_sleep_timer", "0", "0", numeric = true)
+        val remoteDnsMode = spinner("Remote DNS mode", "slipnet_remote_dns_mode", listOf("Default", "Custom"), "Default")
+        val remoteDnsPrimary = field("Custom remote DNS", "slipnet_remote_dns_primary", "1.1.1.1")
+        val remoteDnsFallback = field("Fallback remote DNS", "slipnet_remote_dns_fallback", "8.8.8.8")
+        val domainRouting = switch("Enable domain routing", "slipnet_domain_routing_enabled", false)
+        val domainRoutingMode = spinner("Domain routing mode", "slipnet_domain_routing_mode", listOf("Bypass listed domains", "Tunnel only listed domains"), "Bypass listed domains")
+        val routedDomains = field("Domains (one hostname per line)", "slipnet_domain_routing_domains", "example.com", multiline = true)
+        val geoBypass = switch("Enable geo-bypass", "slipnet_geo_bypass_enabled", false)
+        val geoCountry = field("Geo-bypass country (ISO code)", "slipnet_geo_bypass_country", "IR", "IR")
+
+        heading("Advanced protocol tuning", "Advanced per-device defaults; profile-specific values still take priority.")
+        val vlessSni = field("VLESS default SNI", "slipnet_vless_sni", "")
+        val sniFragmentEnabled = switch("Enable TLS SNI fragmentation", "slipnet_vless_sni_fragment", true)
+        val sniFragmentStrategy = spinner("TLS fragmentation strategy", "slipnet_vless_sni_strategy", listOf("micro", "multi", "sni_split", "fake", "disorder"), "micro")
+        val sniFragmentDelay = field("TLS fragment delay (ms)", "slipnet_vless_sni_delay", "300", "300", numeric = true)
+        val tcpMaxSeg = field("TCP MSS cap (0 = auto)", "slipnet_vless_tcp_mss", "0", "0", numeric = true)
+        val chPadding = switch("TLS ClientHello padding", "slipnet_vless_ch_padding", false)
+        val wsObfuscation = switch("Obfuscate WebSocket headers", "slipnet_vless_ws_obfuscation", true)
+        val wsPadding = switch("WebSocket cover ping frames", "slipnet_vless_ws_padding", false)
+        val vlessUuid = field("VLESS UUID", "slipnet_vless_uuid", "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+        val vlessSecurity = spinner("VLESS security", "slipnet_vless_security", listOf("tls", "none"), "tls")
+        val vlessTransport = spinner("VLESS transport", "slipnet_vless_transport", listOf("ws", "tcp", "grpc"), "ws")
+        val vlessWsPath = field("VLESS WebSocket path", "slipnet_vless_ws_path", "/")
+        val vlessCdnIp = field("VLESS CDN / edge IP", "slipnet_vless_cdn_ip", "104.16.0.1")
+        val vlessCdnPort = field("VLESS CDN port", "slipnet_vless_cdn_port", "443", "443", numeric = true)
+        val naivePort = field("NaiveProxy port", "slipnet_naive_port", "443", "443", numeric = true)
+        val naiveUsername = field("NaiveProxy username", "slipnet_naive_username", "")
+        val naivePassword = field("NaiveProxy password", "slipnet_naive_password", "", secret = true)
+        val proxyHttpAppend = switch("Append local HTTP proxy to VPN", "slipnet_http_proxy_append", false)
+        val debugLogging = switch("SlipNet diagnostic logging", "slipnet_debug_logging", false)
+        val slipnetTheme = spinner("SlipNet appearance preference", "slipnet_dark_mode", listOf("System", "Light", "Dark"), "System")
+
+        heading("Tor bridges", "Blank bridge lines use SlipNet's built-in Snowflake default. Custom lines support obfs4, webtunnel and meek.")
+        val selectedTorProfile = selected?.let { EngineProfiles.decodeSlipNet(it.raw) }?.takeIf { it.protocol == "snowflake" }
+        val selectedTorBridges = selectedTorProfile?.torBridgeLines.orEmpty()
+        val storedTorBridges = prefs.getString("slipnet_tor_bridges", null)
+        val torModes = listOf("Built-in Snowflake", "Direct", "Snowflake AMP", "Obfs4", "Meek Azure", "WebTunnel", "Smart", "Custom")
+        val inferredTorMode = when (selectedTorBridges.trim()) {
+            "" -> "Built-in Snowflake"
+            "DIRECT" -> "Direct"
+            "SNOWFLAKE_AMP" -> "Snowflake AMP"
+            "SMART" -> "Smart"
+            else -> when {
+                selectedTorBridges.lineSequence().any { it.trim().startsWith("obfs4 ", true) } -> "Obfs4"
+                selectedTorBridges.lineSequence().any { it.trim().startsWith("meek_lite ", true) } -> "Meek Azure"
+                selectedTorBridges.lineSequence().any { it.trim().startsWith("webtunnel ", true) } -> "WebTunnel"
+                else -> "Custom"
+            }
         }
+        val initialTorMode = if (selectedTorProfile != null) inferredTorMode else (prefs.getString("slipnet_tor_bridge_mode", "Built-in Snowflake") ?: "Built-in Snowflake")
+        val torBridgeMode = spinner("Tor bridge preset", "slipnet_tor_bridge_mode", torModes, initialTorMode)
+        if (selectedTorProfile != null) torBridgeMode.setSelection(torModes.indexOf(inferredTorMode).coerceAtLeast(0))
+        val bridgePrefill = if (selectedTorProfile != null) selectedTorBridges else storedTorBridges.orEmpty()
+        val torBridgeLines = field("Custom Tor bridge lines", "slipnet_tor_bridges", "obfs4 ...\nwebtunnel ...", bridgePrefill, multiline = true)
+        body.addView(tv("PASTE BRIDGE LINES FROM CLIPBOARD", 10.5f, Palette.cyan, 2).apply {
+            gravity = Gravity.CENTER
+            setPadding(dpi(10), dpi(9), dpi(10), dpi(9))
+            background = Palette.glass(this@MainActivity, 10f, Palette.stroke, Palette.glassTop, Palette.glassBottom)
+            isClickable = true
+            setOnClickListener {
+                val clip = runCatching {
+                    (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
+                }.getOrNull()
+                val pasted = runCatching {
+                    if (clip != null && clip.itemCount > 0) clip.getItemAt(0).coerceToText(this@MainActivity).toString().trim() else ""
+                }.getOrDefault("")
+                if (pasted.isBlank()) toast("Clipboard has no Tor bridge lines.") else torBridgeLines.setText(pasted)
+            }
+        }, lp(MATCH, dpi(40), 0, 5))
+        val torFallback = switch("Allow Tor fallback when profile supports it", "slipnet_tor_fallback", false)
 
-        val resolvers = inputField("DNS resolver pool", "slipnet_resolvers", "1.1.1.1:53\n8.8.8.8:53", true)
-        val sshHost = inputField("SSH chain host (optional)", "slipnet_ssh_host", "ssh.example.com")
-        val sshPort = inputField("SSH port", "slipnet_ssh_port", "22")
-        val timeout = inputField("Connection timeout (seconds)", "slipnet_timeout", "20")
-        val autoResolver = toggle("Automatically select a working resolver", "slipnet_auto_resolver", true)
-        val sshChain = toggle("Enable SSH chaining when profile supports it", "slipnet_ssh_chain", false)
-        val torFallback = toggle("Allow Tor fallback when profile supports it", "slipnet_tor_fallback", false)
-        val selectedText = if (selected != null) "Selected profile: ${selected.name}" else "No SlipNet profile selected. Import a slipnet:// share link from the Servers tab."
-        body.addView(tv(selectedText, 10.5f, Palette.muted, 0), lp(MATCH, WRAP, 12, 12))
-        root.addView(scroll, lp(MATCH, minOf(dpi(500), resources.displayMetrics.heightPixels * 2 / 3)))
+        heading("Profile behavior", "Per-profile values in a SlipNet share URI remain preserved. These defaults are stored separately.")
+        val sshTls = switch("Allow SSH over TLS", "slipnet_ssh_tls", false)
+        val sshWs = switch("Allow SSH over WebSocket", "slipnet_ssh_ws", false)
+        val dnsFallback = switch("Auto-reconnect after a dropped tunnel", "slipnet_auto_reconnect", true)
+        val splitTunnel = switch("Enable per-app split tunneling", "slipnet_split_tunnel", false)
+        body.addView(tv("Choose applications…", 11.5f, Palette.cyan, 2).apply {
+            gravity = Gravity.CENTER
+            setPadding(dpi(12), dpi(11), dpi(12), dpi(11))
+            background = Palette.glass(this@MainActivity, 12f, Palette.stroke, Palette.glassTop, Palette.glassBottom)
+            isClickable = true
+            setOnClickListener { showSplitTunnelDialog() }
+        }, lp(MATCH, WRAP, 2, 4))
 
-        val dialog = dialogBuilder().setTitle("SlipNet • In-app settings")
-            .setView(root)
-            .setNegativeButton("Close", null)
-            .setPositiveButton("Save settings", null)
-            .create()
+        val currentProtocol = selected?.let { EngineProfiles.decodeSlipNet(it.raw)?.protocol }.orEmpty()
+        body.addView(tv(
+            if (selected != null) "Selected profile: ${selected.name} • ${currentProtocol.ifBlank { "encrypted / auto" }}" else "No SlipNet profile selected. Import a slipnet:// profile from the Servers tab.",
+            10.5f, Palette.muted, 0
+        ), lp(MATCH, WRAP, 14, 12))
+        root.addView(scroll, lp(MATCH, minOf(dpi(560), resources.displayMetrics.heightPixels * 3 / 4)))
+
+        val dialog = dialogBuilder().setTitle("SlipNet • Complete settings")
+            .setView(root).setNegativeButton("Close", null).setPositiveButton("Save settings", null).create()
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val portValue = sshPort.text.toString().trim()
-                val timeoutValue = timeout.text.toString().trim()
-                if (portValue.isNotEmpty() && (portValue.toIntOrNull() ?: 0) !in 1..65535) {
-                    sshPort.error = "Enter a port from 1 to 65535"; return@setOnClickListener
+                fun number(view: EditText, label: String, min: Int, max: Int): Int? {
+                    val n = view.text.toString().trim().toIntOrNull()
+                    if (n == null || n !in min..max) { view.error = "$label must be $min–$max"; view.requestFocus(); return null }
+                    return n
                 }
-                if (timeoutValue.isNotEmpty() && (timeoutValue.toIntOrNull() ?: 0) !in 3..180) {
-                    timeout.error = "Enter 3–180 seconds"; return@setOnClickListener
+                val mtuValue = number(mtu, "MTU", 512, 1500) ?: return@setOnClickListener
+                val tunnelValue = number(maxTunnels, "Max tunnels", 1, 64) ?: return@setOnClickListener
+                val timeoutValue = number(timeout, "Timeout", 3, 180) ?: return@setOnClickListener
+                val dnsTimeoutValue = number(dnsTimeout, "DNS timeout", 250, 120000) ?: return@setOnClickListener
+                val connectionPoolValue = number(connectionPoolSize, "Connection pool", 1, 128) ?: return@setOnClickListener
+                val keepAliveValue = number(keepAlive, "Keep-alive", 500, 60000) ?: return@setOnClickListener
+                val uploadLimitValue = number(uploadLimit, "Upload limit", 0, 10_000_000) ?: return@setOnClickListener
+                val downloadLimitValue = number(downloadLimit, "Download limit", 0, 10_000_000) ?: return@setOnClickListener
+                val resolverSpreadValue = number(resolverSpread, "Resolver spread", 1, 5) ?: return@setOnClickListener
+                val sshPortValue = number(sshPort, "SSH port", 1, 65535) ?: return@setOnClickListener
+                val channelValue = number(sshChannels, "SSH channels", 1, 128) ?: return@setOnClickListener
+                val payloadValue = number(dnsPayload, "DNS payload", 0, 1400) ?: return@setOnClickListener
+                val qnameValue = number(qname, "QNAME", 64, 255) ?: return@setOnClickListener
+                val vayIdleValue = number(vayIdleTimeout, "VayDNS idle timeout", 0, 86400) ?: return@setOnClickListener
+                val vayKeepaliveValue = number(vayKeepalive, "VayDNS keep-alive", 0, 3600) ?: return@setOnClickListener
+                val vayUdpTimeoutValue = number(vayUdpTimeout, "VayDNS UDP timeout", 0, 60000) ?: return@setOnClickListener
+                val vayLabelsValue = number(vayMaxLabels, "VayDNS max labels", 0, 128) ?: return@setOnClickListener
+                val vayClientIdValue = number(vayClientId, "VayDNS Client ID size", 0, 32) ?: return@setOnClickListener
+                val vlessPortValue = number(vlessCdnPort, "VLESS CDN port", 1, 65535) ?: return@setOnClickListener
+                val naivePortValue = number(naivePort, "NaiveProxy port", 1, 65535) ?: return@setOnClickListener
+                val httpConnectPortValue = number(sshHttpProxyPort, "SSH HTTP proxy port", 1, 65535) ?: return@setOnClickListener
+                val proxyPortValue = number(proxyListenPort, "Local proxy port", 1, 65535) ?: return@setOnClickListener
+                val httpProxyPortValue = number(httpProxyPort, "HTTP proxy port", 1, 65535) ?: return@setOnClickListener
+                val sleepTimerValue = number(sleepTimer, "Sleep timer", 0, 1440) ?: return@setOnClickListener
+                val sniDelayValue = number(sniFragmentDelay, "TLS fragment delay", 0, 5000) ?: return@setOnClickListener
+                val tcpMssValue = number(tcpMaxSeg, "TCP MSS", 0, 1400) ?: return@setOnClickListener
+                val geoCode = geoCountry.text.toString().trim().uppercase(Locale.US)
+                if (geoCode.length != 2 || geoCode.any { it !in 'A'..'Z' }) { geoCountry.error = "Use a two-letter ISO country code"; return@setOnClickListener }
+                val rpsValue = rps.text.toString().trim().toDoubleOrNull()
+                if (rpsValue == null || rpsValue !in 0.0..1000.0) { rps.error = "Enter 0–1000"; return@setOnClickListener }
+                val country = soarCountry.text.toString().trim().uppercase(Locale.US)
+                if (country.isNotEmpty() && !country.matches(Regex("^[A-Z]{2}$"))) { soarCountry.error = "Use a two-letter country code"; return@setOnClickListener }
+                val portValue = sshPortValue
+                val dnsWorkerValue = when (dnsWorkers.selectedItem.toString()) {
+                    "2 workers" -> "two"
+                    "3 workers" -> "three"
+                    "5 workers (fastest)" -> "five"
+                    else -> "per_query"
+                }
+
+                // If the selected item is an editable Tor share link, save a derived
+                // local copy with bridge settings in field 26. Never rewrite a
+                // subscription profile or an encrypted single-profile URI.
+                val selectedTor = selectedTorProfile
+                var derivedTorUri: String? = null
+                var torEditUnavailable = false
+                if (selectedTor != null) {
+                    val bridgeText = torBridgeLines.text.toString().trim()
+                    val bridgeValue = when (torBridgeMode.selectedItem.toString()) {
+                        "Built-in Snowflake" -> ""
+                        "Direct" -> "DIRECT"
+                        "Snowflake AMP" -> "SNOWFLAKE_AMP"
+                        "Smart" -> "SMART"
+                        "Obfs4" -> bridgeText.takeIf { it.lineSequence().any { line -> line.trim().startsWith("obfs4 ", true) } }
+                        "Meek Azure" -> bridgeText.takeIf { it.lineSequence().any { line -> line.trim().startsWith("meek_lite ", true) } }
+                        "WebTunnel" -> bridgeText.takeIf { it.lineSequence().any { line -> line.trim().startsWith("webtunnel ", true) } }
+                        else -> bridgeText.takeIf { it.isNotBlank() }
+                    }
+                    if (bridgeValue == null) {
+                        toast("برای Obfs4، Meek یا WebTunnel باید bridge line معتبر وارد کنی.")
+                        torBridgeLines.error = "Paste a valid bridge line"
+                        torBridgeLines.requestFocus()
+                        return@setOnClickListener
+                    }
+                    derivedTorUri = EngineProfiles.updateSlipNetTorBridges(selected!!.raw, bridgeValue)
+                    torEditUnavailable = derivedTorUri == null
                 }
                 prefs.edit()
-                    .putString("slipnet_protocol", protocolNames[protocolSpinner.selectedItemPosition])
+                    .putString("slipnet_protocol", protocol.selectedItem.toString())
+                    .putInt("slipnet_mtu", mtuValue)
+                    .putInt("slipnet_max_tunnels", tunnelValue)
+                    .putInt("slipnet_timeout", timeoutValue)
+                    .putInt("slipnet_dns_timeout", dnsTimeoutValue)
+                    .putInt("slipnet_connection_pool_size", connectionPoolValue)
+                    .putString("slipnet_buffer_size", bufferSize.selectedItem.toString())
+                    .putInt("slipnet_keepalive_ms", keepAliveValue)
+                    .putInt("slipnet_upload_limit", uploadLimitValue)
+                    .putInt("slipnet_download_limit", downloadLimitValue)
+                    .putString("slipnet_dns_workers", dnsWorkerValue)
+                    .putString("slipnet_congestion", congestion.selectedItem.toString())
+                    .putBoolean("slipnet_gso", gso.isChecked)
+                    .putBoolean("slipnet_disable_quic", disableQuic.isChecked)
+                    .putBoolean("slipnet_block_ipv6", blockIpv6.isChecked)
                     .putString("slipnet_resolvers", resolvers.text.toString().trim())
-                    .putString("slipnet_ssh_host", sshHost.text.toString().trim())
-                    .putString("slipnet_ssh_port", portValue)
-                    .putString("slipnet_timeout", timeoutValue)
+                    .putString("slipnet_dns_transport", dnsTransport.selectedItem.toString())
+                    .putString("slipnet_resolver_mode", resolverMode.selectedItem.toString())
+                    .putString("slipnet_doh_url", dohUrl.text.toString().trim())
                     .putBoolean("slipnet_auto_resolver", autoResolver.isChecked)
+                    .putBoolean("slipnet_global_resolver_enabled", globalResolverEnabled.isChecked)
+                    .putString("slipnet_global_resolver_list", globalResolverList.text.toString().trim())
+                    .putBoolean("slipnet_dns_pool_enabled", dnsPoolEnabled.isChecked)
+                    .putString("slipnet_dns_pool_text", dnsPoolText.text.toString().trim())
+                    .putBoolean("slipnet_dns_pool_full_verification", dnsPoolFullVerification.isChecked)
+                    .putInt("slipnet_resolver_spread", resolverSpreadValue)
+                    .putBoolean("slipnet_dns_auto_tune", autoTune.isChecked)
+                    .putInt("slipnet_dns_payload", payloadValue)
+                    .putInt("slipnet_vay_qname", qnameValue)
+                    .putString("slipnet_vay_rps", rpsValue.toString())
+                    .putBoolean("slipnet_vay_compat", vayCompat.isChecked)
+                    .putString("slipnet_vay_record_type", vayRecordType.selectedItem.toString())
+                    .putInt("slipnet_vay_idle", vayIdleValue)
+                    .putInt("slipnet_vay_keepalive", vayKeepaliveValue)
+                    .putInt("slipnet_vay_udp_timeout", vayUdpTimeoutValue)
+                    .putInt("slipnet_vay_max_labels", vayLabelsValue)
+                    .putInt("slipnet_vay_client_id", vayClientIdValue)
+                    .putBoolean("slipnet_noiz_stealth", noizStealth.isChecked)
+                    .putBoolean("slipnet_soar_discovery", soarDiscovery.isChecked)
+                    .putString("slipnet_soar_country", country)
+                    .putString("slipnet_soar_tcp_mode", soarTcpMode.selectedItem.toString())
                     .putBoolean("slipnet_ssh_chain", sshChain.isChecked)
+                    .putString("slipnet_ssh_host", sshHost.text.toString().trim())
+                    .putInt("slipnet_ssh_port", portValue)
+                    .putString("slipnet_ssh_username", sshUser.text.toString().trim())
+                    .putString("slipnet_ssh_password", sshPassword.text.toString())
+                    .putString("slipnet_ssh_private_key", sshKey.text.toString())
+                    .putString("slipnet_ssh_key_passphrase", sshKeyPassphrase.text.toString())
+                    .putString("slipnet_ssh_auth_type", sshAuthType.selectedItem.toString())
+                    .putInt("slipnet_ssh_channels", channelValue)
+                    .putBoolean("slipnet_ssh_channels_custom", sshChannelsCustom.isChecked)
+                    .putString("slipnet_ssh_cipher", sshCipher.selectedItem.toString())
+                    .putBoolean("slipnet_ssh_compression", sshCompression.isChecked)
+                    .putBoolean("slipnet_prevent_dns_fallback", preventDnsFallback.isChecked)
+                    .putString("slipnet_ssh_tls_sni", sshTlsSni.text.toString().trim())
+                    .putString("slipnet_ssh_http_proxy_host", sshHttpProxyHost.text.toString().trim())
+                    .putInt("slipnet_ssh_http_proxy_port", httpConnectPortValue)
+                    .putString("slipnet_ssh_http_proxy_custom_host", sshHttpProxyCustomHost.text.toString().trim())
+                    .putString("slipnet_ssh_ws_path", sshWsPath.text.toString().trim())
+                    .putString("slipnet_ssh_ws_host", sshWsHost.text.toString().trim())
+                    .putBoolean("slipnet_ssh_ws_tls", sshWsUseTls.isChecked)
+                    .putString("slipnet_ssh_payload", sshPayload.text.toString())
+                    .putBoolean("slipnet_auto_connect_boot", autoConnectBoot.isChecked)
+                    .putBoolean("slipnet_proxy_only", proxyOnly.isChecked)
+                    .putBoolean("slipnet_kill_switch", killSwitch.isChecked)
+                    .putBoolean("slipnet_notification_traffic", notificationTraffic.isChecked)
+                    .putString("slipnet_proxy_host", proxyListenHost.text.toString().trim())
+                    .putInt("slipnet_proxy_port", proxyPortValue)
+                    .putBoolean("slipnet_proxy_auth", proxyAuth.isChecked)
+                    .putString("slipnet_proxy_user", proxyUsername.text.toString())
+                    .putString("slipnet_proxy_pass", proxyPassword.text.toString())
+                    .putBoolean("slipnet_http_proxy_enabled", httpProxyEnabled.isChecked)
+                    .putInt("slipnet_http_proxy_port", httpProxyPortValue)
+                    .putInt("slipnet_sleep_timer", sleepTimerValue)
+                    .putString("slipnet_remote_dns_mode", remoteDnsMode.selectedItem.toString())
+                    .putString("slipnet_remote_dns_primary", remoteDnsPrimary.text.toString().trim())
+                    .putString("slipnet_remote_dns_fallback", remoteDnsFallback.text.toString().trim())
+                    .putBoolean("slipnet_domain_routing_enabled", domainRouting.isChecked)
+                    .putString("slipnet_domain_routing_mode", domainRoutingMode.selectedItem.toString())
+                    .putString("slipnet_domain_routing_domains", routedDomains.text.toString().trim())
+                    .putBoolean("slipnet_geo_bypass_enabled", geoBypass.isChecked)
+                    .putString("slipnet_geo_bypass_country", geoCode)
+                    .putBoolean("slipnet_vless_sni_fragment", sniFragmentEnabled.isChecked)
+                    .putString("slipnet_vless_sni", vlessSni.text.toString().trim())
+                    .putString("slipnet_vless_sni_strategy", sniFragmentStrategy.selectedItem.toString())
+                    .putInt("slipnet_vless_sni_delay", sniDelayValue)
+                    .putInt("slipnet_vless_tcp_mss", tcpMssValue)
+                    .putBoolean("slipnet_vless_ch_padding", chPadding.isChecked)
+                    .putBoolean("slipnet_vless_ws_obfuscation", wsObfuscation.isChecked)
+                    .putBoolean("slipnet_vless_ws_padding", wsPadding.isChecked)
+                    .putString("slipnet_vless_uuid", vlessUuid.text.toString().trim())
+                    .putString("slipnet_vless_security", vlessSecurity.selectedItem.toString())
+                    .putString("slipnet_vless_transport", vlessTransport.selectedItem.toString())
+                    .putString("slipnet_vless_ws_path", vlessWsPath.text.toString().trim())
+                    .putString("slipnet_vless_cdn_ip", vlessCdnIp.text.toString().trim())
+                    .putInt("slipnet_vless_cdn_port", vlessPortValue)
+                    .putInt("slipnet_naive_port", naivePortValue)
+                    .putString("slipnet_naive_username", naiveUsername.text.toString())
+                    .putString("slipnet_naive_password", naivePassword.text.toString())
+                    .putBoolean("slipnet_http_proxy_append", proxyHttpAppend.isChecked)
+                    .putBoolean("slipnet_debug_logging", debugLogging.isChecked)
+                    .putString("slipnet_dark_mode", slipnetTheme.selectedItem.toString())
+                    .putString("slipnet_tor_bridge_mode", torBridgeMode.selectedItem.toString())
+                    .putString("slipnet_tor_bridges", torBridgeLines.text.toString().trim())
                     .putBoolean("slipnet_tor_fallback", torFallback.isChecked)
+                    .putBoolean("slipnet_ssh_tls", sshTls.isChecked)
+                    .putBoolean("slipnet_ssh_ws", sshWs.isChecked)
+                    .putBoolean("slipnet_auto_reconnect", dnsFallback.isChecked)
+                    .putBoolean("slipnet_split_tunnel", splitTunnel.isChecked)
                     .apply()
+
+                var torProfileSaved = false
+                derivedTorUri?.let { updatedRaw ->
+                    val original = selected
+                    if (original != null) {
+                        val derivedName = "${original.name} • ${torBridgeMode.selectedItem}"
+                        val derived = ServerItem(derivedName, updatedRaw, ConfigEngine.SLIPNET, ProfileParser.parse(updatedRaw), true, original.country)
+                        val locals = loadLocalProfiles().filterNot { it.raw.trim() == updatedRaw.trim() }.toMutableList()
+                        locals.add(derived)
+                        if (persistLocalProfiles(locals)) {
+                            servers = mergeSavedAndRemote(servers.filterNot { it.local })
+                            serversState = ServersState.READY
+                            setConfig(updatedRaw)
+                            rebuildServerList(-1)
+                            bindServerSummary()
+                            torProfileSaved = true
+                        } else {
+                            toast("تنظیمات ذخیره شدند، اما ذخیره پروفایل محلی ناموفق بود.")
+                        }
+                    }
+                }
                 dialog.dismiss()
-                toast("SlipNet preferences saved in TIREXNET.")
+                when {
+                    torProfileSaved -> toast("تنظیمات Tor در یک پروفایل محلی جداگانه ذخیره شد. موتور اتصال SlipNet هنوز داخل این APK نیست.")
+                    torEditUnavailable -> toast("تنظیمات عمومی ذخیره شد؛ لینک Tor رمزگذاری‌شده یا قدیمی قابل ویرایش مستقیم نیست.")
+                    else -> toast("SlipNet preferences saved. Native tunnel engines are not yet bundled in this APK.")
+                }
             }
         }
         dialog.show()
-        dialog.window?.setLayout((resources.displayMetrics.widthPixels * 0.92f).toInt(), WindowManager.LayoutParams.WRAP_CONTENT)
+        dialog.window?.setLayout((resources.displayMetrics.widthPixels * 0.94f).toInt(), WindowManager.LayoutParams.WRAP_CONTENT)
     }
 
     private fun showSlipNetRuntimeNotice() {
+        val profile = selectedItem()?.takeIf { it.engine == ConfigEngine.SLIPNET }?.let { EngineProfiles.decodeSlipNet(it.raw) }
+        val proto = profile?.protocol?.ifBlank { "encrypted profile" } ?: "SlipNet"
+        val torDetails = profile?.takeIf { it.protocol == "snowflake" }?.let {
+            if (it.torBridgeLines.isBlank()) "This Tor profile uses the built-in Snowflake bridge preset."
+            else "Tor bridge configuration was decoded (${it.torBridgeLines.lineSequence().count { line -> line.isNotBlank() }} bridge line(s))."
+        }.orEmpty()
+        val specific = if (profile?.protocol == "snowflake") "Tor/Snowflake was imported and identified. $torDetails However, Tor's native runtime and pluggable-transport binaries are not bundled in this APK yet." else "The profile was imported and retained, but SlipNet's native DNS/QUIC/SSH/Tor runtime is not bundled in this APK yet."
         dialogBuilder()
             .setTitle("SlipNet runtime not included")
-            .setMessage("Your SlipNet profile is safely imported and its preferences are available inside TIREXNET. The native SlipNet protocol engines are not yet packaged into this APK, so this profile cannot establish a tunnel here. TIREXNET will not launch the separate SlipNet app or show a false Connected state.")
+            .setMessage("$specific\n\nDetected profile: $proto. Its preferences can be edited inside TIREXNET. The app will not open SlipNet separately or show a false Connected state.")
             .setPositiveButton("SlipNet settings") { _, _ -> showSlipNetDialog() }
             .setNegativeButton("Close", null)
             .show()
@@ -1926,60 +2300,123 @@ class MainActivity : Activity() {
         }
     }.getOrNull()
 
+    private fun showPatternihaBasePicker() {
+        val candidates = servers.filter { it.engine == ConfigEngine.XRAY && EngineProfiles.supportsPatterniha(it.raw) }
+        if (candidates.isEmpty()) {
+            toast("ابتدا یک کانفیگ Xray با TLS یا REALITY وارد کن؛ اطلاعات احراز هویت از همان پروفایل حفظ می‌شود.")
+            return
+        }
+        if (candidates.size == 1) {
+            showPatternihaDialog(candidates.first())
+            return
+        }
+        val labels = candidates.map { item -> "${flagEmoji(item.country)}  ${item.name}" }.toTypedArray()
+        dialogBuilder().setTitle("Choose Xray base profile")
+            .setItems(labels) { _, which -> showPatternihaDialog(candidates[which]) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     private fun showPatternihaDialog(item: ServerItem) {
         if (item.engine != ConfigEngine.XRAY) {
-            toast("Patterniha requires a VLESS, VMess, Trojan or Shadowsocks TLS/REALITY profile.")
+            toast("Patterniha needs an Xray TLS/REALITY profile as the credential base.")
             return
         }
         if (!EngineProfiles.supportsPatterniha(item.raw)) {
-            toast("This server does not use TLS or REALITY. Patterniha needs a TLS ClientHello.")
+            toast("Choose a VLESS, VMess, Trojan or Shadowsocks profile with TLS/REALITY first.")
             return
         }
-        val ip = EditText(this).apply {
-            hint = "Upstream IPv4 address (required)"
-            setSingleLine(true); textSize = 13f; setPadding(dpi(12), dpi(8), dpi(12), dpi(8)); background = fieldBackground(false)
-            inputType = InputType.TYPE_CLASS_TEXT
-            val candidate = item.meta.host
-            if (candidate.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}$"))) setText(candidate)
+
+        fun input(hintText: String, value: String = "", numeric: Boolean = false): EditText = EditText(this).apply {
+            hint = hintText
+            setSingleLine(true)
+            textSize = 13f
+            setText(value)
+            setPadding(dpi(12), dpi(8), dpi(12), dpi(8))
+            background = fieldBackground(false)
+            inputType = if (numeric) InputType.TYPE_CLASS_NUMBER else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
         }
-        val port = EditText(this).apply {
-            hint = "Upstream port"; setSingleLine(true); textSize = 13f; setPadding(dpi(12), dpi(8), dpi(12), dpi(8)); background = fieldBackground(false)
-            inputType = InputType.TYPE_CLASS_NUMBER; setText(item.meta.port.takeIf { it in 1..65535 }?.toString() ?: "443")
+        val profileName = input("Profile name", "${item.name} • Patterniha")
+        val ip = input("Upstream IPv4 address", item.meta.host.takeIf { it.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}$")) }.orEmpty())
+        val port = input("Port", item.meta.port.takeIf { it in 1..65535 }?.toString() ?: "443", true)
+        val website = input("Website / real TLS SNI (e.g. cdn.example.com)", extractSni(item.raw))
+        val strategy = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
+                listOf("SNI split (recommended)", "Half", "Multi-fragment", "TLS record fragments"))
+            val saved = prefs.getString("sni_fragment_strategy", "sni_split") ?: "sni_split"
+            setSelection(listOf("sni_split", "half", "multi", "tls_record_frag").indexOf(saved).coerceAtLeast(0))
         }
-        val fakeSni = EditText(this).apply {
-            hint = "Decoy SNI allowed by your network"; setSingleLine(true); textSize = 13f; setPadding(dpi(12), dpi(8), dpi(12), dpi(8)); background = fieldBackground(false)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI; setText("www.google.com")
+        val delay = input("Fragment delay in seconds (0.01–1.00)", prefs.getString("sni_fragment_delay", "0.08") ?: "0.08")
+
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpi(18), dpi(6), dpi(18), 0)
         }
-        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(18), dpi(6), dpi(18), 0) }
-        box.addView(tv("Uses the original Patterniha wrong-TCP-sequence packet injection engine. This requires Magisk / KernelSU / APatch root access and a kernel that permits raw packet capture/injection. It is not the same as changing TLS serverName. The subscription profile remains unchanged; a separate local profile will be created.", 11f, Palette.muted, 0), lp(MATCH, WRAP, 0, 12))
-        box.addView(tv("Upstream IP", 10f, Palette.muted, 1), lp(MATCH, WRAP, 4))
-        box.addView(ip, lp(MATCH, dpi(46), 4, 8))
-        box.addView(tv("Port", 10f, Palette.muted, 1), lp(MATCH, WRAP, 2))
-        box.addView(port, lp(MATCH, dpi(46), 4, 8))
-        box.addView(tv("Fake SNI", 10f, Palette.muted, 1), lp(MATCH, WRAP, 2))
-        box.addView(fakeSni, lp(MATCH, dpi(46), 4, 8))
-        val dialog = dialogBuilder().setTitle("PATTERNIHA SNI INJECTION").setView(box)
+        box.addView(tv(
+            "Root is not required. TIREXNET uses SNISPF's unprivileged TLS fragmentation mode; the raw wrong-sequence packet method is not enabled. Your selected Xray profile supplies the UUID/password/keys, and this creates a separate local profile with the IP and SNI you enter.",
+            11f, Palette.muted, 0
+        ), lp(MATCH, WRAP, 0, 12))
+        fun addField(label: String, field: EditText) {
+            box.addView(tv(label, 10f, Palette.muted, 1), lp(MATCH, WRAP, 4))
+            box.addView(field, lp(MATCH, dpi(46), 3, 7))
+        }
+        addField("PROFILE NAME", profileName)
+        addField("UPSTREAM IP", ip)
+        addField("PORT", port)
+        addField("WEBSITE / TLS SNI", website)
+        box.addView(tv("FRAGMENTATION STRATEGY", 10f, Palette.muted, 1), lp(MATCH, WRAP, 4))
+        box.addView(strategy, lp(MATCH, dpi(44), 2, 6))
+        addField("FRAGMENT DELAY", delay)
+
+        val dialog = dialogBuilder().setTitle("PATTERNIHA • ROOTLESS SNI")
+            .setView(ScrollView(this).apply { addView(box) })
             .setNegativeButton("Cancel", null).setPositiveButton("Create local profile", null).create()
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val name = profileName.text.toString().trim().ifBlank { "${item.name} • Patterniha" }
                 val host = ip.text.toString().trim()
                 val targetPort = port.text.toString().toIntOrNull() ?: 0
-                val decoy = fakeSni.text.toString().trim().lowercase(Locale.US)
-                val validIp = host.matches(Regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}$")) && host.split('.').all { part -> val n = part.toIntOrNull(); n != null && n in 0..255 && (part == "0" || !part.startsWith('0')) }
-                val validSni = decoy.length <= 253 && decoy.split('.').all { it.isNotBlank() && it.length <= 63 && it.matches(Regex("(?i)^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")) }
-                if (!validIp || targetPort !in 1..65535 || !validSni) {
-                    toast("Enter a valid IPv4 address, port and decoy hostname.")
+                val rawSite = website.text.toString().trim()
+                val site = runCatching {
+                    val uri = android.net.Uri.parse(if (rawSite.contains("://")) rawSite else "https://$rawSite")
+                    (uri.host ?: rawSite.substringBefore('/')).trim().trimEnd('.').lowercase(Locale.US)
+                }.getOrDefault("")
+                val validIp = host.matches(Regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}$")) && host.split('.').all { part ->
+                    val n = part.toIntOrNull(); n != null && n in 0..255 && (part == "0" || !part.startsWith('0'))
+                }
+                val validSite = site.length <= 253 && site.split('.').size >= 2 && site.split('.').all {
+                    it.isNotBlank() && it.length <= 63 && it.matches(Regex("(?i)^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"))
+                }
+                val fragmentDelay = delay.text.toString().trim().toDoubleOrNull()
+                if (name.length !in 1..80 || !validIp || targetPort !in 1..65535 || !validSite || fragmentDelay == null || fragmentDelay !in 0.01..1.0) {
+                    toast("Enter a profile name, valid IPv4, port, website/SNI and fragment delay.")
                     return@setOnClickListener
                 }
-                val raw = EngineProfiles.encodeSniSpoof("${item.name} • Patterniha", item.raw, host, targetPort, decoy)
-                val newItem = ServerItem("${item.name} • Patterniha", raw, ConfigEngine.SNI_SPOOF, ProfileParser.parse(raw), true, item.country)
+                val baseWithSni = withSni(item.raw, site)
+                if (baseWithSni.isNullOrBlank()) {
+                    toast("Could not set the SNI on this profile. Use a supported TLS/REALITY Xray profile.")
+                    return@setOnClickListener
+                }
+                val method = listOf("sni_split", "half", "multi", "tls_record_frag").getOrElse(strategy.selectedItemPosition) { "sni_split" }
+                val raw = EngineProfiles.encodeSniSpoof(name, baseWithSni, host, targetPort, site)
+                val newItem = ServerItem(name, raw, ConfigEngine.SNI_SPOOF, ProfileParser.parse(raw), true, item.country)
                 val locals = loadLocalProfiles().filterNot { it.raw.trim() == raw.trim() }.toMutableList()
                 locals.add(newItem)
-                if (!persistLocalProfiles(locals)) { toast("Could not save the local Patterniha profile."); return@setOnClickListener }
-                servers = mergeSavedAndRemote(servers.filterNot { it.local }); serversState = ServersState.READY
+                if (!persistLocalProfiles(locals)) {
+                    toast("Could not save the local Patterniha profile.")
+                    return@setOnClickListener
+                }
+                prefs.edit()
+                    .putString("sni_fragment_strategy", method)
+                    .putString("sni_fragment_delay", fragmentDelay.toString())
+                    .apply()
+                servers = mergeSavedAndRemote(servers.filterNot { it.local })
+                serversState = ServersState.READY
                 setConfig(raw)
+                rebuildServerList(-1)
+                bindServerSummary()
                 dialog.dismiss()
-                toast("Local Patterniha profile created. Root permission is required when connecting.")
+                toast("Rootless Patterniha profile created and selected.")
             }
         }
         dialog.show()
@@ -2231,7 +2668,7 @@ class MainActivity : Activity() {
                 title = "Start your\nconnection"
                 desc = if (ConfigDetector.detect(currentConfig()) == ConfigEngine.SLIPNET)
                     "SlipNet profile imported. Configure it inside TIREXNET; its native tunnel runtime is not packaged in this build yet."
-                else "Choose a region and slide to start your connection."
+                else "Choose ALL or a country, then slide to connect."
                 color = Palette.muted; chip = "OFFLINE"
             }
             OrbState.CONNECTING -> { title = "Connecting"; desc = statusMessage.ifBlank { "Starting the VPN tunnel…" }; color = Palette.cyan; chip = "CONNECTING" }
@@ -2334,7 +2771,7 @@ class MainActivity : Activity() {
         }
         val engine = ConfigDetector.detect(raw)
         if (engine == ConfigEngine.UNKNOWN) {
-            toast("فرمت کانفیگ شناسایی نشد. VLESS / VMess / Trojan / Shadowsocks / WireGuard یا OpenVPN لازم است.")
+            toast("فرمت کانفیگ شناسایی نشد. Xray / WireGuard / OpenVPN / DNS Changer / SlipNet لازم است.")
             showTab(1)
             return
         }
@@ -2390,6 +2827,21 @@ class MainActivity : Activity() {
             }
             ConfigEngine.MHRV, ConfigEngine.DNS_TUNNEL, ConfigEngine.SNI_SPOOF -> startAuxiliaryProxyEngine(pendingEngine, pendingRaw)
             ConfigEngine.SLIPNET -> showSlipNetRuntimeNotice()
+            ConfigEngine.DNS_CHANGER -> {
+                applyStatus("Starting DNS Changer…", false)
+                val intent = Intent(this, DnsChangerVpnService::class.java)
+                    .setAction(DnsChangerVpnService.ACTION_START)
+                    .putExtra(DnsChangerVpnService.EXTRA_PROFILE, pendingRaw)
+                try {
+                    if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
+                    handler.postDelayed({ reconcileState() }, 1300L)
+                    handler.postDelayed({ reconcileState() }, 2600L)
+                    handler.postDelayed({ reconcileState() }, 5200L)
+                } catch (e: Throwable) {
+                    applyStatus("DNS Changer could not start.", false)
+                    toast("راه‌اندازی موتور DNS ناموفق بود.")
+                }
+            }
             else -> toast("یک پروفایل پشتیبانی‌شده انتخاب کن.")
         }
     }
@@ -2408,6 +2860,10 @@ class MainActivity : Activity() {
         if (engine == "OPENVPN" || OpenVpnEngine.isActive) {
             issued = true
             OpenVpnEngine.stop { message, active -> runOnUiThread { applyStatus(message, active) } }
+        }
+        if (engine == "DNS_CHANGER" || DnsChangerVpnService.isActive) {
+            issued = true
+            startService(Intent(this, DnsChangerVpnService::class.java).setAction(DnsChangerVpnService.ACTION_STOP))
         }
         if (engine in setOf("XRAY", "MHRV", "DNS_TUNNEL", "SNI_SPOOF") || XrayVpnService.isActive) {
             issued = true
@@ -2506,7 +2962,13 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- Import
 
-    private data class ImportOutcome(val added: List<ServerItem>, val duplicates: Int, val invalid: Int, val persisted: Boolean)
+    private data class ImportOutcome(
+        val added: List<ServerItem>,
+        val duplicates: Int,
+        val invalid: Int,
+        val persisted: Boolean,
+        val bundleFailures: Int = 0
+    )
 
     /** One structured config stays whole; otherwise every non-empty line is a separate share link. */
     private fun splitConfigs(text: String): List<String> {
@@ -2514,18 +2976,39 @@ class MainActivity : Activity() {
         if (t.isEmpty()) return emptyList()
         if (t.startsWith("{") || t.contains("[interface]", ignoreCase = true) ||
             ConfigDetector.detect(t) == ConfigEngine.OPENVPN) return listOf(t)
-        return t.lineSequence().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.toList()
+
+        val lines = t.lineSequence().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.toList()
+        val slipSchemes = listOf("slipnet://", "slipnet-enc://", "slipnet-bundle-enc://")
+        fun isSlipStart(line: String) = slipSchemes.any { line.startsWith(it, true) }
+        if (lines.firstOrNull()?.let(::isSlipStart) == true) {
+            // A share URI may be wrapped over several lines by chat apps.
+            // Preserve separate profiles when each line starts a new URI;
+            // otherwise join the wrapped Base64 payload back into one link.
+            return if (lines.drop(1).any(::isSlipStart)) lines
+            else listOf(lines.joinToString("").replace(' ', '+'))
+        }
+        return lines
     }
 
     /** Parses, de-duplicates and saves. Runs off the main thread. Never logs or returns config content. */
-    private fun doImport(text: String, existingRaws: Set<String>, country: String = ""): ImportOutcome {
-        val candidates = splitConfigs(text)
+    private fun doImport(text: String, existingRaws: Set<String>, country: String = "", bundlePassword: String = ""): ImportOutcome {
+        val expanded = ArrayList<String>()
+        var bundleFailures = 0
+        for (candidate in splitConfigs(text)) {
+            if (candidate.startsWith("slipnet-bundle-enc://", true)) {
+                val unpacked = if (bundlePassword.isNotBlank()) EngineProfiles.decodeSlipNetBundle(candidate, bundlePassword) else null
+                if (unpacked.isNullOrEmpty()) bundleFailures++ else expanded.addAll(unpacked)
+            } else {
+                expanded.add(candidate)
+            }
+        }
+        val candidates = expanded
         val saved = loadLocalProfiles().toMutableList()
         val known = HashSet<String>(existingRaws)
         saved.forEach { known.add(it.raw.trim()) }
         val added = ArrayList<ServerItem>()
         var dup = 0
-        var bad = 0
+        var bad = bundleFailures
         for (c in candidates) {
             val meta = ProfileParser.parse(c)
             val structured = c.startsWith("{")
@@ -2533,6 +3016,7 @@ class MainActivity : Activity() {
                 ConfigEngine.UNKNOWN -> false
                 ConfigEngine.XRAY -> structured || meta.host.isNotBlank()
                 ConfigEngine.SLIPNET -> EngineProfiles.decodeSlipNet(c) != null
+                ConfigEngine.DNS_CHANGER -> DnsChangerProfiles.decode(c) != null
                 else -> meta.host.isNotBlank()
             }
             if (!ok) { bad++; continue }
@@ -2540,21 +3024,16 @@ class MainActivity : Activity() {
             val name = ProfileParser.bestName(listOf(meta.name), saved.size + added.size + 1)
             added.add(ServerItem(name, c.trim(), meta.engine, meta, true, country.ifEmpty { ProfileParser.flagCountryOf(name) }))
         }
-        if (added.isEmpty()) return ImportOutcome(emptyList(), dup, bad, true)
+        if (added.isEmpty()) return ImportOutcome(emptyList(), dup, bad, true, bundleFailures)
         val persisted = persistLocalProfiles(added + saved)
-        return ImportOutcome(if (persisted) added else emptyList(), dup, bad, persisted)
+        return ImportOutcome(if (persisted) added else emptyList(), dup, bad, persisted, bundleFailures)
     }
 
     private fun importText(text: String, country: String = "") {
-        val existing = servers.map { it.raw.trim() }.toSet()
-        io.execute {
-            val outcome = doImport(text, existing, country)
-            runOnUiThread { if (!isFinishing && !isDestroyed) applyImport(outcome) }
-        }
+        importWithOptionalSlipNetPassword(text, country)
     }
 
     private fun importUri(uri: Uri) {
-        val existing = servers.map { it.raw.trim() }.toSet()
         io.execute {
             val text = try {
                 contentResolver.openInputStream(uri)?.use { readLimited(it) }.orEmpty()
@@ -2562,7 +3041,49 @@ class MainActivity : Activity() {
                 runOnUiThread { if (!isFinishing && !isDestroyed) importFailed("فایل انتخاب‌شده قابل خواندن نیست.") }
                 return@execute
             }
-            val outcome = doImport(text, existing)
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed) importWithOptionalSlipNetPassword(text, "")
+            }
+        }
+    }
+
+    private fun importWithOptionalSlipNetPassword(text: String, country: String) {
+        val existing = servers.map { it.raw.trim() }.toSet()
+        val containsBundle = splitConfigs(text).any { it.startsWith("slipnet-bundle-enc://", true) }
+        if (containsBundle) {
+            val password = EditText(this).apply {
+                hint = "SlipNet bundle password"
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                setSingleLine(true)
+                textSize = 13f
+                setPadding(dpi(12), dpi(9), dpi(12), dpi(9))
+                background = fieldBackground(false)
+            }
+            val wrap = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dpi(18), dpi(6), dpi(18), dpi(2))
+                addView(tv("This is a SlipNet encrypted profile bundle. Enter its export password to import all profiles.", 11f, Palette.muted, 0), lp(MATCH, WRAP, 0, 8))
+                addView(password, lp(MATCH, dpi(46), 0, 4))
+            }
+            val dialog = dialogBuilder().setTitle("Unlock SlipNet bundle")
+                .setView(wrap).setNegativeButton("Cancel", null).setPositiveButton("Import", null).create()
+            dialog.setOnShowListener {
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                    val value = password.text.toString()
+                    if (value.isBlank()) { password.error = "Password required"; return@setOnClickListener }
+                    dialog.dismiss()
+                    runSlipNetImport(text, existing, country, value)
+                }
+            }
+            dialog.show()
+        } else {
+            runSlipNetImport(text, existing, country, "")
+        }
+    }
+
+    private fun runSlipNetImport(text: String, existing: Set<String>, country: String, bundlePassword: String) {
+        io.execute {
+            val outcome = doImport(text, existing, country, bundlePassword)
             runOnUiThread { if (!isFinishing && !isDestroyed) applyImport(outcome) }
         }
     }
@@ -2578,8 +3099,11 @@ class MainActivity : Activity() {
             return
         }
         if (o.added.isEmpty()) {
-            val msg = if (o.duplicates > 0 && o.invalid == 0) "این کانفیگ قبلاً در لیست هست."
-            else "کانفیگ پشتیبانی‌شده‌ای پیدا نشد. Xray / WireGuard / AmneziaWG / OpenVPN / MHRV / StormDNS / Patterniha / SlipNet لازم است."
+            val msg = when {
+                o.bundleFailures > 0 -> "رمز بسته SlipNet اشتباه است یا فایل bundle خراب شده است."
+                o.duplicates > 0 && o.invalid == 0 -> "این کانفیگ قبلاً در لیست هست."
+                else -> "کانفیگ پشتیبانی‌شده‌ای پیدا نشد. Xray / WireGuard / AmneziaWG / OpenVPN / MHRV / StormDNS / Patterniha / SlipNet لازم است."
+            }
             importFailed(msg)
             return
         }
@@ -2590,6 +3114,7 @@ class MainActivity : Activity() {
         var msg = if (o.added.size == 1) "پروفایل «" + o.added[0].name + "» اضافه شد." else "${o.added.size} پروفایل اضافه شد."
         if (o.duplicates > 0) msg += " (${o.duplicates} تکراری رد شد)"
         if (o.invalid > 0) msg += " (${o.invalid} مورد نامعتبر)"
+        if (o.bundleFailures > 0) msg += " • رمز یا ساختار SlipNet bundle نامعتبر بود"
         toast(msg)
         if (addOverlay != null) { closeAddServer(); showTab(1) }
     }
@@ -2614,6 +3139,7 @@ class MainActivity : Activity() {
         ConfigEngine.OPENVPN -> "OPENVPN"
         ConfigEngine.MHRV -> "MHRV"
         ConfigEngine.DNS_TUNNEL -> "STORMDNS"
+        ConfigEngine.DNS_CHANGER -> "DNS CHANGER"
         ConfigEngine.SNI_SPOOF -> "PATTERNIHA SNI"
         ConfigEngine.SLIPNET -> "SLIPNET • RUNTIME REQUIRED"
         else -> "NONE"
@@ -2666,7 +3192,7 @@ class MainActivity : Activity() {
             val n = stream.read(buffer)
             if (n < 0) break
             total += n
-            require(total <= 1024 * 1024) { "File exceeds 1 MB." }
+            require(total <= 5 * 1024 * 1024) { "File exceeds 5 MB." }
             out.write(buffer, 0, n)
         }
         return out.toString("UTF-8").trim()
@@ -3115,6 +3641,7 @@ class MainActivity : Activity() {
         tiles.addView(actionTile(Icon.FILE, "File", "Import from file") { pickFile() },
             LinearLayout.LayoutParams(0, dpi(92), 1f).apply { leftMargin = dpi(5) })
         quick.addView(tiles, lp(MATCH, WRAP, 14))
+        quick.addView(ghostButton("Patterniha • Rootless SNI profile") { showPatternihaBasePicker() }, lp(MATCH, dpi(46), 8))
         val status = tv("", 12f, Palette.muted, 1).apply { visibility = View.GONE }
         addStatus = status
         quick.addView(status, lp(MATCH, WRAP, 12))
@@ -3123,7 +3650,7 @@ class MainActivity : Activity() {
         // --- 2. Manual entry
         val manual = GlassCard(this, 22f, pad = 16)
         manual.addView(tv("MANUAL ENTRY", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
-        manual.addView(tv("Choose a protocol; only its fields are shown.", 11.5f, Palette.muted, 0), lp(MATCH, WRAP, 6))
+        manual.addView(tv("Choose a protocol; DNS Changer creates an independent DNS-only connection profile.", 11.5f, Palette.muted, 0), lp(MATCH, WRAP, 6))
         val protoScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
         val protoRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         protoScroll.addView(protoRow, FrameLayout.LayoutParams(WRAP, WRAP))
@@ -3307,6 +3834,12 @@ class MainActivity : Activity() {
                 manualFieldViews[f.key] = et
                 box.addView(et, lp(MATCH, dpi(if (f.kind == FieldKind.MULTILINE) 116 else 50), 6))
             }
+        }
+        if (manualProtocol == ManualProtocol.DNS_CHANGER) {
+            box.addView(tv(
+                "Dedicated DNS mode • forwards classic DNS (UDP/53) to the selected resolvers. Other traffic stays on the normal network. Android allows only one active VPN at a time, so disconnect another VPN before using this profile.",
+                10.5f, Palette.cyan, 0
+            ), lp(MATCH, WRAP, 12))
         }
         // Optional flag source for manual profiles (the only reliable country metadata we have for them).
         box.addView(tv("Country code (optional)", 11f, Palette.muted, 1), lp(MATCH, WRAP, 12))
