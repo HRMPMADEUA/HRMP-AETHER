@@ -44,6 +44,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import android.widget.Switch
 import com.tirexnet.app.engine.ConfigDetector
 import com.tirexnet.app.engine.ApiConfig
 import com.tirexnet.app.engine.ApiHttpException
@@ -91,6 +92,9 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.util.Locale
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.security.MessageDigest
 import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
@@ -105,6 +109,7 @@ class MainActivity : Activity() {
 
     private val api = "https://netherrap.extraservices.ir"
     private val io = Executors.newSingleThreadExecutor()
+    private val packageExecutor = Executors.newSingleThreadExecutor()
     private val handler = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("tirexnet", MODE_PRIVATE) }
 
@@ -120,6 +125,13 @@ class MainActivity : Activity() {
     private var connectedAtRt = 0L
     private var resumed = false
     private var currentTab = 0
+    private var sortByPing = false
+    private var smartConnectSwitch: Switch? = null
+    private var smartConnectRunId = 0
+    private var smartConnectPendingCount = 0
+    private val smartConnectResults = HashMap<String, PingResult>()
+    private var programmaticSmartSwitch = false
+    private val connectionLogs = ArrayList<String>()
     private val shownTabs = HashSet<Int>()
 
     // ---- account data (values come only from the backend)
@@ -255,7 +267,9 @@ class MainActivity : Activity() {
         window.navigationBarColor = Color.TRANSPARENT
 
         token = prefs.getString("token", "") ?: ""
-        statusMessage = prefs.getString("connection_message", "") ?: ""
+        statusMessage = safeSavedStatus(prefs.getString("connection_message", "").orEmpty())
+        sortByPing = prefs.getBoolean("sort_by_ping", false)
+        connectionLogs.addAll(loadConnectionLogs())
 
         val filter = IntentFilter(XrayVpnService.ACTION_STATUS)
         if (Build.VERSION.SDK_INT >= 33) {
@@ -296,6 +310,7 @@ class MainActivity : Activity() {
         runCatching { unregisterReceiver(receiver) }
         handler.removeCallbacksAndMessages(null)
         io.shutdown()
+        packageExecutor.shutdownNow()
         super.onDestroy()
     }
 
@@ -322,44 +337,31 @@ class MainActivity : Activity() {
     private fun installCrashRecorder() {
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
-            runCatching {
-                val trace = android.util.Log.getStackTraceString(error)
-                    .lineSequence().take(18).joinToString("\n") { ConfigSanitizer.redact(it) }
-                prefs.edit().putString("last_crash", trace).commit()
-            }
+            // Keep only a neutral marker in the UI; preserve the real crash for logcat diagnostics.
+            runCatching { prefs.edit().putString("last_crash", "unexpected_shutdown").commit() }
             previous?.uncaughtException(thread, error)
         }
     }
 
-    private fun showCrashScreen(trace: String) {
+    private fun showCrashScreen(@Suppress("UNUSED_PARAMETER") marker: String) {
         crashScreenShown = true
-        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(20), dpi(48), dpi(20), dpi(20)) }
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(24), dpi(56), dpi(24), dpi(24)) }
         col.addView(TextView(this).apply {
-            text = "The app closed unexpectedly last time"
-            textSize = 18f
+            text = "TIREXNET was closed unexpectedly"
+            textSize = 19f
             setTextColor(Color.WHITE)
         })
         col.addView(TextView(this).apply {
-            text = trace
-            textSize = 11f
-            setTextColor(Color.rgb(255, 190, 120))
-            setTextIsSelectable(true)
-            setPadding(0, dpi(12), 0, dpi(12))
+            text = "The app has recovered. Continue to open it again. Your saved profiles and account remain on this device."
+            textSize = 13f
+            setTextColor(Color.LTGRAY)
+            setPadding(0, dpi(12), 0, dpi(20))
         })
-        val copy = TextView(this).apply {
-            text = "Copy error"; textSize = 15f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
-            setBackgroundColor(Color.rgb(30, 70, 140)); setPadding(0, dpi(14), 0, dpi(14))
-            setOnClickListener {
-                val m = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                m.setPrimaryClip(ClipData.newPlainText("TIREXNET error", trace))
-            }
-        }
         val go = TextView(this).apply {
-            text = "Continue to app"; textSize = 15f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
-            setBackgroundColor(Color.rgb(40, 40, 60)); setPadding(0, dpi(14), 0, dpi(14))
+            text = "Continue"; textSize = 15f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
+            setBackgroundColor(Color.rgb(30, 90, 150)); setPadding(0, dpi(14), 0, dpi(14))
             setOnClickListener { prefs.edit().remove("last_crash").commit(); recreate() }
         }
-        col.addView(copy, lp(MATCH, WRAP, 4))
         col.addView(go, lp(MATCH, WRAP, 12))
         val sv = ScrollView(this).apply { setBackgroundColor(Color.rgb(8, 12, 24)); addView(col) }
         setContentView(sv)
@@ -491,7 +493,7 @@ class MainActivity : Activity() {
             setPadding(dpi(12), 0, 0, 0)
         }
         titles.addView(tv("TIREXNET", 18f, Palette.text, 2).apply { letterSpacing = 0.16f })
-        titles.addView(tv("SECURE  •  FAST  •  FREE", 8f, Palette.muted, 1).apply { letterSpacing = 0.22f }, lp(WRAP, WRAP, 3))
+        titles.addView(tv("PRIVATE CONNECTION", 8f, Palette.muted, 1).apply { letterSpacing = 0.18f }, lp(WRAP, WRAP, 3))
         row.addView(titles, LinearLayout.LayoutParams(0, WRAP, 1f))
 
         if (token.isNotBlank()) {
@@ -587,16 +589,38 @@ class MainActivity : Activity() {
     // ---------------------------------------------------------------- Home
     private fun buildHomeTab(): View {
         val (sv, col) = tabScroll()
-        val orbSize = minOf(dpi(290), resources.displayMetrics.widthPixels - dpi(48))
+        val orbSize = minOf(dpi(248), resources.displayMetrics.widthPixels - dpi(72))
         val o = ConnectOrb(this)
         o.contentDescription = "Connect or disconnect"
         o.onToggle = { toggleConnection() }
         orb = o
         val orbHolder = FrameLayout(this)
         orbHolder.addView(o, FrameLayout.LayoutParams(orbSize, orbSize, Gravity.CENTER))
-        col.addView(orbHolder, lp(MATCH, orbSize, 4))
+        col.addView(orbHolder, lp(MATCH, orbSize, 2))
 
-        val title = tv("Disconnected", 26f, Palette.muted, 2).apply { gravity = Gravity.CENTER; letterSpacing = 0.04f }
+        val smartRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dpi(16), dpi(10), dpi(14), dpi(10))
+            background = Palette.glass(this@MainActivity, 16f)
+        }
+        val smartText = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        smartText.addView(tv("Smart Connect", 14f, Palette.text, 1))
+        smartText.addView(tv("Test reachable servers and connect to the lowest ping", 10.5f, Palette.muted, 0), lp(MATCH, WRAP, 3))
+        smartRow.addView(smartText, LinearLayout.LayoutParams(0, WRAP, 1f))
+        smartConnectSwitch = Switch(this).apply {
+            showText = false
+            isChecked = false
+            contentDescription = "Connect to the lowest-ping server"
+            setOnCheckedChangeListener { _, checked ->
+                if (programmaticSmartSwitch) return@setOnCheckedChangeListener
+                if (checked) startSmartConnect() else cancelSmartConnect(false)
+            }
+        }
+        smartRow.addView(smartConnectSwitch, lp(WRAP, WRAP))
+        col.addView(smartRow, lp(MATCH, WRAP, 2, 0, 12, 12))
+
+        val title = tv("Disconnected", 23f, Palette.muted, 2).apply { gravity = Gravity.CENTER; letterSpacing = 0.02f }
         statusTitle = title
         col.addView(title, lp(MATCH, WRAP, 6))
 
@@ -606,7 +630,7 @@ class MainActivity : Activity() {
 
         val desc = tv("", 12.5f, Palette.muted, 0).apply { gravity = Gravity.CENTER; maxLines = 3; ellipsize = TextUtils.TruncateAt.END }
         statusDesc = desc
-        col.addView(desc, lp(MATCH, WRAP, 8, 0, 18, 18))
+        col.addView(desc, lp(MATCH, WRAP, 6, 0, 10, 10))
 
         // selected server
         val serverCard = GlassCard(this, 20f, pad = 14).apply { isClickable = true; setOnClickListener { showTab(1) }; pressable(0.98f) }
@@ -626,36 +650,9 @@ class MainActivity : Activity() {
         serverCard.addView(srow)
         col.addView(serverCard, lp(MATCH, WRAP, 4))
 
-        // account + expiry
-        val two = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val accCard = GlassCard(this, 18f, pad = 13)
-        accCard.addView(tv("ACCOUNT", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
-        homeAccName = tv("—", 15f, Palette.text, 1).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
-        accCard.addView(homeAccName!!, lp(MATCH, WRAP, 6))
-        homeAccStatus = tv("", 11f, Palette.mint, 1)
-        accCard.addView(homeAccStatus!!, lp(MATCH, WRAP, 3))
-        val expCard = GlassCard(this, 18f, pad = 13)
-        expCard.addView(tv("EXPIRES", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
-        homeExpiry = tv("—", 13f, Palette.text, 1).apply { maxLines = 2; ellipsize = TextUtils.TruncateAt.END }
-        expCard.addView(homeExpiry!!, lp(MATCH, WRAP, 6))
-        two.addView(accCard, LinearLayout.LayoutParams(0, MATCH, 1f).apply { rightMargin = dpi(6) })
-        two.addView(expCard, LinearLayout.LayoutParams(0, MATCH, 1f).apply { leftMargin = dpi(6) })
-        col.addView(two, lp(MATCH, WRAP, 12))
-
-        // data usage
-        val usage = GlassCard(this, 18f, pad = 14)
-        val urow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        urow.addView(tv("DATA USAGE", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f }, LinearLayout.LayoutParams(0, WRAP, 1f))
-        homeUsageText = tv("—", 13f, Palette.text, 1)
-        urow.addView(homeUsageText!!)
-        usage.addView(urow)
-        homeUsageMeter = LinearMeter(this)
-        usage.addView(homeUsageMeter!!, lp(MATCH, dpi(6), 10))
-        col.addView(usage, lp(MATCH, WRAP, 12))
-
         col.addView(
-            tv("ENCRYPTED TUNNEL  •  TIREXNET", 8.5f, Palette.dim, 1).apply { gravity = Gravity.CENTER; letterSpacing = 0.24f },
-            lp(MATCH, WRAP, 22)
+            tv("TIREXNET", 8.5f, Palette.dim, 1).apply { gravity = Gravity.CENTER; letterSpacing = 0.22f },
+            lp(MATCH, WRAP, 18)
         )
         return sv
     }
@@ -679,8 +676,13 @@ class MainActivity : Activity() {
         ht.addView(tv("Servers", 26f, Palette.text, 2))
         ht.addView(tv("کانفیگ‌های اشتراک و پروفایل‌های ذخیره‌شده", 12f, Palette.muted, 0), lp(WRAP, WRAP, 4))
         head.addView(ht, LinearLayout.LayoutParams(0, WRAP, 1f))
-        head.addView(roundButton(Icon.BOLT, "Test ping of all servers") { testAllPings() }, lp(dpi(42), dpi(42), 0, 0, 0, 8))
-        head.addView(roundButton(Icon.REFRESH, "Reload servers") { loadServers() }, lp(dpi(42), dpi(42)))
+        head.addView(ghostButton(if (sortByPing) "Ping ↑" else "Sort by ping") {
+            sortByPing = !sortByPing
+            prefs.edit().putBoolean("sort_by_ping", sortByPing).apply()
+            if (sortByPing) testAllPings() else rebuildServerList(-1)
+        }.apply { textSize = 10.5f; setPadding(dpi(8), 0, dpi(8), 0) }, lp(dpi(82), dpi(40), 0, 0, 0, 6))
+        head.addView(roundButton(Icon.BOLT, "Test ping of all servers") { testAllPings() }, lp(dpi(40), dpi(40), 0, 0, 0, 6))
+        head.addView(roundButton(Icon.REFRESH, "Reload servers") { loadServers() }, lp(dpi(40), dpi(40)))
         col.addView(head, lp(MATCH, WRAP, 6))
 
         val search = LinearLayout(this).apply {
@@ -744,7 +746,7 @@ class MainActivity : Activity() {
             ServersState.ERROR -> {
                 val c = GlassCard(this, 20f, Palette.withAlpha(Palette.red, 120), pad = 16)
                 c.addView(tv("Couldn't load configurations", 15f, Palette.text, 1))
-                c.addView(tv(serversError, 11.5f, Palette.muted, 0).apply { maxLines = 4; ellipsize = TextUtils.TruncateAt.END }, lp(MATCH, WRAP, 6))
+                c.addView(tv("Check your internet connection and try again.", 11.5f, Palette.muted, 0).apply { maxLines = 4; ellipsize = TextUtils.TruncateAt.END }, lp(MATCH, WRAP, 6))
                 c.addView(primaryButton("Retry") { loadServers() }, lp(MATCH, dpi(46), 12))
                 box.addView(c, lp(MATCH, WRAP))
             }
@@ -761,7 +763,12 @@ class MainActivity : Activity() {
                 }
                 val q = serverQuery.lowercase(Locale.US)
                 // Search matches the visible name only; endpoints are never searchable or shown.
-                val list = servers.filter { q.isEmpty() || it.name.lowercase(Locale.US).contains(q) }
+                val filtered = servers.filter { q.isEmpty() || it.name.lowercase(Locale.US).contains(q) }
+                val list = if (sortByPing) filtered.sortedWith(
+                    compareBy<ServerItem>({ item -> if (PingTester.cached(item.raw.trim())?.kind == PingKind.OK) 0 else 1 },
+                        { item -> PingTester.cached(item.raw.trim())?.takeIf { it.kind == PingKind.OK }?.ms ?: Int.MAX_VALUE },
+                        { item -> servers.indexOf(item) })
+                ) else filtered
                 if (list.isEmpty()) {
                     box.addView(tv("No matching server", 12.5f, Palette.muted, 0).apply { gravity = Gravity.CENTER }, lp(MATCH, WRAP, 20, 10))
                     return
@@ -775,6 +782,7 @@ class MainActivity : Activity() {
                         contentDescription = item.name
                         if (sel) background = Palette.glass(this@MainActivity, 18f, Palette.strokeActive, Palette.withAlpha(Palette.cyan, 54), Palette.withAlpha(Palette.violet, 24))
                         setOnClickListener { selectServer(item, idx) }
+                        setOnLongClickListener { showServerActions(item); true }
                         pressable(0.98f)
                     }
                     val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
@@ -877,6 +885,7 @@ class MainActivity : Activity() {
             if (isFinishing || isDestroyed) return@test
             bindPing(key)
             if (key == currentConfig().trim()) bindHomePing()
+            if (sortByPing && serverListBox != null) rebuildServerList(-1)
         }
         bindPing(key)
     }
@@ -1058,10 +1067,13 @@ class MainActivity : Activity() {
         col.addView(anchor, lp(WRAP, WRAP, 26, 8))
 
         val g1 = GlassCard(this, 20f, pad = 4)
-        settingRow(g1, Icon.INFO, "Active engine", "تشخیص خودکار از روی کانفیگ", engineLabelShort()) { }
-        settingRow(g1, Icon.SHIELD, "Split tunneling", "انتخاب برنامه‌های داخل یا خارج تونل • Xray", splitSummary()) { showSplitTunnelDialog() }
-        settingRow(g1, Icon.COPY, "Copy diagnostics", "بدون رمز و توکن", null) { copyDiagnostics() }
-        settingRow(g1, Icon.TRASH, "Clear saved config", "پاک‌کردن کانفیگ ذخیره‌شده روی گوشی", null) { clearConfig() }
+        settingRow(g1, Icon.INFO, "Active engine", "Detected from the selected profile", engineLabelShort()) { }
+        settingRow(g1, Icon.GLOBE, "Connection mode", "VPN or local SOCKS5 / HTTP proxy", connectionModeSummary()) { showConnectionModeDialog() }
+        settingRow(g1, Icon.SHIELD, "Split tunneling", "Choose apps included in or excluded from Xray", splitSummary()) { showSplitTunnelDialog() }
+        settingRow(g1, Icon.BOLT, "SNI Spoof", "Edit TLS / REALITY server name for a profile", null) { selectedItem()?.let { showSniDialog(it) } ?: toast("Select a server first.") }
+        settingRow(g1, Icon.COPY, "Connection logs", "Recent connection activity", "Open") { showConnectionLogs() }
+        settingRow(g1, Icon.COPY, "Copy diagnostics", "Safe device and connection summary", null) { copyDiagnostics() }
+        settingRow(g1, Icon.TRASH, "Clear saved config", "Remove the selected profile from this phone", null) { clearConfig() }
         col.addView(g1, lp(MATCH, WRAP))
 
         val g2 = GlassCard(this, 20f, pad = 4)
@@ -1104,68 +1116,400 @@ class MainActivity : Activity() {
         return if (count == 0) "All apps • default" else "$count selected"
     }
 
+    private data class SplitAppChoice(val packageName: String, val label: String)
+
     private fun showSplitTunnelDialog() {
-        val pm = packageManager
         val selected = (prefs.getStringSet("split_packages", emptySet()) ?: emptySet()).toMutableSet()
         var mode = prefs.getString("split_mode", "exclude") ?: "exclude"
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(16), dpi(10), dpi(16), dpi(4)) }
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(16), dpi(8), dpi(16), dpi(4)) }
         root.addView(tv("Choose how apps use the VPN", 14f, Palette.text, 2), lp(MATCH, WRAP, 4))
-        root.addView(tv("Include mode: only selected apps use the tunnel. Exclude mode: selected apps bypass it. Currently applied to Xray profiles; the WireGuard/AmneziaWG backend does not expose per-app routing.", 11f, Palette.muted, 0), lp(MATCH, WRAP, 6))
+        root.addView(tv("Choose which apps use the Xray VPN. Changes take effect after reconnecting.", 11f, Palette.muted, 0), lp(MATCH, WRAP, 6))
         val modes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        fun modeButton(label: String, value: String): TextView = tv(label, 11f, if (mode == value) Palette.ice else Palette.muted, 2).apply {
-            gravity = Gravity.CENTER
-            background = GradientDrawable().apply { cornerRadius = dpi(12).toFloat(); setColor(if (mode == value) Palette.bg2 else Palette.bg1) ; setStroke(dpi(1), if (mode == value) Palette.cyan else Palette.stroke) }
-            setPadding(dpi(10), dpi(11), dpi(10), dpi(11))
-            setOnClickListener { mode = value; modes.removeAllViews(); modes.addView(modeButton("Only selected apps", "include"), LinearLayout.LayoutParams(0, WRAP, 1f).apply { rightMargin = dpi(5) }); modes.addView(modeButton("Exclude selected", "exclude"), LinearLayout.LayoutParams(0, WRAP, 1f).apply { leftMargin = dpi(5) }) }
-        }
-        modes.addView(modeButton("Only selected apps", "include"), LinearLayout.LayoutParams(0, WRAP, 1f).apply { rightMargin = dpi(5) })
-        modes.addView(modeButton("Exclude selected", "exclude"), LinearLayout.LayoutParams(0, WRAP, 1f).apply { leftMargin = dpi(5) })
-        root.addView(modes, lp(MATCH, WRAP, 12, 10))
-        val search = EditText(this).apply { hint = "Search installed apps"; textSize = 13f; setSingleLine(true); setPadding(dpi(12), dpi(9), dpi(12), dpi(9)); background = fieldBackground(false) }
-        root.addView(search, lp(MATCH, dpi(46), 2, 8))
-        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val scroll = ScrollView(this).apply { addView(list) }
-        root.addView(scroll, LinearLayout.LayoutParams(MATCH, dpi(350)))
-        val apps = runCatching { pm.getInstalledApplications(PackageManager.GET_META_DATA).filter { it.packageName != packageName && pm.getLaunchIntentForPackage(it.packageName) != null }.sortedBy { pm.getApplicationLabel(it).toString().lowercase(Locale.ROOT) } }.getOrDefault(emptyList())
-        fun renderApps(query: String) {
-            list.removeAllViews()
-            val filtered = apps.filter { pm.getApplicationLabel(it).toString().contains(query, true) }
-            filtered.forEach { info ->
-                val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dpi(8), dpi(7), dpi(8), dpi(7)); background = GradientDrawable().apply { cornerRadius = dpi(13).toFloat(); setColor(Palette.bg1) } }
-                val icon = ImageView(this).apply { setImageDrawable(runCatching { pm.getApplicationIcon(info) }.getOrNull()); scaleType = ImageView.ScaleType.FIT_CENTER }
-                row.addView(icon, lp(dpi(38), dpi(38)))
-                val labels = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(10), 0, dpi(4), 0) }
-                labels.addView(tv(pm.getApplicationLabel(info).toString(), 12.5f, Palette.text, 1))
-                labels.addView(tv(info.packageName, 9f, Palette.muted, 0))
-                row.addView(labels, LinearLayout.LayoutParams(0, WRAP, 1f))
-                val check = android.widget.CheckBox(this).apply { buttonTintList = ColorStateList.valueOf(Palette.cyan); isChecked = selected.contains(info.packageName); setOnCheckedChangeListener { _, checked -> if (checked) selected.add(info.packageName) else selected.remove(info.packageName) } }
-                row.addView(check, lp(WRAP, WRAP))
-                list.addView(row, lp(MATCH, WRAP, 3, 3))
+        fun refreshModes() {
+            modes.removeAllViews()
+            fun button(label: String, value: String): TextView = tv(label, 10.5f, if (mode == value) Palette.ice else Palette.muted, 2).apply {
+                gravity = Gravity.CENTER
+                background = GradientDrawable().apply { cornerRadius = dpi(12).toFloat(); setColor(if (mode == value) Palette.bg2 else Palette.bg1); setStroke(dpi(1), if (mode == value) Palette.cyan else Palette.stroke) }
+                setPadding(dpi(8), dpi(11), dpi(8), dpi(11))
+                setOnClickListener { mode = value; refreshModes() }
             }
-            if (filtered.isEmpty()) list.addView(tv("No matching apps", 12f, Palette.muted, 0).apply { gravity = Gravity.CENTER }, lp(MATCH, dpi(50)))
+            modes.addView(button("Only selected", "include"), LinearLayout.LayoutParams(0, WRAP, 1f).apply { rightMargin = dpi(5) })
+            modes.addView(button("Exclude selected", "exclude"), LinearLayout.LayoutParams(0, WRAP, 1f).apply { leftMargin = dpi(5) })
         }
-        renderApps("")
-        search.addTextChangedListener(object : TextWatcher { override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {} ; override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { renderApps(s?.toString().orEmpty()) }; override fun afterTextChanged(s: Editable?) {} })
-        dialogBuilder().setTitle("SPLIT TUNNELING").setView(root)
-            .setNegativeButton("Cancel", null)
-            .setNeutralButton("Clear", null)
-            .setPositiveButton("Save", null)
-            .create().also { dialog ->
-                dialog.setOnShowListener {
-                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                        prefs.edit().putStringSet("split_packages", selected.toSet()).putString("split_mode", mode).apply()
-                        dialog.dismiss()
-                        toast("Split tunneling saved. Reconnect to apply.")
-                        render()
-                    }
-                    dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
-                        selected.clear(); mode = "exclude"
-                        prefs.edit().remove("split_packages").putString("split_mode", "exclude").apply()
-                        dialog.dismiss(); toast("Split tunneling reset."); render()
+        refreshModes()
+        root.addView(modes, lp(MATCH, WRAP, 10))
+        val search = EditText(this).apply { hint = "Search installed apps"; textSize = 13f; setSingleLine(true); setPadding(dpi(12), dpi(9), dpi(12), dpi(9)); background = fieldBackground(false) }
+        root.addView(search, lp(MATCH, dpi(44), 8))
+        val loading = ProgressBar(this).apply { isIndeterminate = true }
+        root.addView(loading, lp(dpi(32), dpi(32), 10).apply { gravity = Gravity.CENTER })
+        val countLabel = tv("Loading apps…", 10f, Palette.muted, 0)
+        root.addView(countLabel, lp(MATCH, WRAP, 4))
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val scroll = ScrollView(this).apply { isVerticalScrollBarEnabled = true; addView(list) }
+        root.addView(scroll, LinearLayout.LayoutParams(MATCH, dpi(300)))
+        var apps: List<SplitAppChoice> = emptyList()
+        var loaded = false
+        fun renderApps(query: String) {
+            if (!loaded) return
+            list.removeAllViews()
+            val filtered = apps.filter { it.label.contains(query, true) || it.packageName.contains(query, true) }
+            val visible = filtered.take(80)
+            countLabel.text = if (filtered.size > visible.size) "Showing ${visible.size} of ${filtered.size} apps" else "${filtered.size} apps"
+            visible.forEach { info ->
+                val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dpi(8), dpi(5), dpi(8), dpi(5)) }
+                val labels = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(6), 0, dpi(4), 0) }
+                labels.addView(tv(info.label, 12.5f, Palette.text, 1))
+                labels.addView(tv(info.packageName, 8.5f, Palette.dim, 0))
+                row.addView(labels, LinearLayout.LayoutParams(0, WRAP, 1f))
+                val check = android.widget.CheckBox(this).apply {
+                    buttonTintList = ColorStateList.valueOf(Palette.cyan)
+                    isChecked = selected.contains(info.packageName)
+                    setOnCheckedChangeListener { _, checked -> if (checked) selected.add(info.packageName) else selected.remove(info.packageName) }
+                }
+                row.addView(check, lp(WRAP, WRAP))
+                list.addView(row, lp(MATCH, WRAP, 1))
+            }
+            if (filtered.isEmpty()) list.addView(tv("No matching apps", 12f, Palette.muted, 0).apply { gravity = Gravity.CENTER }, lp(MATCH, dpi(48)))
+        }
+        search.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { renderApps(s?.toString().orEmpty()) }
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
+        val dialog = dialogBuilder().setTitle("SPLIT TUNNELING").setView(root)
+            .setNegativeButton("Cancel", null).setNeutralButton("Clear", null).setPositiveButton("Save", null).create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                prefs.edit().putStringSet("split_packages", selected.toSet()).putString("split_mode", mode).apply()
+                dialog.dismiss()
+                toast("Split tunneling saved. Reconnect to apply.")
+                render()
+            }
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                selected.clear(); mode = "exclude"
+                prefs.edit().remove("split_packages").putString("split_mode", "exclude").apply()
+                dialog.dismiss(); toast("Split tunneling reset."); render()
+            }
+            packageExecutor.execute {
+                val pm = packageManager
+                val result = runCatching {
+                    pm.getInstalledApplications(PackageManager.GET_META_DATA)
+                        .asSequence()
+                        .filter { it.packageName != packageName && pm.getLaunchIntentForPackage(it.packageName) != null }
+                        .map { SplitAppChoice(it.packageName, runCatching { pm.getApplicationLabel(it).toString() }.getOrDefault(it.packageName)) }
+                        .sortedBy { it.label.lowercase(Locale.ROOT) }
+                        .toList()
+                }.getOrDefault(emptyList())
+                runOnUiThread {
+                    if (dialog.isShowing && !isFinishing && !isDestroyed) {
+                        apps = result
+                        loaded = true
+                        loading.visibility = View.GONE
+                        renderApps(search.text?.toString().orEmpty())
                     }
                 }
-                dialog.show()
             }
+        }
+        dialog.show()
+    }
+
+    private fun friendlyConnectionError(raw: String): String {
+        val v = raw.lowercase(Locale.US)
+        return when {
+            v.contains("permission") || v.contains("denied") || v.contains("revoked") -> "VPN permission was not granted. Please allow the connection request."
+            v.contains("dns") || v.contains("network") || v.contains("timeout") || v.contains("unreachable") -> "The server did not respond. Check your internet connection or choose another server."
+            v.contains("config") || v.contains("invalid") || v.contains("parse") || v.contains("json") -> "This profile could not be started. Edit it or choose another profile."
+            v.contains("split") || v.contains("application") -> "App routing settings could not be applied. Reset Split tunneling and try again."
+            else -> "Connection failed. Check the selected profile and try again."
+        }
+    }
+
+    private fun appendConnectionLog(message: String) {
+        val clean = ConfigSanitizer.redact(message).replace(Regex("\\s+"), " ").take(140)
+        if (clean.isBlank() || connectionLogs.lastOrNull()?.endsWith(clean) == true) return
+        val stamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
+        connectionLogs.add("$stamp  $clean")
+        while (connectionLogs.size > 100) connectionLogs.removeAt(0)
+        val arr = JSONArray()
+        connectionLogs.forEach { arr.put(it) }
+        prefs.edit().putString("connection_logs", arr.toString()).apply()
+    }
+
+    private fun loadConnectionLogs(): List<String> {
+        val arr = runCatching { JSONArray(prefs.getString("connection_logs", "[]") ?: "[]") }.getOrElse { JSONArray() }
+        return (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { line -> line.isNotBlank() } }
+    }
+
+    private fun showConnectionLogs() {
+        connectionLogs.clear()
+        connectionLogs.addAll(loadConnectionLogs())
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(14), dpi(6), dpi(14), dpi(6)) }
+        val scroll = ScrollView(this).apply { isFillViewport = true; addView(body) }
+        fun populate() {
+            body.removeAllViews()
+            if (connectionLogs.isEmpty()) body.addView(tv("No connection activity yet.", 12f, Palette.muted, 0), lp(MATCH, WRAP, 12))
+            else connectionLogs.asReversed().forEach { line -> body.addView(tv(line, 11f, Palette.text, 0), lp(MATCH, WRAP, 7)) }
+        }
+        populate()
+        dialogBuilder().setTitle("CONNECTION LOGS").setView(scroll)
+            .setNeutralButton("Clear", null).setPositiveButton("Done", null)
+            .create().also { d ->
+                d.setOnShowListener {
+                    d.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                        connectionLogs.clear(); prefs.edit().remove("connection_logs").apply(); populate()
+                    }
+                }
+                d.show()
+            }
+    }
+
+    private fun connectionModeSummary(): String = when (prefs.getString("connection_mode", "vpn")) {
+        "proxy" -> "127.0.0.1:10880"
+        else -> "VPN mode"
+    }
+
+    private fun showConnectionModeDialog() {
+        val currentMode = prefs.getString("connection_mode", "vpn") ?: "vpn"
+        val currentProtocol = prefs.getString("proxy_protocol", "socks") ?: "socks"
+        val options = arrayOf("VPN — all apps", "Local SOCKS5 proxy", "Local HTTP proxy")
+        val checked = when {
+            currentMode != "proxy" -> 0
+            currentProtocol == "http" -> 2
+            else -> 1
+        }
+        dialogBuilder().setTitle("CONNECTION MODE")
+            .setSingleChoiceItems(options, checked) { d, which ->
+                val mode = if (which == 0) "vpn" else "proxy"
+                val proto = if (which == 2) "http" else "socks"
+                prefs.edit().putString("connection_mode", mode).putString("proxy_protocol", proto).apply()
+                d.dismiss()
+                if (state == OrbState.CONNECTED || state == OrbState.CONNECTING) {
+                    toast("Mode saved. Disconnect and reconnect to apply.")
+                }
+                render()
+            }
+            .setNegativeButton("Cancel", null)
+            .setNeutralButton("Copy address", null)
+            .create().also { d ->
+                d.setOnShowListener {
+                    d.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        cm.setPrimaryClip(ClipData.newPlainText("TIREXNET local proxy", "127.0.0.1:10880"))
+                        toast("Local proxy address copied.")
+                    }
+                }
+                d.show()
+            }
+    }
+
+    private fun configKey(raw: String): String = runCatching {
+        MessageDigest.getInstance("SHA-256").digest(raw.trim().toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+    }.getOrDefault(raw.trim().hashCode().toString())
+
+    private fun showServerActions(item: ServerItem) {
+        val options = if (item.engine == ConfigEngine.XRAY) arrayOf("Edit profile", "Set SNI spoof", "Remove profile") else arrayOf("Edit profile", "Remove profile")
+        dialogBuilder().setTitle(item.name).setItems(options) { _, which ->
+            when (options[which]) {
+                "Edit profile" -> editServerDialog(item)
+                "Set SNI spoof" -> showSniDialog(item)
+                "Remove profile" -> removeServerProfile(item)
+            }
+        }.show()
+    }
+
+    private fun editServerDialog(item: ServerItem) {
+        val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(16), dpi(8), dpi(16), dpi(4)) }
+        val name = EditText(this).apply { setSingleLine(true); hint = "Profile name"; setText(item.name); textSize = 13f; background = fieldBackground(false); setPadding(dpi(10), dpi(8), dpi(10), dpi(8)) }
+        val raw = EditText(this).apply { hint = "Paste or edit the profile"; setText(item.raw); textSize = 10.5f; minLines = 5; maxLines = 9; gravity = Gravity.TOP; inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE; background = fieldBackground(false); setPadding(dpi(10), dpi(8), dpi(10), dpi(8)) }
+        form.addView(tv("Profile name", 11f, Palette.muted, 0))
+        form.addView(name, lp(MATCH, dpi(46), 4))
+        form.addView(tv("Configuration", 11f, Palette.muted, 0), lp(MATCH, WRAP, 10))
+        form.addView(raw, lp(MATCH, dpi(180), 4))
+        val dialog = dialogBuilder().setTitle("EDIT PROFILE").setView(form).setNegativeButton("Cancel", null).setPositiveButton("Save", null).create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val updatedRaw = raw.text.toString().trim()
+                val engine = ConfigDetector.detect(updatedRaw)
+                if (engine == ConfigEngine.UNKNOWN) { toast("This profile format is not supported."); return@setOnClickListener }
+                val profileName = name.text.toString().trim().ifBlank { item.name }
+                val meta = ProfileParser.parse(updatedRaw)
+                val updated = ServerItem(profileName.take(80), updatedRaw, engine, meta, true, item.country)
+                val locals = loadLocalProfiles().filterNot { it.raw.trim() == item.raw.trim() }.toMutableList()
+                locals.add(updated)
+                if (!persistLocalProfiles(locals)) { toast("Could not save this profile."); return@setOnClickListener }
+                if (!item.local) {
+                    val hidden = prefs.getStringSet("hidden_remote_configs", emptySet()).orEmpty().toMutableSet()
+                    hidden.add(configKey(item.raw)); prefs.edit().putStringSet("hidden_remote_configs", hidden).apply()
+                }
+                servers = mergeSavedAndRemote(servers.filterNot { it.local })
+                serversState = ServersState.READY
+                if (currentConfig().trim() == item.raw.trim()) setConfig(updatedRaw) else rebuildServerList(-1)
+                dialog.dismiss()
+                toast("Profile saved.")
+            }
+        }
+        dialog.show()
+    }
+
+    private fun removeServerProfile(item: ServerItem) {
+        dialogBuilder().setTitle("Remove profile?").setMessage("This profile will be removed from your server list on this phone.")
+            .setNegativeButton("Cancel", null).setPositiveButton("Remove") { _, _ ->
+                if (item.local) {
+                    persistLocalProfiles(loadLocalProfiles().filterNot { it.raw.trim() == item.raw.trim() })
+                } else {
+                    val hidden = prefs.getStringSet("hidden_remote_configs", emptySet()).orEmpty().toMutableSet()
+                    hidden.add(configKey(item.raw)); prefs.edit().putStringSet("hidden_remote_configs", hidden).apply()
+                }
+                if (currentConfig().trim() == item.raw.trim()) prefs.edit().remove("last_config").apply()
+                servers = mergeSavedAndRemote(servers.filterNot { it.local }); serversState = ServersState.READY
+                rebuildServerList(-1); bindServerSummary(); toast("Profile removed.")
+            }.show()
+    }
+
+    private fun extractSni(raw: String): String {
+        return runCatching {
+            when {
+                raw.startsWith("vless://") || raw.startsWith("trojan://") -> android.net.Uri.parse(raw).getQueryParameter("sni").orEmpty()
+                raw.startsWith("vmess://") -> {
+                    val encoded = raw.substringAfter("vmess://").substringBefore('#')
+                    val decoded = android.util.Base64.decode(encoded, android.util.Base64.DEFAULT or android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP).toString(Charsets.UTF_8)
+                    JSONObject(decoded).optString("sni", "")
+                }
+                raw.trimStart().startsWith("{") -> {
+                    val obj = JSONObject(raw); val out = obj.optJSONArray("outbounds")?.optJSONObject(0)
+                    val stream = out?.optJSONObject("streamSettings")
+                    stream?.optJSONObject("tlsSettings")?.optString("serverName", "")
+                        ?.ifBlank { stream.optJSONObject("realitySettings")?.optString("serverName", "").orEmpty() }.orEmpty()
+                }
+                else -> ""
+            }
+        }.getOrDefault("")
+    }
+
+    private fun withSni(raw: String, sni: String): String? = runCatching {
+        when {
+            raw.startsWith("vless://") || raw.startsWith("trojan://") -> {
+                val uri = android.net.Uri.parse(raw)
+                val b = uri.buildUpon().clearQuery()
+                uri.queryParameterNames.forEach { key ->
+                    if (!key.equals("sni", true)) uri.getQueryParameters(key).forEach { v -> b.appendQueryParameter(key, v) }
+                }
+                if (sni.isNotBlank()) b.appendQueryParameter("sni", sni)
+                b.build().toString()
+            }
+            raw.startsWith("vmess://") -> {
+                val encoded = raw.substringAfter("vmess://").substringBefore('#')
+                val decoded = android.util.Base64.decode(encoded, android.util.Base64.DEFAULT or android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP).toString(Charsets.UTF_8)
+                val obj = JSONObject(decoded)
+                if (sni.isBlank()) obj.remove("sni") else obj.put("sni", sni)
+                val payload = android.util.Base64.encodeToString(obj.toString().toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+                "vmess://$payload" + raw.substringAfter('#', "").let { if (it.isBlank()) "" else "#$it" }
+            }
+            raw.trimStart().startsWith("{") -> {
+                val obj = JSONObject(raw)
+                val arr = obj.optJSONArray("outbounds") ?: return null
+                val out = arr.optJSONObject(0) ?: return null
+                val stream = out.optJSONObject("streamSettings") ?: return null
+                when (stream.optString("security")) {
+                    "tls" -> { val tls = stream.optJSONObject("tlsSettings") ?: JSONObject().also { stream.put("tlsSettings", it) }; if (sni.isBlank()) tls.remove("serverName") else tls.put("serverName", sni) }
+                    "reality" -> { val reality = stream.optJSONObject("realitySettings") ?: JSONObject().also { stream.put("realitySettings", it) }; if (sni.isBlank()) reality.remove("serverName") else reality.put("serverName", sni) }
+                    else -> return null
+                }
+                obj.toString()
+            }
+            else -> null
+        }
+    }.getOrNull()
+
+    private fun showSniDialog(item: ServerItem) {
+        val edit = EditText(this).apply { hint = "SNI hostname"; setSingleLine(true); setText(extractSni(item.raw)); textSize = 13f; setPadding(dpi(12), dpi(8), dpi(12), dpi(8)); background = fieldBackground(false) }
+        dialogBuilder().setTitle("SNI SPOOF")
+            .setMessage("Sets the TLS / REALITY serverName for this Xray profile.")
+            .setView(edit).setNegativeButton("Cancel", null).setPositiveButton("Save", null)
+            .create().also { d ->
+                d.setOnShowListener {
+                    d.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                        val updatedRaw = withSni(item.raw, edit.text.toString().trim())
+                        if (updatedRaw.isNullOrBlank()) { toast("This profile does not support a separate SNI setting."); return@setOnClickListener }
+                        val locals = loadLocalProfiles().filterNot { it.raw.trim() == item.raw.trim() }.toMutableList()
+                        locals.add(ServerItem(item.name, updatedRaw, ConfigDetector.detect(updatedRaw), ProfileParser.parse(updatedRaw), true, item.country))
+                        if (!persistLocalProfiles(locals)) { toast("Could not save this profile."); return@setOnClickListener }
+                        if (!item.local) {
+                            val hidden = prefs.getStringSet("hidden_remote_configs", emptySet()).orEmpty().toMutableSet(); hidden.add(configKey(item.raw)); prefs.edit().putStringSet("hidden_remote_configs", hidden).apply()
+                        }
+                        servers = mergeSavedAndRemote(servers.filterNot { it.local }); serversState = ServersState.READY
+                        if (currentConfig().trim() == item.raw.trim()) setConfig(updatedRaw) else rebuildServerList(-1)
+                        d.dismiss(); toast("SNI setting saved.")
+                    }
+                }
+                d.show()
+            }
+    }
+
+    private fun cancelSmartConnect(showMessage: Boolean) {
+        smartConnectRunId++
+        smartConnectPendingCount = 0
+        smartConnectResults.clear()
+        if (smartConnectSwitch?.isChecked == true) {
+            programmaticSmartSwitch = true
+            smartConnectSwitch?.isChecked = false
+            programmaticSmartSwitch = false
+        }
+        if (showMessage) toast("Smart Connect cancelled.")
+    }
+
+    private fun startSmartConnect() {
+        if (state == OrbState.CONNECTED || state == OrbState.CONNECTING || state == OrbState.DISCONNECTING) {
+            cancelSmartConnect(false); toast("Disconnect before using Smart Connect."); return
+        }
+        if (serversState != ServersState.READY || servers.isEmpty()) {
+            cancelSmartConnect(false); ensureServersLoaded(); toast("Load your servers first, then try Smart Connect."); return
+        }
+        val candidates = (if (prefs.getString("connection_mode", "vpn") == "proxy")
+            servers.filter { it.engine == ConfigEngine.XRAY } else servers).take(60)
+        if (candidates.isEmpty()) {
+            cancelSmartConnect(false)
+            toast(if (prefs.getString("connection_mode", "vpn") == "proxy") "No Xray profile is available for local proxy mode." else "No server is available.")
+            return
+        }
+        smartConnectRunId++
+        val runId = smartConnectRunId
+        smartConnectResults.clear()
+        smartConnectPendingCount = candidates.size
+        appendConnectionLog("Smart Connect tested up to 60 profiles")
+        candidates.forEach { item ->
+            val key = item.raw.trim()
+            PingTester.test(key, item.meta, true) { result ->
+                if (runId != smartConnectRunId || isFinishing || isDestroyed) return@test
+                smartConnectResults[key] = result
+                bindPing(key)
+                if (sortByPing) rebuildServerList(-1)
+                smartConnectPendingCount--
+                if (smartConnectPendingCount <= 0) finishSmartConnect(runId, candidates)
+            }
+        }
+    }
+
+    private fun finishSmartConnect(runId: Int, candidates: List<ServerItem>) {
+        if (runId != smartConnectRunId) return
+        val best = candidates.mapNotNull { item ->
+            val result = smartConnectResults[item.raw.trim()]
+            if (result?.kind == PingKind.OK) item to result.ms else null
+        }.minByOrNull { it.second }?.first
+        programmaticSmartSwitch = true
+        smartConnectSwitch?.isChecked = false
+        programmaticSmartSwitch = false
+        smartConnectPendingCount = 0
+        if (best == null) {
+            appendConnectionLog("Smart Connect could not find a reachable server")
+            toast("No reachable server found. Choose a server manually.")
+            return
+        }
+        setConfig(best.raw)
+        appendConnectionLog("Smart Connect selected ${best.name}")
+        toast("Fastest server selected. Connecting…")
+        connect()
     }
 
     private fun isNewerVersion(remote: String, current: String): Boolean {
@@ -1206,7 +1550,7 @@ class MainActivity : Activity() {
                         .setPositiveButton("Download & install") { _, _ -> downloadAndInstall(apkUrl, apkName) }.show()
                 }
             } catch (e: Throwable) {
-                runOnUiThread { toast("Update check failed: ${e.message ?: "GitHub unavailable"}") }
+                runOnUiThread { toast("Could not check for updates. Please try again later.") }
             }
         }
     }
@@ -1222,7 +1566,7 @@ class MainActivity : Activity() {
             var sessionId = -1
             try {
                 val connection = (URL(apkUrl).openConnection() as HttpURLConnection).apply { connectTimeout = 15000; readTimeout = 30000; setRequestProperty("User-Agent", "TIREXNET-Android") }
-                if (connection.responseCode !in 200..299) error("Download HTTP ${connection.responseCode}")
+                if (connection.responseCode !in 200..299) error("download unavailable")
                 val installer = packageManager.packageInstaller
                 val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply { setAppPackageName(packageName) }
                 sessionId = installer.createSession(params)
@@ -1236,7 +1580,7 @@ class MainActivity : Activity() {
                 runOnUiThread { toast("Download complete. Android installer opened.") }
             } catch (e: Throwable) {
                 if (sessionId >= 0) runCatching { packageManager.packageInstaller.abandonSession(sessionId) }
-                runOnUiThread { toast("Update install failed: ${e.message ?: "unknown error"}") }
+                runOnUiThread { toast("The update could not be installed. Please try again.") }
             }
         }
     }
@@ -1353,15 +1697,33 @@ class MainActivity : Activity() {
         return if (e.isNotBlank()) e else engineName(ConfigDetector.detect(currentConfig()))
     }
 
+    private fun safeSavedStatus(raw: String): String {
+        val lower = raw.lowercase(Locale.US)
+        val technical = Regex("(?i)(http\\s*\\d{3}|errno\\s*[:=]?\\s*\\d+|exit\\s*code\\s*[:=]?\\s*\\d+|\\b[A-Z][A-Z0-9_]{7,}\\b)").containsMatchIn(raw)
+        return when {
+            technical || listOf("failed", "error", "invalid", "exception", "timeout", "ناموفق", "خطا").any { lower.contains(it) } -> "Connection failed. Check the selected profile and try again."
+            lower.contains("permission") || lower.contains("denied") -> "VPN permission is required to connect."
+            else -> ConfigSanitizer.redact(raw).take(100)
+        }
+    }
+
     private fun applyStatus(rawMessage: String, active: Boolean) {
-        // Engine errors may echo parts of the config (keys, hosts, links): scrub before storing or showing.
-        val message = ConfigSanitizer.redact(rawMessage)
+        val lowerRaw = rawMessage.lowercase(Locale.US)
+        val hasTechnicalCode = Regex("(?i)(http\\s*\\d{3}|errno\\s*[:=]?\\s*\\d+|exit\\s*code\\s*[:=]?\\s*\\d+|\\b[A-Z][A-Z0-9_]{7,}\\b)").containsMatchIn(rawMessage)
+        val isError = hasTechnicalCode || listOf("failed", "error", "invalid", "could not", "ناموفق", "خطا", "timeout", "exception").any { lowerRaw.contains(it) }
+        val isPermission = lowerRaw.contains("denied") || lowerRaw.contains("revoked") || lowerRaw.contains("permission")
+        val message = when {
+            active -> "Connected securely."
+            isPermission -> "VPN permission is required to connect."
+            isError -> friendlyConnectionError(rawMessage)
+            else -> ConfigSanitizer.redact(rawMessage).take(100)
+        }
         statusMessage = message
-        val lower = message.lowercase(Locale.US)
+        val lower = lowerRaw
         val next = when {
             active -> OrbState.CONNECTED
-            listOf("failed", "error", "invalid", "could not", "ناموفق", "خطا").any { lower.contains(it) } -> OrbState.FAILED
-            lower.contains("denied") || lower.contains("revoked") -> OrbState.PERMISSION
+            isError -> OrbState.FAILED
+            isPermission -> OrbState.PERMISSION
             lower.contains("disconnected") -> OrbState.DISCONNECTED
             else -> OrbState.CONNECTING
         }
@@ -1370,6 +1732,7 @@ class MainActivity : Activity() {
         } else connectedAtRt = 0L
         val changed = state != next
         state = next
+        if (changed || connectionLogs.lastOrNull()?.endsWith(message) != true) appendConnectionLog(message)
         prefs.edit().putString("connection_message", message).putBoolean("connection_active", active).apply()
         updateConnectionUi()
         if (changed) {
@@ -1404,13 +1767,18 @@ class MainActivity : Activity() {
             showTab(1)
             return
         }
+        val proxyMode = prefs.getString("connection_mode", "vpn") == "proxy"
+        if (proxyMode && engine != ConfigEngine.XRAY) {
+            toast("Local proxy mode currently supports Xray profiles. Switch to VPN mode for this profile.")
+            return
+        }
         pendingRaw = raw
         pendingEngine = engine
         // The notification and the Quick Settings tile show this name; they can run without the app window.
         prefs.edit().putString("active_engine", engine.name)
             .putString(TirexNotifier.KEY_PROFILE_NAME, selectedItem()?.name.orEmpty()).apply()
 
-        val permission = VpnService.prepare(this)
+        val permission = if (proxyMode) null else VpnService.prepare(this)
         if (permission != null) {
             applyStatus("VPN permission is required.", false)
             state = OrbState.PERMISSION
@@ -1452,6 +1820,7 @@ class MainActivity : Activity() {
         val engine = prefs.getString("active_engine", "") ?: ""
         state = OrbState.DISCONNECTING
         statusMessage = "Disconnecting…"
+        appendConnectionLog("Disconnecting…")
         updateConnectionUi()
         var issued = false
         if (engine == "WIREGUARD" || engine == "AMNEZIAWG" || WgTunnelEngine.isActive) {
@@ -1527,8 +1896,9 @@ class MainActivity : Activity() {
         for (profile in loadLocalProfiles()) {
             if (seen.add(profile.raw.trim())) merged.add(profile)
         }
+        val hiddenRemote = prefs.getStringSet("hidden_remote_configs", emptySet()).orEmpty()
         for (profile in remote) {
-            if (seen.add(profile.raw.trim())) merged.add(profile)
+            if (configKey(profile.raw) !in hiddenRemote && seen.add(profile.raw.trim())) merged.add(profile)
         }
         return merged
     }
@@ -1600,7 +1970,7 @@ class MainActivity : Activity() {
             val text = try {
                 contentResolver.openInputStream(uri)?.use { readLimited(it) }.orEmpty()
             } catch (e: Exception) {
-                runOnUiThread { if (!isFinishing && !isDestroyed) importFailed("فایل خوانده نشد: " + ConfigSanitizer.redact(e.message)) }
+                runOnUiThread { if (!isFinishing && !isDestroyed) importFailed("فایل انتخاب‌شده قابل خواندن نیست.") }
                 return@execute
             }
             val outcome = doImport(text, existing)
@@ -1742,7 +2112,7 @@ class MainActivity : Activity() {
             } catch (e: Exception) {
                 runOnUiThread {
                     loginButton?.apply { text = "Sign in"; alpha = 1f; isEnabled = true }
-                    toast("ورود ناموفق بود: " + (e.message ?: "network error"))
+                    toast(if ((e.message ?: "").contains("401") || (e.message ?: "").contains("invalid", true)) "نام کاربری یا رمز عبور درست نیست." else "ورود انجام نشد. اتصال اینترنت را بررسی کن و دوباره تلاش کن.")
                 }
             }
         }
@@ -1780,10 +2150,10 @@ class MainActivity : Activity() {
                 }
             } catch (e: Exception) {
                 val msg = when ((e as? ApiHttpException)?.code) {
-                    404, 405 -> "ثبت‌نام روی این سرور فعال نیست."
+                    404, 405 -> "ثبت‌نام در حال حاضر فعال نیست."
                     409 -> "این نام کاربری قبلاً ثبت شده است."
-                    null -> "ثبت‌نام ناموفق بود: " + ConfigSanitizer.redact(e.message ?: "network error")
-                    else -> "ثبت‌نام ناموفق بود (HTTP ${(e as ApiHttpException).code})."
+                    400, 422 -> "اطلاعات واردشده معتبر نیست. نام کاربری و رمز را بررسی کن."
+                    else -> "ثبت‌نام انجام نشد. اتصال اینترنت را بررسی کن و دوباره تلاش کن."
                 }
                 runOnUiThread {
                     loginButton?.apply { text = "Create account"; alpha = 1f; isEnabled = true }
@@ -1820,9 +2190,9 @@ class MainActivity : Activity() {
                     runOnUiThread { render(); toast("نشست منقضی شده؛ دوباره وارد شو.") }
                 } else {
                     runOnUiThread {
-                        accountError = e.message ?: "network error"
+                        accountError = "unavailable"
                         bindAccount()
-                        toast("به‌روزرسانی اشتراک ناموفق بود: " + accountError)
+                        toast("اطلاعات اشتراک در دسترس نیست. دوباره تلاش کن.")
                     }
                 }
             }
@@ -1922,11 +2292,11 @@ class MainActivity : Activity() {
                     if (offline.isNotEmpty()) {
                         servers = offline
                         serversState = ServersState.READY
-                        serversError = ConfigSanitizer.redact(e.message ?: "endpoint unavailable")
+                        serversError = "Connection unavailable"
                         rebuildServerList(-1)
                         toast("اتصال به سرور برقرار نشد؛ لیست ذخیره‌شده‌ی قبلی نمایش داده شد.")
                     } else {
-                        serversError = ConfigSanitizer.redact(e.message ?: "endpoint unavailable")
+                        serversError = "Connection unavailable"
                         serversState = ServersState.ERROR
                         rebuildServerList(-1)
                     }
