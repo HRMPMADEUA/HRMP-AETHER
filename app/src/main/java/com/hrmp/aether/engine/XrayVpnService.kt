@@ -66,7 +66,7 @@ class XrayVpnService : VpnService() {
 
                 if (raw.isBlank()) {
                     publishStatus(
-                        "Xray failed: configuration is empty.",
+                        "Connection failed. Add a valid profile and try again.",
                         false
                     )
                     stopForeground(STOP_FOREGROUND_REMOVE)
@@ -89,9 +89,7 @@ class XrayVpnService : VpnService() {
                         stopTunnel()
 
                         publishStatus(
-                            "Xray failed: ${
-                                e.message ?: e.javaClass.simpleName
-                            }",
+                            "Connection failed. Check the selected profile and try again.",
                             false
                         )
 
@@ -108,69 +106,67 @@ class XrayVpnService : VpnService() {
     }
 
     private fun startTunnel(raw: String) {
-
         stopTunnel()
         stopping = false
 
-        val json = XrayConfigBuilder.build(raw)
+        val prefs = getSharedPreferences("tirexnet", MODE_PRIVATE)
+        val proxyMode = prefs.getString("connection_mode", "vpn") == "proxy"
+        val proxyProtocol = prefs.getString("proxy_protocol", "socks") ?: "socks"
+        val json = if (proxyMode) XrayConfigBuilder.buildProxy(raw, proxyProtocol) else XrayConfigBuilder.build(raw)
 
-        val builder = Builder()
-            .setSession("TIREXNET • Xray")
-            .setMtu(1500)
-            .addAddress("172.19.0.1", 30)
-            .addRoute("0.0.0.0", 0)
-            .addDnsServer("1.1.1.1")
-            .addAddress("fd00:1::1", 126)
-            .addRoute("::", 0)
-            .addDnsServer("2606:4700:4700::1111")
+        var pfd: ParcelFileDescriptor? = null
+        if (!proxyMode) {
+            val builder = Builder()
+                .setSession("TIREXNET • Xray")
+                .setMtu(1500)
+                .addAddress("172.19.0.1", 30)
+                .addRoute("0.0.0.0", 0)
+                .addDnsServer("1.1.1.1")
+                .addAddress("fd00:1::1", 126)
+                .addRoute("::", 0)
+                .addDnsServer("2606:4700:4700::1111")
 
-        try {
-            val prefs = getSharedPreferences("tirexnet", MODE_PRIVATE)
             val selected = prefs.getStringSet("split_packages", emptySet()).orEmpty()
             val mode = prefs.getString("split_mode", "exclude") ?: "exclude"
             if (mode == "include") {
+                var applied = 0
                 selected.forEach { pkg ->
-                    if (pkg != packageName) runCatching { builder.addAllowedApplication(pkg) }
+                    if (pkg != packageName) {
+                        val exists = runCatching { packageManager.getApplicationInfo(pkg, 0) }.isSuccess
+                        if (exists && runCatching { builder.addAllowedApplication(pkg) }.isSuccess) applied++
+                    }
                 }
+                if (applied == 0) throw IllegalStateException("Select at least one installed app for Include mode.")
             } else {
-                builder.addDisallowedApplication(packageName)
+                // Keep TIREXNET outside its own tunnel so ping, API and local controls stay reachable.
+                runCatching { builder.addDisallowedApplication(packageName) }
                 selected.forEach { pkg ->
-                    if (pkg != packageName) runCatching { builder.addDisallowedApplication(pkg) }
+                    if (pkg != packageName) {
+                        val exists = runCatching { packageManager.getApplicationInfo(pkg, 0) }.isSuccess
+                        if (exists) runCatching { builder.addDisallowedApplication(pkg) }
+                    }
                 }
             }
-        } catch (e: Exception) {
-            throw IllegalStateException(
-                "Could not apply split-tunnel app selection: ${e.message}",
-                e
-            )
+            pfd = builder.establish()
+                ?: throw IllegalStateException("Android could not establish the VPN interface.")
         }
 
-        val pfd = builder.establish()
-            ?: error("Android did not establish the VPN interface.")
-
         val assets = File(filesDir, "xray-assets")
-
         if (!assets.exists() && !assets.mkdirs()) {
-            runCatching { pfd.close() }
-            error("Could not create Xray asset directory.")
+            runCatching { pfd?.close() }
+            throw IllegalStateException("Xray storage is unavailable.")
         }
 
         val latch = CountDownLatch(1)
         startedLatch = latch
-
         try {
             Seq.setContext(applicationContext)
-
-            // Correct XUDP BaseKey:
-            // URL-safe Base64 without padding, representing 32 bytes.
             Libv2ray.initCoreEnv(
                 assets.absolutePath,
                 "VElSRVhORVQtWFVEUC1CQVNFLUtFWS0yMDI2LTAwMDE"
             )
-
             val core = Libv2ray.newCoreController(
                 object : CoreCallbackHandler {
-
                     override fun startup(): Long {
                         Log.i(TAG, "core startup callback")
                         latch.countDown()
@@ -178,36 +174,20 @@ class XrayVpnService : VpnService() {
                     }
 
                     override fun shutdown(): Long {
-                        Log.i(
-                            TAG,
-                            "core shutdown callback (stopping=$stopping)"
-                        )
-
+                        Log.i(TAG, "core shutdown callback (stopping=$stopping)")
                         if (!stopping && isActive) {
                             executor.execute {
                                 stopTunnel()
-
-                                publishStatus(
-                                    "Xray failed: core stopped unexpectedly.",
-                                    false
-                                )
-
+                                publishStatus("Connection ended.", false)
                                 stopForeground(STOP_FOREGROUND_REMOVE)
                                 stopSelf()
                             }
                         }
-
                         return 0L
                     }
 
-                    override fun onEmitStatus(
-                        l: Long,
-                        s: String?
-                    ): Long {
-                        if (!s.isNullOrBlank()) {
-                            Log.d(TAG, "core status: $s")
-                        }
-
+                    override fun onEmitStatus(l: Long, s: String?): Long {
+                        if (!s.isNullOrBlank()) Log.d(TAG, "core status received")
                         return 0L
                     }
                 }
@@ -215,38 +195,20 @@ class XrayVpnService : VpnService() {
 
             controller = core
             tun = pfd
-
-            core.startLoop(json, pfd.fd)
-
-            if (!latch.await(
-                    STARTUP_TIMEOUT_SECONDS,
-                    TimeUnit.SECONDS
-                )
-            ) {
-                throw IllegalStateException(
-                    "core did not confirm startup within " +
-                        "${STARTUP_TIMEOUT_SECONDS}s " +
-                        "(check config/outbound)"
-                )
+            // libv2ray defines descriptor 0 as "run without an Android TUN".
+            // This is used for loopback SOCKS5/HTTP proxy mode.
+            core.startLoop(json, pfd?.fd ?: 0)
+            if (!latch.await(STARTUP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                throw IllegalStateException("Xray startup timed out.")
             }
-
         } catch (e: Throwable) {
             controller = null
             tun = null
-
-            runCatching { pfd.close() }
-
-            throw IllegalStateException(
-                "Xray core could not start: ${
-                    e.message ?: e.javaClass.simpleName
-                }",
-                e
-            )
-
+            runCatching { pfd?.close() }
+            throw IllegalStateException("Xray could not start.", e)
         } finally {
             startedLatch = null
         }
-
         isActive = true
     }
 
@@ -289,7 +251,8 @@ class XrayVpnService : VpnService() {
 
     private fun startForegroundCompat() {
         val notification = makeNotification(
-            "Starting secure Xray tunnel…"
+            if (getSharedPreferences("tirexnet", MODE_PRIVATE).getString("connection_mode", "vpn") == "proxy")
+                "Starting local proxy…" else "Starting secure VPN…"
         )
 
         if (Build.VERSION.SDK_INT >= 34) {
