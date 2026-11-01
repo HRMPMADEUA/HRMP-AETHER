@@ -1,6 +1,6 @@
 package com.tirexnet.app.engine
 
-enum class ConfigEngine { XRAY, WIREGUARD, AMNEZIAWG, OPENVPN, MHRV, DNS_TUNNEL, SNI_SPOOF, SLIPNET, UNKNOWN }
+enum class ConfigEngine { XRAY, WIREGUARD, AMNEZIAWG, OPENVPN, MHRV, DNS_TUNNEL, DNS_CHANGER, SNI_SPOOF, SLIPNET, UNKNOWN }
 
 object ConfigDetector {
     fun detect(raw: String): ConfigEngine {
@@ -10,6 +10,7 @@ object ConfigDetector {
         if (lower.startsWith("slipnet://") || lower.startsWith("slipnet-enc://") || lower.startsWith("slipnet-bundle-enc://")) {
             return if (EngineProfiles.decodeSlipNet(s) != null) ConfigEngine.SLIPNET else ConfigEngine.UNKNOWN
         }
+        if (lower.startsWith("dnschanger://")) return if (DnsChangerProfiles.decode(s) != null) ConfigEngine.DNS_CHANGER else ConfigEngine.UNKNOWN
         if (lower.startsWith("snispoof://")) return if (EngineProfiles.decodeSniSpoof(s) != null) ConfigEngine.SNI_SPOOF else ConfigEngine.UNKNOWN
         if (lower.startsWith("mhrv-rs://")) return if (EngineProfiles.decodeMhrv(s) != null) ConfigEngine.MHRV else ConfigEngine.UNKNOWN
         if (lower.startsWith("stormdns://")) return if (EngineProfiles.decodeStormDns(s) != null) ConfigEngine.DNS_TUNNEL else ConfigEngine.UNKNOWN
