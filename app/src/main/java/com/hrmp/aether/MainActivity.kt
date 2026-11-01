@@ -46,6 +46,7 @@ import android.widget.TextView
 import android.widget.Toast
 import android.widget.Switch
 import com.tirexnet.app.engine.ConfigDetector
+import com.tirexnet.app.engine.EngineProfiles
 import com.tirexnet.app.engine.ApiConfig
 import com.tirexnet.app.engine.ApiHttpException
 import com.tirexnet.app.engine.ApiUnavailableException
@@ -55,6 +56,7 @@ import com.tirexnet.app.engine.FieldKind
 import com.tirexnet.app.engine.ManualOutcome
 import com.tirexnet.app.engine.ManualProfile
 import com.tirexnet.app.engine.ManualProtocol
+import com.tirexnet.app.engine.MhrvEngine
 import com.tirexnet.app.engine.OpenVpnEngine
 import com.tirexnet.app.engine.PingKind
 import com.tirexnet.app.engine.PingResult
@@ -64,6 +66,9 @@ import com.tirexnet.app.engine.ProfileParser
 import com.tirexnet.app.engine.TirexActions
 import com.tirexnet.app.engine.TirexNotifier
 import com.tirexnet.app.engine.TrafficMonitor
+import com.tirexnet.app.engine.StormDnsEngine
+import com.tirexnet.app.engine.SniSpoofEngine
+import com.tirexnet.app.engine.SlipNetEngine
 import com.tirexnet.app.engine.WgTunnelEngine
 import com.tirexnet.app.engine.XrayVpnService
 import com.tirexnet.app.ui.AmbientBackground
@@ -87,6 +92,7 @@ import com.tirexnet.app.ui.tv
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
@@ -598,6 +604,19 @@ class MainActivity : Activity() {
         orbHolder.addView(o, FrameLayout.LayoutParams(orbSize, orbSize, Gravity.CENTER))
         col.addView(orbHolder, lp(MATCH, orbSize, 2))
 
+        val hero = GlassCard(this, 18f, pad = 14)
+        val heroRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val heroDot = View(this).apply {
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Palette.cyan) }
+        }
+        heroRow.addView(heroDot, lp(dpi(9), dpi(9)))
+        val heroCopy = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(10), 0, 0, 0) }
+        heroCopy.addView(tv("PRIVATE CONNECTION", 9f, Palette.cyan, 2).apply { letterSpacing = 0.13f })
+        heroCopy.addView(tv("Choose a server, then tap the button to connect.", 11.5f, Palette.muted, 0), lp(MATCH, WRAP, 4))
+        heroRow.addView(heroCopy, LinearLayout.LayoutParams(0, WRAP, 1f))
+        hero.addView(heroRow)
+        col.addView(hero, lp(MATCH, WRAP, 0, 0, 0, 12))
+
         val smartRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -780,9 +799,13 @@ class MainActivity : Activity() {
                     val card = GlassCard(this, 18f, if (sel) Palette.strokeActive else Palette.stroke, pad = 12).apply {
                         isClickable = true
                         contentDescription = item.name
-                        if (sel) background = Palette.glass(this@MainActivity, 18f, Palette.strokeActive, Palette.withAlpha(Palette.cyan, 54), Palette.withAlpha(Palette.violet, 24))
+                        if (sel) background = Palette.glass(this@MainActivity, 18f, Palette.strokeActive, Palette.withAlpha(Palette.cyan, 54), Palette.withAlpha(Palette.ice, 18))
                         setOnClickListener { selectServer(item, idx) }
-                        setOnLongClickListener { showServerActions(item); true }
+                        setOnLongClickListener {
+                            if (item.local) showServerActions(item)
+                            else toast("Subscription profiles are read-only. Add a local copy to customize it.")
+                            true
+                        }
                         pressable(0.98f)
                     }
                     val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
@@ -794,11 +817,19 @@ class MainActivity : Activity() {
                     if (sub.isNotEmpty()) info.addView(tv(sub, 10.5f, if (sel) Palette.cyan else Palette.muted, 0), lp(MATCH, WRAP, 4))
                     row.addView(info, LinearLayout.LayoutParams(0, WRAP, 1f))
 
-                    val holder = buildPingControl(item)
-                    pingHolders[key] = holder
-                    row.addView(holder.text, lp(WRAP, WRAP, 0, 0, 0, 6))
-                    row.addView(holder.button, lp(dpi(44), dpi(44)))
-                    bindPing(key)
+                    if (item.engine == ConfigEngine.SLIPNET) {
+                        row.addView(tv("SLIPNET", 9.5f, Palette.cyan, 2).apply {
+                            gravity = Gravity.CENTER
+                            setPadding(dpi(9), dpi(7), dpi(9), dpi(7))
+                            background = Palette.glass(this@MainActivity, 12f, Palette.strokeActive)
+                        }, lp(WRAP, WRAP, 0, 0, 0, 4))
+                    } else {
+                        val holder = buildPingControl(item)
+                        pingHolders[key] = holder
+                        row.addView(holder.text, lp(WRAP, WRAP, 0, 0, 0, 6))
+                        row.addView(holder.button, lp(dpi(44), dpi(44)))
+                        bindPing(key)
+                    }
                     card.addView(row)
                     box.addView(card, lp(MATCH, WRAP, if (idx == 0) 0 else 10))
                     if (idx == popIndex) {
@@ -879,6 +910,7 @@ class MainActivity : Activity() {
 
     /** One probe per profile at a time; a fresh cached value is reused unless [force] (manual retest). */
     private fun runPing(item: ServerItem, force: Boolean) {
+        if (item.engine == ConfigEngine.SLIPNET || item.meta.host.isBlank()) return
         val key = item.raw.trim()
         if (PingTester.isRunning(key)) return
         PingTester.test(key, item.meta, force) {
@@ -891,13 +923,14 @@ class MainActivity : Activity() {
     }
 
     private fun testAllPings() {
-        val list = servers
-        if (list.isEmpty()) { toast("سروری برای تست وجود ندارد."); return }
+        val list = servers.filter { it.engine != ConfigEngine.SLIPNET && it.meta.host.isNotBlank() }
+        if (list.isEmpty()) { toast("این پروفایل‌ها توسط Resolverهای SlipNet بررسی می‌شوند."); return }
         list.forEach { runPing(it, false) }
     }
 
     private fun measureSelectedPing(force: Boolean) {
         val item = selectedItem() ?: return
+        if (item.engine == ConfigEngine.SLIPNET || item.meta.host.isBlank()) { bindHomePing(); return }
         val key = item.raw.trim()
         if (key.isEmpty()) return
         PingTester.test(key, item.meta, force) {
@@ -912,6 +945,11 @@ class MainActivity : Activity() {
         val v = homePing ?: return
         val raw = currentConfig().trim()
         if (raw.isEmpty()) { v.text = ""; return }
+        if (ConfigDetector.detect(raw) == ConfigEngine.SLIPNET) {
+            v.text = "Resolver scan in SlipNet"
+            v.setTextColor(Palette.cyan)
+            return
+        }
         if (PingTester.isRunning(raw)) { v.text = "Ping: measuring…"; v.setTextColor(Palette.muted); return }
         val r = PingTester.cached(raw)
         if (r == null) { v.text = if (state == OrbState.CONNECTED) "Ping: measuring…" else "Ping: not tested"; v.setTextColor(Palette.muted); return }
@@ -1069,8 +1107,12 @@ class MainActivity : Activity() {
         val g1 = GlassCard(this, 20f, pad = 4)
         settingRow(g1, Icon.INFO, "Active engine", "Detected from the selected profile", engineLabelShort()) { }
         settingRow(g1, Icon.GLOBE, "Connection mode", "VPN or local SOCKS5 / HTTP proxy", connectionModeSummary()) { showConnectionModeDialog() }
+        settingRow(g1, Icon.GLOBE, "SlipNet protocols & settings", "DNS tunnels, resolver pools, SSH chains, Slipstream, NaiveProxy and Tor", "Open") { showSlipNetDialog() }
         settingRow(g1, Icon.SHIELD, "Split tunneling", "Choose apps included in or excluded from Xray", splitSummary()) { showSplitTunnelDialog() }
-        settingRow(g1, Icon.BOLT, "SNI Spoof", "Edit TLS / REALITY server name for a profile", null) { selectedItem()?.let { showSniDialog(it) } ?: toast("Select a server first.") }
+        settingRow(g1, Icon.BOLT, "TLS server name", "Edit TLS / REALITY serverName on a local copy", null) { selectedItem()?.let { showSniDialog(it) } ?: toast("Select a server first.") }
+        settingRow(g1, Icon.SHIELD, "Patterniha SNI injection", "Original wrong-sequence packet method • rooted Android only", "Configure") { selectedItem()?.let { showPatternihaDialog(it) } ?: toast("Select a TLS/REALITY server first.") }
+        settingRow(g1, Icon.GLOBE, "Website ping target", "HTTP response-time check for a URL you choose", "Change") { showPingUrlDialog() }
+        settingRow(g1, Icon.SHIELD, "MHRV CA certificate", "Export the certificate for Android user trust", "Export") { exportMhrvCa() }
         settingRow(g1, Icon.COPY, "Connection logs", "Recent connection activity", "Open") { showConnectionLogs() }
         settingRow(g1, Icon.COPY, "Copy diagnostics", "Safe device and connection summary", null) { copyDiagnostics() }
         settingRow(g1, Icon.TRASH, "Clear saved config", "Remove the selected profile from this phone", null) { clearConfig() }
@@ -1082,6 +1124,210 @@ class MainActivity : Activity() {
         settingRow(g2, Icon.REFRESH, "App updates", "بررسی نسخه جدید در GitHub و نصب APK", "Check") { checkForUpdates() }
         col.addView(g2, lp(MATCH, WRAP, 12))
         return sv
+    }
+
+    private fun showSlipNetDialog() {
+        val selected = selectedItem()
+        val selectedIsSlipNet = selected?.engine == ConfigEngine.SLIPNET
+        val protocolText = "DNSTT / DNSTT+SSH\nNoizDNS / NoizDNS+SSH\nVayDNS / VayDNS+SSH\nSoar / Soar+SSH\nSlipstream / Slipstream+SSH\nSSH · NaiveProxy · DoH · Tor"
+        val message = buildString {
+            append("TIREXNET imports SlipNet share links and hands them to the official SlipNet app. The actual tunnel and its advanced settings run there because Android allows only one active VPN service at a time.\n\n")
+            append("Supported SlipNet profile families:\n")
+            append(protocolText)
+            append("\n\nSingle and encrypted SlipNet profiles open directly. Encrypted bundles are copied to the clipboard; in SlipNet, choose Import and paste them.\n\n")
+            append(if (selectedIsSlipNet) "The selected profile is a SlipNet profile." else "Select a SlipNet profile in Servers to hand it over.")
+        }
+        val dialog = dialogBuilder().setTitle("SLIPNET PROTOCOL SETTINGS")
+            .setMessage(message)
+            .setNegativeButton("Close", null)
+            .setNeutralButton("Open SlipNet app", null)
+            .setPositiveButton(if (selectedIsSlipNet) "Open selected profile" else "Open SlipNet") { _, _ ->
+                if (selectedIsSlipNet) openSlipNetProfile(selected!!.raw) else handleSlipNetResult(SlipNetEngine.openApp(this))
+            }.create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                dialog.dismiss()
+                handleSlipNetResult(SlipNetEngine.openApp(this), selected?.takeIf { it.engine == ConfigEngine.SLIPNET }?.raw.orEmpty())
+                if (selectedIsSlipNet) toast("In SlipNet, open Settings to manage resolver, DNS transport, SSH chaining and tunnel options.")
+            }
+        }
+        dialog.show()
+    }
+
+    private fun openSlipNetProfile(raw: String) {
+        handleSlipNetResult(SlipNetEngine.openProfile(this, raw), raw)
+    }
+
+    private fun handleSlipNetResult(result: SlipNetEngine.OpenResult, profileRaw: String = "") {
+        when (result) {
+            is SlipNetEngine.OpenResult.Opened -> {
+                appendConnectionLog(result.message)
+                toast(result.message)
+                // Do not mark TIREXNET as connected: the VPN is owned by SlipNet.
+                statusMessage = result.message
+                if (state != OrbState.CONNECTED && state != OrbState.CONNECTING) updateConnectionUi()
+            }
+            is SlipNetEngine.OpenResult.Missing -> {
+                val copyableProfile = profileRaw.trim().takeIf {
+                    it.isNotBlank() && EngineProfiles.decodeSlipNet(it) != null
+                }
+                val builder = dialogBuilder().setTitle("SlipNet companion required")
+                    .setMessage(result.message + "\n\nTIREXNET keeps the original profile unchanged.")
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Get SlipNet") { _, _ ->
+                        runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(SlipNetEngine.RELEASES_URL))) }
+                    }
+                if (copyableProfile != null) builder.setNeutralButton("Copy profile", null)
+                builder.create().also { dialog ->
+                    dialog.setOnShowListener {
+                        if (copyableProfile != null) {
+                            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                                SlipNetEngine.copyProfile(this, copyableProfile)
+                                dialog.dismiss()
+                                toast("SlipNet profile copied.")
+                            }
+                        }
+                    }
+                    dialog.show()
+                }
+            }
+            is SlipNetEngine.OpenResult.Failed -> toast(result.message)
+        }
+    }
+
+    private fun startAuxiliaryProxyEngine(engine: ConfigEngine, raw: String) {
+        val label = when (engine) {
+            ConfigEngine.MHRV -> "MHRV"
+            ConfigEngine.DNS_TUNNEL -> "StormDNS"
+            ConfigEngine.SNI_SPOOF -> "Patterniha SNI"
+            else -> "Tunnel"
+        }
+        applyStatus("Starting $label engine…", false)
+        io.execute {
+            val error = when (engine) {
+                ConfigEngine.MHRV -> MhrvEngine.start(this, raw)
+                ConfigEngine.DNS_TUNNEL -> StormDnsEngine.start(this, raw)
+                ConfigEngine.SNI_SPOOF -> SniSpoofEngine.start(this, raw)
+                else -> "Unsupported auxiliary engine."
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) {
+                    stopAuxiliaryEngine(engine)
+                    return@runOnUiThread
+                }
+                if (error != null) {
+                    applyStatus(error, false)
+                    toast(error)
+                    return@runOnUiThread
+                }
+                val intent = Intent(this, XrayVpnService::class.java)
+                    .setAction(XrayVpnService.ACTION_START)
+                    .putExtra(XrayVpnService.EXTRA_CONFIG, raw)
+                    .putExtra(XrayVpnService.EXTRA_ENGINE, engine.name)
+                try {
+                    if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
+                } catch (_: Throwable) {
+                    stopAuxiliaryEngine(engine)
+                    applyStatus("The VPN bridge could not start.", false)
+                }
+            }
+        }
+    }
+
+    private fun stopAuxiliaryEngine(engine: ConfigEngine) {
+        when (engine) {
+            ConfigEngine.MHRV -> MhrvEngine.stop()
+            ConfigEngine.DNS_TUNNEL -> StormDnsEngine.stop()
+            ConfigEngine.SNI_SPOOF -> SniSpoofEngine.stop()
+            else -> Unit
+        }
+    }
+
+    private fun exportMhrvCa() {
+        try {
+            val cert = File(cacheDir, "tirexnet-mhrv-ca.crt")
+            com.therealaleph.mhrv.Native.setDataDir(filesDir.absolutePath)
+            if (!com.therealaleph.mhrv.Native.exportCa(cert.absolutePath) || !cert.exists()) {
+                toast("MHRV certificate could not be exported. Build with the MHRV native engine first.")
+                return
+            }
+            val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "application/x-x509-ca-cert"
+                putExtra(Intent.EXTRA_TITLE, "tirexnet-mhrv-ca.crt")
+            }
+            startActivityForResult(intent, PICK_MHRV_CA)
+        } catch (_: UnsatisfiedLinkError) {
+            toast("MHRV native engine is not included in this build.")
+        } catch (_: Throwable) {
+            toast("Certificate export is unavailable on this device.")
+        }
+    }
+
+    private fun showPingUrlDialog() {
+        val input = EditText(this).apply {
+            hint = "https://www.gstatic.com/generate_204"
+            setSingleLine(true)
+            textSize = 13f
+            setPadding(dpi(12), dpi(8), dpi(12), dpi(8))
+            background = fieldBackground(false)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setText(prefs.getString("ping_test_url", "https://www.gstatic.com/generate_204"))
+            selectAll()
+        }
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(18), dpi(8), dpi(18), 0) }
+        box.addView(tv("This check measures the response time of the website from the phone's normal internet connection. It is separate from each server's endpoint ping.", 11f, Palette.muted, 0), lp(MATCH, WRAP, 0, 10))
+        box.addView(input, lp(MATCH, dpi(48), 6))
+        val dialog = dialogBuilder().setTitle("WEBSITE PING TARGET").setView(box)
+            .setNegativeButton("Cancel", null).setNeutralButton("Test now", null).setPositiveButton("Save", null).create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                val value = input.text.toString().trim()
+                if (!validPingUrl(value)) { input.background = fieldBackground(true); toast("Enter a valid HTTP or HTTPS URL."); return@setOnClickListener }
+                prefs.edit().putString("ping_test_url", value).apply()
+                testPingTarget(value)
+            }
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val value = input.text.toString().trim()
+                if (!validPingUrl(value)) { input.background = fieldBackground(true); toast("Enter a valid HTTP or HTTPS URL."); return@setOnClickListener }
+                prefs.edit().putString("ping_test_url", value).apply()
+                dialog.dismiss()
+                toast("Website ping target saved.")
+            }
+        }
+        dialog.show()
+    }
+
+    private fun validPingUrl(value: String): Boolean = runCatching {
+        val u = URL(value)
+        (u.protocol.equals("http", true) || u.protocol.equals("https", true)) && !u.host.isNullOrBlank()
+    }.getOrDefault(false)
+
+    private fun testPingTarget(value: String) {
+        io.execute {
+            val network = phoneNetwork()
+            var resultText = "Website check failed."
+            try {
+                val url = URL(value)
+                val connection = (network?.openConnection(url) ?: url.openConnection()) as HttpURLConnection
+                connection.connectTimeout = 5000
+                connection.readTimeout = 5000
+                connection.instanceFollowRedirects = true
+                connection.requestMethod = "GET"
+                connection.setRequestProperty("Range", "bytes=0-0")
+                connection.setRequestProperty("Cache-Control", "no-cache")
+                connection.useCaches = false
+                val started = SystemClock.elapsedRealtimeNanos()
+                val code = connection.responseCode
+                val elapsed = ((SystemClock.elapsedRealtimeNanos() - started) / 1_000_000L).coerceAtLeast(1L)
+                runCatching { (if (code >= 400) connection.errorStream else connection.inputStream)?.use { it.read() } }
+                resultText = "Website response: ${elapsed} ms (HTTP $code)"
+                connection.disconnect()
+            } catch (_: Throwable) {
+                resultText = "Website is unreachable from the phone's current internet connection."
+            }
+            runOnUiThread { if (!isFinishing && !isDestroyed) toast(resultText) }
+        }
     }
 
     private fun infoRow(parent: LinearLayout, label: String): TextView {
@@ -1308,17 +1554,26 @@ class MainActivity : Activity() {
     }.getOrDefault(raw.trim().hashCode().toString())
 
     private fun showServerActions(item: ServerItem) {
-        val options = if (item.engine == ConfigEngine.XRAY) arrayOf("Edit profile", "Set SNI spoof", "Remove profile") else arrayOf("Edit profile", "Remove profile")
+        // Subscription data is immutable: no edit/delete action may change or hide it.
+        if (!item.local) {
+            toast("Subscription profiles are read-only. Add a local copy to customize it.")
+            return
+        }
+        val options = if (item.engine == ConfigEngine.XRAY) arrayOf("Edit profile", "Change TLS serverName", "Remove profile") else arrayOf("Edit profile", "Remove profile")
         dialogBuilder().setTitle(item.name).setItems(options) { _, which ->
             when (options[which]) {
                 "Edit profile" -> editServerDialog(item)
-                "Set SNI spoof" -> showSniDialog(item)
+                "Change TLS serverName" -> showSniDialog(item)
                 "Remove profile" -> removeServerProfile(item)
             }
         }.show()
     }
 
     private fun editServerDialog(item: ServerItem) {
+        if (!item.local) {
+            toast("Subscription profiles cannot be edited. Import or duplicate one as a local profile first.")
+            return
+        }
         val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(16), dpi(8), dpi(16), dpi(4)) }
         val name = EditText(this).apply { setSingleLine(true); hint = "Profile name"; setText(item.name); textSize = 13f; background = fieldBackground(false); setPadding(dpi(10), dpi(8), dpi(10), dpi(8)) }
         val raw = EditText(this).apply { hint = "Paste or edit the profile"; setText(item.raw); textSize = 10.5f; minLines = 5; maxLines = 9; gravity = Gravity.TOP; inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE; background = fieldBackground(false); setPadding(dpi(10), dpi(8), dpi(10), dpi(8)) }
@@ -1338,10 +1593,6 @@ class MainActivity : Activity() {
                 val locals = loadLocalProfiles().filterNot { it.raw.trim() == item.raw.trim() }.toMutableList()
                 locals.add(updated)
                 if (!persistLocalProfiles(locals)) { toast("Could not save this profile."); return@setOnClickListener }
-                if (!item.local) {
-                    val hidden = prefs.getStringSet("hidden_remote_configs", emptySet()).orEmpty().toMutableSet()
-                    hidden.add(configKey(item.raw)); prefs.edit().putStringSet("hidden_remote_configs", hidden).apply()
-                }
                 servers = mergeSavedAndRemote(servers.filterNot { it.local })
                 serversState = ServersState.READY
                 if (currentConfig().trim() == item.raw.trim()) setConfig(updatedRaw) else rebuildServerList(-1)
@@ -1353,14 +1604,15 @@ class MainActivity : Activity() {
     }
 
     private fun removeServerProfile(item: ServerItem) {
+        if (!item.local) {
+            toast("Subscription profiles cannot be removed from the subscription.")
+            return
+        }
         dialogBuilder().setTitle("Remove profile?").setMessage("This profile will be removed from your server list on this phone.")
             .setNegativeButton("Cancel", null).setPositiveButton("Remove") { _, _ ->
-                if (item.local) {
-                    persistLocalProfiles(loadLocalProfiles().filterNot { it.raw.trim() == item.raw.trim() })
-                } else {
-                    val hidden = prefs.getStringSet("hidden_remote_configs", emptySet()).orEmpty().toMutableSet()
-                    hidden.add(configKey(item.raw)); prefs.edit().putStringSet("hidden_remote_configs", hidden).apply()
-                }
+                // This dialog can only be opened for a local profile. Remote
+                // subscription items are never written to a hidden/deleted list.
+                persistLocalProfiles(loadLocalProfiles().filterNot { it.raw.trim() == item.raw.trim() })
                 if (currentConfig().trim() == item.raw.trim()) prefs.edit().remove("last_config").apply()
                 servers = mergeSavedAndRemote(servers.filterNot { it.local }); serversState = ServersState.READY
                 rebuildServerList(-1); bindServerSummary(); toast("Profile removed.")
@@ -1422,9 +1674,68 @@ class MainActivity : Activity() {
         }
     }.getOrNull()
 
+    private fun showPatternihaDialog(item: ServerItem) {
+        if (item.engine != ConfigEngine.XRAY) {
+            toast("Patterniha requires a VLESS, VMess, Trojan or Shadowsocks TLS/REALITY profile.")
+            return
+        }
+        if (!EngineProfiles.supportsPatterniha(item.raw)) {
+            toast("This server does not use TLS or REALITY. Patterniha needs a TLS ClientHello.")
+            return
+        }
+        val ip = EditText(this).apply {
+            hint = "Upstream IPv4 address (required)"
+            setSingleLine(true); textSize = 13f; setPadding(dpi(12), dpi(8), dpi(12), dpi(8)); background = fieldBackground(false)
+            inputType = InputType.TYPE_CLASS_TEXT
+            val candidate = item.meta.host
+            if (candidate.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}$"))) setText(candidate)
+        }
+        val port = EditText(this).apply {
+            hint = "Upstream port"; setSingleLine(true); textSize = 13f; setPadding(dpi(12), dpi(8), dpi(12), dpi(8)); background = fieldBackground(false)
+            inputType = InputType.TYPE_CLASS_NUMBER; setText(item.meta.port.takeIf { it in 1..65535 }?.toString() ?: "443")
+        }
+        val fakeSni = EditText(this).apply {
+            hint = "Decoy SNI allowed by your network"; setSingleLine(true); textSize = 13f; setPadding(dpi(12), dpi(8), dpi(12), dpi(8)); background = fieldBackground(false)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI; setText("www.google.com")
+        }
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(18), dpi(6), dpi(18), 0) }
+        box.addView(tv("Uses the original Patterniha wrong-TCP-sequence packet injection engine. This requires Magisk / KernelSU / APatch root access and a kernel that permits raw packet capture/injection. It is not the same as changing TLS serverName. The subscription profile remains unchanged; a separate local profile will be created.", 11f, Palette.muted, 0), lp(MATCH, WRAP, 0, 12))
+        box.addView(tv("Upstream IP", 10f, Palette.muted, 1), lp(MATCH, WRAP, 4))
+        box.addView(ip, lp(MATCH, dpi(46), 4, 8))
+        box.addView(tv("Port", 10f, Palette.muted, 1), lp(MATCH, WRAP, 2))
+        box.addView(port, lp(MATCH, dpi(46), 4, 8))
+        box.addView(tv("Fake SNI", 10f, Palette.muted, 1), lp(MATCH, WRAP, 2))
+        box.addView(fakeSni, lp(MATCH, dpi(46), 4, 8))
+        val dialog = dialogBuilder().setTitle("PATTERNIHA SNI INJECTION").setView(box)
+            .setNegativeButton("Cancel", null).setPositiveButton("Create local profile", null).create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val host = ip.text.toString().trim()
+                val targetPort = port.text.toString().toIntOrNull() ?: 0
+                val decoy = fakeSni.text.toString().trim().lowercase(Locale.US)
+                val validIp = host.matches(Regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}$")) && host.split('.').all { part -> val n = part.toIntOrNull(); n != null && n in 0..255 && (part == "0" || !part.startsWith('0')) }
+                val validSni = decoy.length <= 253 && decoy.split('.').all { it.isNotBlank() && it.length <= 63 && it.matches(Regex("(?i)^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")) }
+                if (!validIp || targetPort !in 1..65535 || !validSni) {
+                    toast("Enter a valid IPv4 address, port and decoy hostname.")
+                    return@setOnClickListener
+                }
+                val raw = EngineProfiles.encodeSniSpoof("${item.name} • Patterniha", item.raw, host, targetPort, decoy)
+                val newItem = ServerItem("${item.name} • Patterniha", raw, ConfigEngine.SNI_SPOOF, ProfileParser.parse(raw), true, item.country)
+                val locals = loadLocalProfiles().filterNot { it.raw.trim() == raw.trim() }.toMutableList()
+                locals.add(newItem)
+                if (!persistLocalProfiles(locals)) { toast("Could not save the local Patterniha profile."); return@setOnClickListener }
+                servers = mergeSavedAndRemote(servers.filterNot { it.local }); serversState = ServersState.READY
+                setConfig(raw)
+                dialog.dismiss()
+                toast("Local Patterniha profile created. Root permission is required when connecting.")
+            }
+        }
+        dialog.show()
+    }
+
     private fun showSniDialog(item: ServerItem) {
         val edit = EditText(this).apply { hint = "SNI hostname"; setSingleLine(true); setText(extractSni(item.raw)); textSize = 13f; setPadding(dpi(12), dpi(8), dpi(12), dpi(8)); background = fieldBackground(false) }
-        dialogBuilder().setTitle("SNI SPOOF")
+        dialogBuilder().setTitle("TLS SERVER NAME")
             .setMessage("Sets the TLS / REALITY serverName for this Xray profile.")
             .setView(edit).setNegativeButton("Cancel", null).setPositiveButton("Save", null)
             .create().also { d ->
@@ -1435,9 +1746,8 @@ class MainActivity : Activity() {
                         val locals = loadLocalProfiles().filterNot { it.raw.trim() == item.raw.trim() }.toMutableList()
                         locals.add(ServerItem(item.name, updatedRaw, ConfigDetector.detect(updatedRaw), ProfileParser.parse(updatedRaw), true, item.country))
                         if (!persistLocalProfiles(locals)) { toast("Could not save this profile."); return@setOnClickListener }
-                        if (!item.local) {
-                            val hidden = prefs.getStringSet("hidden_remote_configs", emptySet()).orEmpty().toMutableSet(); hidden.add(configKey(item.raw)); prefs.edit().putStringSet("hidden_remote_configs", hidden).apply()
-                        }
+                        // A derived SNI profile is a new local profile. Keep the original
+                        // subscription entry untouched and visible.
                         servers = mergeSavedAndRemote(servers.filterNot { it.local }); serversState = ServersState.READY
                         if (currentConfig().trim() == item.raw.trim()) setConfig(updatedRaw) else rebuildServerList(-1)
                         d.dismiss(); toast("SNI setting saved.")
@@ -1467,10 +1777,11 @@ class MainActivity : Activity() {
             cancelSmartConnect(false); ensureServersLoaded(); toast("Load your servers first, then try Smart Connect."); return
         }
         val candidates = (if (prefs.getString("connection_mode", "vpn") == "proxy")
-            servers.filter { it.engine == ConfigEngine.XRAY } else servers).take(60)
+            servers.filter { it.engine in setOf(ConfigEngine.XRAY, ConfigEngine.MHRV, ConfigEngine.DNS_TUNNEL, ConfigEngine.SNI_SPOOF) }
+        else servers.filter { it.engine != ConfigEngine.SLIPNET && it.meta.host.isNotBlank() }).take(60)
         if (candidates.isEmpty()) {
             cancelSmartConnect(false)
-            toast(if (prefs.getString("connection_mode", "vpn") == "proxy") "No Xray profile is available for local proxy mode." else "No server is available.")
+            toast(if (prefs.getString("connection_mode", "vpn") == "proxy") "No supported local-proxy profile is available." else "No server is available.")
             return
         }
         smartConnectRunId++
@@ -1639,10 +1950,10 @@ class MainActivity : Activity() {
         background = Palette.glass(this@MainActivity, 16f, Palette.stroke, Palette.fieldFill, Palette.fieldFill)
     }
 
-    private fun primaryButton(label: String, onClick: () -> Unit): TextView = tv(label, 14f, Color.rgb(2, 10, 24), 2).apply {
+    private fun primaryButton(label: String, onClick: () -> Unit): TextView = tv(label, 14f, Palette.onPrimary, 2).apply {
         gravity = Gravity.CENTER
         letterSpacing = 0.06f
-        background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(Palette.cyan, Palette.mint)).apply { cornerRadius = dp(16f) }
+        background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(Palette.blue, Palette.cyan)).apply { cornerRadius = dp(16f) }
         isClickable = true
         setOnClickListener { onClick() }
         pressable(0.97f)
@@ -1663,7 +1974,13 @@ class MainActivity : Activity() {
     private fun updateConnectionUi() {
         val title: String; val desc: String; val color: Int; val chip: String
         when (state) {
-            OrbState.DISCONNECTED -> { title = "Disconnected"; desc = "اتصال برقرار نیست. برای شروع، دکمه را بزن."; color = Palette.muted; chip = "OFFLINE" }
+            OrbState.DISCONNECTED -> {
+                title = "Disconnected"
+                desc = if (ConfigDetector.detect(currentConfig()) == ConfigEngine.SLIPNET)
+                    "This is a SlipNet profile. Tap Connect to open the official SlipNet engine."
+                else "اتصال برقرار نیست. برای شروع، دکمه را بزن."
+                color = Palette.muted; chip = "OFFLINE"
+            }
             OrbState.CONNECTING -> { title = "Connecting"; desc = statusMessage.ifBlank { "در حال راه‌اندازی تونل…" }; color = Palette.cyan; chip = "CONNECTING" }
             OrbState.CONNECTED -> { title = "Connected"; desc = "تونل توسط هسته‌ی VPN تأیید شد."; color = Palette.mint; chip = "SECURE" }
             OrbState.DISCONNECTING -> { title = "Disconnecting"; desc = "در حال آزادسازی تونل…"; color = Palette.ice; chip = "CLOSING" }
@@ -1767,9 +2084,13 @@ class MainActivity : Activity() {
             showTab(1)
             return
         }
+        if (engine == ConfigEngine.SLIPNET) {
+            openSlipNetProfile(raw)
+            return
+        }
         val proxyMode = prefs.getString("connection_mode", "vpn") == "proxy"
-        if (proxyMode && engine != ConfigEngine.XRAY) {
-            toast("Local proxy mode currently supports Xray profiles. Switch to VPN mode for this profile.")
+        if (proxyMode && engine !in setOf(ConfigEngine.XRAY, ConfigEngine.MHRV, ConfigEngine.DNS_TUNNEL, ConfigEngine.SNI_SPOOF)) {
+            toast("Local proxy mode supports Xray, MHRV, StormDNS and Patterniha profiles only.")
             return
         }
         pendingRaw = raw
@@ -1797,6 +2118,7 @@ class MainActivity : Activity() {
                 val intent = Intent(this, XrayVpnService::class.java)
                     .setAction(XrayVpnService.ACTION_START)
                     .putExtra(XrayVpnService.EXTRA_CONFIG, pendingRaw)
+                    .putExtra(XrayVpnService.EXTRA_ENGINE, pendingEngine.name)
                 if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
             }
             ConfigEngine.WIREGUARD, ConfigEngine.AMNEZIAWG -> {
@@ -1812,6 +2134,8 @@ class MainActivity : Activity() {
                     runOnUiThread { applyStatus(message, active) }
                 }
             }
+            ConfigEngine.MHRV, ConfigEngine.DNS_TUNNEL, ConfigEngine.SNI_SPOOF -> startAuxiliaryProxyEngine(pendingEngine, pendingRaw)
+            ConfigEngine.SLIPNET -> openSlipNetProfile(pendingRaw)
             else -> toast("یک پروفایل پشتیبانی‌شده انتخاب کن.")
         }
     }
@@ -1831,10 +2155,19 @@ class MainActivity : Activity() {
             issued = true
             OpenVpnEngine.stop { message, active -> runOnUiThread { applyStatus(message, active) } }
         }
-        if (engine == "XRAY" || XrayVpnService.isActive) {
+        if (engine in setOf("XRAY", "MHRV", "DNS_TUNNEL", "SNI_SPOOF") || XrayVpnService.isActive) {
             issued = true
             startService(Intent(this, XrayVpnService::class.java).setAction(XrayVpnService.ACTION_STOP))
         }
+        // Xray's ACTION_STOP owns auxiliary teardown. This delayed cleanup is only a
+        // fallback for cases where the service cannot receive the stop intent.
+        handler.postDelayed({
+            if (!XrayVpnService.isActive) {
+                MhrvEngine.stop()
+                StormDnsEngine.stop()
+                SniSpoofEngine.stop()
+            }
+        }, 900L)
         // Safety net so the UI can never hang in "Disconnecting".
         handler.postDelayed({
             if (state == OrbState.DISCONNECTING) applyStatus("Disconnected.", false)
@@ -1854,6 +2187,15 @@ class MainActivity : Activity() {
             val uri = data?.data ?: return
             setAddStatus("Importing…", false)
             importUri(uri)
+        } else if (requestCode == PICK_MHRV_CA && resultCode == RESULT_OK) {
+            val uri = data?.data ?: return
+            try {
+                val cert = File(cacheDir, "tirexnet-mhrv-ca.crt")
+                cert.inputStream().use { input -> contentResolver.openOutputStream(uri)?.use { output -> input.copyTo(output) } }
+                toast("Certificate exported. Install it in Android Settings → Security → Encryption & credentials → Install a certificate → CA certificate. Some apps reject user-installed certificates.")
+            } catch (_: Throwable) {
+                toast("Could not save the MHRV certificate file.")
+            }
         }
     }
 
@@ -1896,9 +2238,10 @@ class MainActivity : Activity() {
         for (profile in loadLocalProfiles()) {
             if (seen.add(profile.raw.trim())) merged.add(profile)
         }
-        val hiddenRemote = prefs.getStringSet("hidden_remote_configs", emptySet()).orEmpty()
+        // Subscription profiles are immutable and cannot be hidden/deleted.
+        // Ignore stale hidden_remote_configs values written by older builds.
         for (profile in remote) {
-            if (configKey(profile.raw) !in hiddenRemote && seen.add(profile.raw.trim())) merged.add(profile)
+            if (seen.add(profile.raw.trim())) merged.add(profile)
         }
         return merged
     }
@@ -1944,6 +2287,7 @@ class MainActivity : Activity() {
             val ok = when (meta.engine) {
                 ConfigEngine.UNKNOWN -> false
                 ConfigEngine.XRAY -> structured || meta.host.isNotBlank()
+                ConfigEngine.SLIPNET -> EngineProfiles.decodeSlipNet(c) != null
                 else -> meta.host.isNotBlank()
             }
             if (!ok) { bad++; continue }
@@ -1990,7 +2334,7 @@ class MainActivity : Activity() {
         }
         if (o.added.isEmpty()) {
             val msg = if (o.duplicates > 0 && o.invalid == 0) "این کانفیگ قبلاً در لیست هست."
-            else "کانفیگ پشتیبانی‌شده‌ای پیدا نشد. VLESS / VMess / Trojan / Shadowsocks / WireGuard / AmneziaWG / OpenVPN لازم است."
+            else "کانفیگ پشتیبانی‌شده‌ای پیدا نشد. Xray / WireGuard / AmneziaWG / OpenVPN / MHRV / StormDNS / Patterniha / SlipNet لازم است."
             importFailed(msg)
             return
         }
@@ -2023,6 +2367,10 @@ class MainActivity : Activity() {
         ConfigEngine.WIREGUARD -> "WIREGUARD"
         ConfigEngine.AMNEZIAWG -> "AMNEZIAWG"
         ConfigEngine.OPENVPN -> "OPENVPN"
+        ConfigEngine.MHRV -> "MHRV"
+        ConfigEngine.DNS_TUNNEL -> "STORMDNS"
+        ConfigEngine.SNI_SPOOF -> "PATTERNIHA SNI"
+        ConfigEngine.SLIPNET -> "SLIPNET COMPANION"
         else -> "NONE"
     }
 
@@ -2546,7 +2894,7 @@ class MainActivity : Activity() {
         // --- 3. Raw editor
         val rawCard = GlassCard(this, 22f, pad = 16)
         rawCard.addView(tv("RAW CONFIG", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
-        rawCard.addView(tv("For advanced options: paste Xray JSON, a share link or a full WireGuard / AmneziaWG config.", 11.5f, Palette.muted, 0), lp(MATCH, WRAP, 6))
+        rawCard.addView(tv("Paste Xray, WireGuard, OpenVPN, MHRV, StormDNS, Patterniha or SlipNet share links. SlipNet profiles are handed to the official SlipNet app.", 11.5f, Palette.muted, 0), lp(MATCH, WRAP, 6))
         val raw = EditText(this).apply {
             hint = "vless://…  |  { \"outbounds\": … }  |  [Interface] …"
             textSize = 12f
@@ -2625,7 +2973,7 @@ class MainActivity : Activity() {
             minHeight = dpi(40)
             setPadding(dpi(14), dpi(9), dpi(14), dpi(9))
             background = if (selected)
-                GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(Palette.cyan, Palette.mint)).apply { cornerRadius = dp(20f) }
+                GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(Palette.blue, Palette.cyan)).apply { cornerRadius = dp(20f) }
             else Palette.glass(this@MainActivity, 20f)
             isClickable = true
             contentDescription = label
@@ -2683,12 +3031,18 @@ class MainActivity : Activity() {
                     textSize = 14f
                     setTextColor(Palette.text)
                     setHintTextColor(Palette.dim)
-                    setSingleLine(true)
-                    setPadding(dpi(14), 0, dpi(14), 0)
+                    setSingleLine(f.kind != FieldKind.MULTILINE)
+                    if (f.kind == FieldKind.MULTILINE) {
+                        minLines = 3
+                        maxLines = 6
+                        gravity = Gravity.TOP or Gravity.START
+                    }
+                    setPadding(dpi(14), dpi(if (f.kind == FieldKind.MULTILINE) 10 else 0), dpi(14), dpi(10))
                     background = fieldBackground(false)
                     inputType = when (f.kind) {
                         FieldKind.NUMBER -> InputType.TYPE_CLASS_NUMBER
                         FieldKind.SECRET -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                        FieldKind.MULTILINE -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                         else -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                     }
                     imeOptions = EditorInfo.IME_ACTION_NEXT
@@ -2702,7 +3056,7 @@ class MainActivity : Activity() {
                     })
                 }
                 manualFieldViews[f.key] = et
-                box.addView(et, lp(MATCH, dpi(50), 6))
+                box.addView(et, lp(MATCH, dpi(if (f.kind == FieldKind.MULTILINE) 116 else 50), 6))
             }
         }
         // Optional flag source for manual profiles (the only reliable country metadata we have for them).
@@ -2765,5 +3119,6 @@ class MainActivity : Activity() {
     companion object {
         private const val VPN_REQUEST = 71
         private const val PICK_CONFIG = 72
+        private const val PICK_MHRV_CA = 78
     }
 }
