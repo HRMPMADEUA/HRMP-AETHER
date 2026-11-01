@@ -57,10 +57,10 @@ class ConnectOrb(ctx: Context) : View(ctx) {
     private val dash = DashPathEffect(floatArrayOf(dpf(1.5f), dpf(10f)), 0f)
 
     private fun colorFor(s: OrbState): Int = when (s) {
-        OrbState.DISCONNECTED -> Color.rgb(120, 170, 230)
+        OrbState.DISCONNECTED -> Palette.ice
         OrbState.CONNECTING -> Palette.cyan
-        OrbState.CONNECTED -> Color.rgb(0, 238, 190)
-        OrbState.DISCONNECTING -> Color.rgb(110, 200, 255)
+        OrbState.CONNECTED -> Palette.mint
+        OrbState.DISCONNECTING -> Palette.ice
         OrbState.FAILED -> Palette.red
         OrbState.PERMISSION -> Palette.amber
     }
