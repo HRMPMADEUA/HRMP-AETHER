@@ -49,7 +49,7 @@ object OpenVpnEngine {
             }
         } catch (e: Throwable) {
             isActive = false
-            callback("OpenVPN failed: " + ConfigSanitizer.redact(e.message ?: e.javaClass.simpleName), false)
+            callback("Connection failed. Check the selected profile and try again.", false)
         }
     }
 
@@ -60,7 +60,7 @@ object OpenVpnEngine {
         try {
             c.stop { message, active -> isActive = active; callback(ConfigSanitizer.redact(message), active) }
         } catch (e: Throwable) {
-            callback("Disconnect failed: " + ConfigSanitizer.redact(e.message ?: e.javaClass.simpleName), isActive)
+            callback("Disconnect could not be completed. Please try again.", isActive)
         }
     }
 }
