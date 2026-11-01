@@ -4,25 +4,19 @@ import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.ColorFilter
-import android.graphics.DashPathEffect
 import android.graphics.Paint
-import android.graphics.PorterDuff
-import android.graphics.PorterDuffColorFilter
 import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Shader
-import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
 import android.view.animation.DecelerateInterpolator
-import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
 
 enum class OrbState { DISCONNECTED, CONNECTING, CONNECTED, DISCONNECTING, FAILED, PERMISSION }
 
-/** Large circular connection control. Everything is Canvas-drawn (GPU composited); loops stop when hidden. */
+/** A soft, Psiphon-inspired gradient globe used as the main connection visual. */
 class ConnectOrb(ctx: Context) : View(ctx) {
     var onToggle: (() -> Unit)? = null
 
@@ -30,214 +24,118 @@ class ConnectOrb(ctx: Context) : View(ctx) {
         set(value) {
             if (field == value) return
             field = value
-            startTransition()
             invalidate()
         }
 
-    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val rect = RectF()
-
-    private var fromColor = colorFor(OrbState.DISCONNECTED)
-    private var toColor = fromColor
-    private var fromI = intensityFor(OrbState.DISCONNECTED)
-    private var toI = fromI
-    private var curColor = fromColor
-    private var curI = fromI
-    private var transition: ValueAnimator? = null
-
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val oval = RectF()
     private var pressScale = 1f
-    private var pressAnim: ValueAnimator? = null
-    private var windowVisible = true
+    private var pressAnimator: ValueAnimator? = null
+    private var pulseAnimator: ValueAnimator? = null
+    private var pulse = 0f
+    private var visibleOnWindow = true
 
-    private var glowShader: Shader? = null
-    private var discShader: Shader? = null
-    private var ticks = FloatArray(0)
-    private var filterColor = 0
-    private var filter: ColorFilter? = null
-    private val dash = DashPathEffect(floatArrayOf(dpf(1.5f), dpf(10f)), 0f)
-
-    private fun colorFor(s: OrbState): Int = when (s) {
-        OrbState.DISCONNECTED -> Palette.ice
-        OrbState.CONNECTING -> Palette.cyan
-        OrbState.CONNECTED -> Palette.mint
-        OrbState.DISCONNECTING -> Palette.ice
-        OrbState.FAILED -> Palette.red
-        OrbState.PERMISSION -> Palette.amber
-    }
-
-    private fun intensityFor(s: OrbState): Float = when (s) {
-        OrbState.DISCONNECTED -> 0.5f
-        OrbState.CONNECTING -> 0.95f
-        OrbState.CONNECTED -> 1f
-        OrbState.DISCONNECTING -> 0.65f
-        OrbState.FAILED -> 0.85f
-        OrbState.PERMISSION -> 0.8f
-    }
-
-    private fun startTransition() {
-        fromColor = curColor; fromI = curI
-        toColor = colorFor(state); toI = intensityFor(state)
-        transition?.cancel()
-        transition = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = 450
+    init {
+        contentDescription = "Connection status"
+        isFocusable = true
+        pulseAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 5200L
+            repeatCount = ValueAnimator.INFINITE
             interpolator = DecelerateInterpolator()
-            addUpdateListener {
-                val m = it.animatedValue as Float
-                curColor = Palette.lerp(fromColor, toColor, m)
-                curI = fromI + (toI - fromI) * m
-                invalidate()
-            }
+            addUpdateListener { pulse = it.animatedValue as Float; invalidate() }
             start()
         }
     }
 
-    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
-        val r = min(w, h) / 2f
-        glowShader = RadialGradient(
-            0f, 0f, r, intArrayOf(Color.WHITE, Color.argb(80, 255, 255, 255), Color.TRANSPARENT),
-            floatArrayOf(0.30f, 0.62f, 1f), Shader.TileMode.CLAMP
+    private fun colors(): IntArray = when (state) {
+        OrbState.CONNECTED -> intArrayOf(Color.rgb(159, 213, 204), Color.rgb(194, 213, 230), Color.rgb(181, 190, 222))
+        OrbState.CONNECTING -> intArrayOf(Color.rgb(167, 193, 228), Color.rgb(224, 199, 204), Color.rgb(246, 183, 126))
+        OrbState.DISCONNECTING -> intArrayOf(Color.rgb(179, 195, 225), Color.rgb(218, 202, 211), Color.rgb(239, 190, 150))
+        OrbState.FAILED, OrbState.PERMISSION -> intArrayOf(Color.rgb(194, 184, 207), Color.rgb(228, 188, 182), Color.rgb(238, 169, 151))
+        OrbState.DISCONNECTED -> intArrayOf(Color.rgb(177, 190, 222), Color.rgb(218, 202, 210), Color.rgb(247, 181, 119))
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val side = min(width, height).toFloat()
+        if (side <= 0f) return
+        val radius = side * 0.405f * pressScale
+        val cx = width / 2f
+        val cy = height / 2f
+        val breathe = 1f + 0.012f * sin(pulse * Math.PI * 2.0).toFloat()
+
+        canvas.save()
+        canvas.translate(cx, cy)
+        canvas.scale(breathe, breathe)
+
+        // Warm/cool ambient halo, deliberately very soft on the light theme.
+        paint.shader = RadialGradient(
+            0f, radius * 0.13f, radius * 1.8f,
+            intArrayOf(Color.argb(40, 242, 174, 113), Color.argb(20, 153, 181, 226), Color.TRANSPARENT),
+            floatArrayOf(0.25f, 0.62f, 1f), Shader.TileMode.CLAMP
         )
-        discShader = RadialGradient(
-            0f, -r * 0.18f, r * 0.62f, intArrayOf(Color.rgb(22, 44, 92), Color.rgb(6, 12, 30)),
-            null, Shader.TileMode.CLAMP
+        paint.style = Paint.Style.FILL
+        canvas.drawCircle(0f, 0f, radius * 1.8f, paint)
+
+        // Main pastel sphere: cool lavender at the top-right, warm orange at the lower-left.
+        val stop = colors()
+        paint.shader = RadialGradient(
+            radius * 0.50f, -radius * 0.54f, radius * 1.95f,
+            intArrayOf(stop[0], stop[1], stop[2], Color.rgb(238, 206, 185)),
+            floatArrayOf(0f, 0.47f, 0.79f, 1f), Shader.TileMode.CLAMP
         )
-        val n = 72
-        ticks = FloatArray(n * 4)
-        for (i in 0 until n) {
-            val a = Math.toRadians(i * 360.0 / n)
-            val inner = if (i % 6 == 0) 0.935f else 0.955f
-            ticks[i * 4] = (cos(a) * r * inner).toFloat()
-            ticks[i * 4 + 1] = (sin(a) * r * inner).toFloat()
-            ticks[i * 4 + 2] = (cos(a) * r * 0.985f).toFloat()
-            ticks[i * 4 + 3] = (sin(a) * r * 0.985f).toFloat()
-        }
-    }
+        oval.set(-radius, -radius, radius, radius)
+        canvas.drawOval(oval, paint)
 
-    private fun stroke(w: Float, color: Int, alpha: Int) {
-        p.shader = null; p.colorFilter = null; p.pathEffect = null
-        p.style = Paint.Style.STROKE; p.strokeWidth = w; p.strokeCap = Paint.Cap.ROUND
-        p.color = color
-        p.alpha = alpha.coerceIn(0, 255)
-    }
+        // Very faint edge light gives the sphere depth without the old technical/radar rings.
+        paint.shader = RadialGradient(
+            -radius * 0.30f, -radius * 0.38f, radius * 1.25f,
+            intArrayOf(Color.argb(80, 255, 255, 255), Color.argb(0, 255, 255, 255)),
+            floatArrayOf(0f, 1f), Shader.TileMode.CLAMP
+        )
+        canvas.drawOval(oval, paint)
 
-    private fun tailArc(c: Canvas, r: Float, start: Float, sweep: Float, w: Float, alpha: Int) {
-        rect.set(-r, -r, r, r)
-        val seg = 7
-        val each = sweep / seg
-        for (i in 0 until seg) {
-            val a = alpha * (i + 1) / seg
-            stroke(w, curColor, a)
-            c.drawArc(rect, start - sweep + each * i, each + 0.6f, false, p)
-        }
-    }
-
-    override fun onDraw(c: Canvas) {
-        val now = SystemClock.uptimeMillis() / 1000f
-        val R = min(width, height) / 2f
-        val i = curI
-        val col = curColor
-        c.save()
-        c.translate(width / 2f, height / 2f)
-
-        val breathe = when (state) {
-            OrbState.CONNECTING -> 0.5f + 0.5f * sin(now * 5f)
-            OrbState.CONNECTED -> 0.85f + 0.15f * sin(now * 1.6f)
-            else -> 0.6f + 0.4f * sin(now * 1.1f)
+        // Connection activity is communicated through a subtle rim rather than a large power glyph.
+        if (state == OrbState.CONNECTING || state == OrbState.DISCONNECTING) {
+            paint.shader = null
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = dpf(2.2f)
+            paint.color = Color.argb(100, 54, 125, 204)
+            canvas.drawOval(oval, paint)
+        } else if (state == OrbState.CONNECTED) {
+            paint.shader = null
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = dpf(2f)
+            paint.color = Color.argb(105, 35, 159, 120)
+            canvas.drawOval(oval, paint)
         }
 
-        // ambient glow
-        if (col != filterColor || filter == null) {
-            filterColor = col
-            filter = PorterDuffColorFilter(col, PorterDuff.Mode.SRC_IN)
-        }
-        p.reset(); p.isAntiAlias = true
-        p.style = Paint.Style.FILL; p.shader = glowShader; p.colorFilter = filter
-        p.alpha = (255 * i * (0.32f + 0.40f * breathe)).toInt().coerceIn(0, 255)
-        c.drawCircle(0f, 0f, R, p)
+        canvas.restore()
+        paint.shader = null
+        paint.style = Paint.Style.FILL
 
-        // tick ring
-        val dir = if (state == OrbState.DISCONNECTING) -1f else 1f
-        c.save(); c.rotate(now * 5f * dir)
-        stroke(dpf(1f), col, (74 * i).toInt())
-        c.drawLines(ticks, p)
-        c.restore()
-
-        // dashed ring
-        val dashSpeed = when (state) { OrbState.CONNECTING -> -34f; OrbState.DISCONNECTING -> 28f; else -> -9f }
-        c.save(); c.rotate(now * dashSpeed)
-        stroke(dpf(1.6f), col, (120 * i).toInt())
-        p.pathEffect = dash
-        c.drawCircle(0f, 0f, R * 0.84f, p)
-        c.restore()
-
-        // base ring + sweeping arc
-        stroke(dpf(1.2f), col, (46 * i).toInt())
-        c.drawCircle(0f, 0f, R * 0.73f, p)
-        when (state) {
-            OrbState.CONNECTING -> tailArc(c, R * 0.73f, (now * 230f) % 360f, 110f, dpf(3.2f), (255 * i).toInt())
-            OrbState.CONNECTED -> tailArc(c, R * 0.73f, (now * 42f) % 360f, 80f, dpf(3f), (230 * i).toInt())
-            OrbState.DISCONNECTING -> tailArc(c, R * 0.73f, (360f - (now * 170f) % 360f), 90f, dpf(3f), (200 * i).toInt())
-            OrbState.FAILED, OrbState.PERMISSION -> tailArc(c, R * 0.73f, -90f, 70f, dpf(3f), (210 * i).toInt())
-            OrbState.DISCONNECTED -> Unit
-        }
-
-        // expanding pulse
-        if (state == OrbState.CONNECTING || state == OrbState.CONNECTED) {
-            val period = if (state == OrbState.CONNECTING) 1.1f else 3.2f
-            val ph = (now % period) / period
-            val a = (1f - ph) * (if (state == OrbState.CONNECTING) 0.75f else 0.32f)
-            stroke(dpf(2f), col, (255 * a * i).toInt())
-            c.drawCircle(0f, 0f, R * (0.55f + 0.40f * ph), p)
-        }
-
-        // core disc
-        val rd = R * 0.52f * pressScale
-        p.reset(); p.isAntiAlias = true
-        p.style = Paint.Style.FILL; p.shader = discShader
-        c.drawCircle(0f, 0f, rd, p)
-        stroke(dpf(7f), col, (34 * i * (0.6f + 0.4f * breathe)).toInt())
-        c.drawCircle(0f, 0f, rd, p)
-        stroke(dpf(2f), col, (230 * i).toInt())
-        c.drawCircle(0f, 0f, rd, p)
-
-        // power icon (soft halo pass + sharp pass)
-        val s = rd * 0.42f
-        stroke(s * 0.42f, col, (60 * i).toInt())
-        Icons.draw(c, Icon.POWER, s, p)
-        stroke(s * 0.17f, Palette.lerp(Color.WHITE, col, 0.35f), (255 * (0.55f + 0.45f * i)).toInt())
-        Icons.draw(c, Icon.POWER, s, p)
-        c.restore()
-
-        if (isAttachedToWindow && windowVisible) {
-            postInvalidateDelayed(
-                when (state) {
-                    OrbState.CONNECTING, OrbState.DISCONNECTING -> 16L
-                    OrbState.CONNECTED -> 33L
-                    else -> 50L
-                }
-            )
-        }
+        if (isAttachedToWindow && visibleOnWindow) postInvalidateDelayed(45L)
     }
 
     private fun animatePress(target: Float) {
-        pressAnim?.cancel()
-        pressAnim = ValueAnimator.ofFloat(pressScale, target).apply {
-            duration = 130
+        pressAnimator?.cancel()
+        pressAnimator = ValueAnimator.ofFloat(pressScale, target).apply {
+            duration = 150L
             addUpdateListener { pressScale = it.animatedValue as Float; invalidate() }
             start()
         }
     }
 
-    override fun onTouchEvent(e: MotionEvent): Boolean {
-        val r = min(width, height) / 2f * 0.66f
-        val dx = e.x - width / 2f
-        val dy = e.y - height / 2f
-        val inside = dx * dx + dy * dy <= r * r
-        when (e.actionMasked) {
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        val radius = min(width, height) * 0.45f
+        val dx = event.x - width / 2f
+        val dy = event.y - height / 2f
+        val inside = dx * dx + dy * dy <= radius * radius
+        when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 if (!inside) return false
                 parent?.requestDisallowInterceptTouchEvent(true)
-                animatePress(0.93f)
+                animatePress(0.97f)
                 return true
             }
             MotionEvent.ACTION_MOVE -> return true
@@ -253,7 +151,7 @@ class ConnectOrb(ctx: Context) : View(ctx) {
                 return true
             }
         }
-        return super.onTouchEvent(e)
+        return super.onTouchEvent(event)
     }
 
     override fun performClick(): Boolean {
@@ -264,12 +162,13 @@ class ConnectOrb(ctx: Context) : View(ctx) {
 
     override fun onWindowVisibilityChanged(visibility: Int) {
         super.onWindowVisibilityChanged(visibility)
-        windowVisible = visibility == VISIBLE
-        if (windowVisible) invalidate()
+        visibleOnWindow = visibility == VISIBLE
+        if (visibleOnWindow) invalidate()
     }
 
     override fun onDetachedFromWindow() {
-        transition?.cancel(); pressAnim?.cancel()
+        pulseAnimator?.cancel()
+        pressAnimator?.cancel()
         super.onDetachedFromWindow()
     }
 }
