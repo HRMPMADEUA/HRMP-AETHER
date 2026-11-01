@@ -1,6 +1,5 @@
 plugins {
 id 'com.android.application'
-id 'org.jetbrains.kotlin.android'
 }
 
 android {
@@ -33,16 +32,10 @@ packaging {
 }
 
 dependencies {
-// WireGuard / AmneziaWG
 implementation 'com.wgtunnel:parser:1.6.14'
 implementation 'com.wgtunnel:backend:1.6.14'
 implementation 'com.wgtunnel:backend-android-jni:1.6.14'
 implementation 'com.wgtunnel:hevtunnel:1.6.14'
-
-// Xray
 implementation files('libs/libv2ray.aar')
-
-// Coroutines
 implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0'
-
 }
