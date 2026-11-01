@@ -7,7 +7,8 @@ import java.nio.charset.StandardCharsets
 
 enum class ManualProtocol(val label: String) {
     VLESS("VLESS"), VMESS("VMess"), TROJAN("Trojan"), SHADOWSOCKS("Shadowsocks"),
-    WIREGUARD("WireGuard"), AMNEZIAWG("AmneziaWG")
+    WIREGUARD("WireGuard"), AMNEZIAWG("AmneziaWG"),
+    MHRV("MHRV"), STORMDNS("DNS Tunnel"), DNS_CHANGER("DNS Changer")
 }
 
 enum class FieldKind { TEXT, NUMBER, SECRET, CHOICE, MULTILINE }
@@ -73,6 +74,30 @@ object ManualProfile {
                 FieldSpec("method", "Encryption method", FieldKind.CHOICE, required = true,
                     choices = listOf("aes-256-gcm", "aes-128-gcm", "chacha20-ietf-poly1305", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305"), default = "aes-256-gcm"),
                 FieldSpec("password", "Password", FieldKind.SECRET, required = true))
+            ManualProtocol.MHRV -> listOf(
+                name,
+                FieldSpec("mode", "MHRV mode", FieldKind.CHOICE, choices = listOf("apps_script", "direct"), default = "apps_script"),
+                FieldSpec("scriptUrl", "Google Apps Script deployment URL or ID", required = true, hint = "https://script.google.com/macros/s/.../exec", showWhen = { it["mode"] != "direct" }),
+                FieldSpec("authKey", "MHRV authentication key", FieldKind.SECRET, required = true, showWhen = { it["mode"] != "direct" }),
+                FieldSpec("googleIp", "Google edge IPv4", required = true, hint = "216.239.38.120", default = "216.239.38.120"),
+                FieldSpec("frontDomain", "Front SNI domain", required = true, hint = "www.google.com", default = "www.google.com"),
+                FieldSpec("sniHosts", "SNI rotation pool (optional)", hint = "www.google.com,mail.google.com")
+            )
+            ManualProtocol.STORMDNS -> listOf(
+                name,
+                FieldSpec("domains", "Tunnel domains", FieldKind.MULTILINE, required = true, hint = "One domain per line; must match the StormDNS server"),
+                FieldSpec("encryption", "Data encryption", FieldKind.CHOICE, choices = listOf("0", "1", "2", "3", "4", "5"), default = "1"),
+                FieldSpec("encryptionKey", "Shared encryption key", FieldKind.SECRET, required = true),
+                FieldSpec("resolvers", "DNS resolvers", FieldKind.MULTILINE, required = true, hint = "One IP or IP:port per line", default = "1.1.1.1:53\n8.8.8.8:53"),
+                FieldSpec("listenPort", "Local SOCKS5 port", FieldKind.NUMBER, required = true, hint = "18000", default = "18000")
+            )
+            ManualProtocol.DNS_CHANGER -> listOf(
+                name,
+                FieldSpec("ipv4Primary", "IPv4 Primary", hint = "1.1.1.1", default = "1.1.1.1"),
+                FieldSpec("ipv4Secondary", "IPv4 Secondary", hint = "1.0.0.1", default = "1.0.0.1"),
+                FieldSpec("ipv6Primary", "IPv6 Primary", hint = "2606:4700:4700::1111", default = "2606:4700:4700::1111"),
+                FieldSpec("ipv6Secondary", "IPv6 Secondary", hint = "2606:4700:4700::1001", default = "2606:4700:4700::1001")
+            )
             ManualProtocol.WIREGUARD, ManualProtocol.AMNEZIAWG -> {
                 val base = listOf(name, address, port.copy(hint = "51820", default = "51820"),
                     FieldSpec("privateKey", "Interface private key", FieldKind.SECRET, required = true, hint = "base64, 44 characters"),
@@ -96,11 +121,29 @@ object ManualProfile {
             val value = v[f.key].orEmpty()
             if (f.required && value.isEmpty()) return ManualOutcome.Invalid(f.key, "${f.label} is required.")
         }
+        val name = v["name"].orEmpty()
+        if (p == ManualProtocol.MHRV) return buildMhrv(v, name)
+        if (p == ManualProtocol.STORMDNS) return buildStormDns(v, name)
+        if (p == ManualProtocol.DNS_CHANGER) {
+            val ipv4Primary = v["ipv4Primary"].orEmpty()
+            val ipv4Secondary = v["ipv4Secondary"].orEmpty()
+            val ipv6Primary = v["ipv6Primary"].orEmpty()
+            val ipv6Secondary = v["ipv6Secondary"].orEmpty()
+            if (ipv4Primary.isNotEmpty() && !DnsChangerProfiles.isValidIpv4(ipv4Primary)) return ManualOutcome.Invalid("ipv4Primary", "Enter a valid IPv4 address.")
+            if (ipv4Secondary.isNotEmpty() && !DnsChangerProfiles.isValidIpv4(ipv4Secondary)) return ManualOutcome.Invalid("ipv4Secondary", "Enter a valid IPv4 address.")
+            if (ipv6Primary.isNotEmpty() && !DnsChangerProfiles.isValidIpv6(ipv6Primary)) return ManualOutcome.Invalid("ipv6Primary", "Enter a valid IPv6 address.")
+            if (ipv6Secondary.isNotEmpty() && !DnsChangerProfiles.isValidIpv6(ipv6Secondary)) return ManualOutcome.Invalid("ipv6Secondary", "Enter a valid IPv6 address.")
+            if (listOf(ipv4Primary, ipv4Secondary, ipv6Primary, ipv6Secondary).none { it.isNotBlank() }) {
+                return ManualOutcome.Invalid("ipv4Primary", "Enter at least one DNS server address.")
+            }
+            val profileName = name.ifBlank { "DNS Profile" }
+            return ManualOutcome.Ok(DnsChangerProfiles.encode(profileName, ipv4Primary, ipv4Secondary, ipv6Primary, ipv6Secondary), profileName)
+        }
+
         val address = v["address"].orEmpty()
         if (!isValidHost(address)) return ManualOutcome.Invalid("address", "Server address must be a domain name or an IP address.")
         val port = v["port"]?.toIntOrNull()
         if (port == null || port !in 1..65535) return ManualOutcome.Invalid("port", "Port must be a number from 1 to 65535.")
-        val name = v["name"].orEmpty()
 
         return when (p) {
             ManualProtocol.VLESS -> {
@@ -143,7 +186,76 @@ object ManualProfile {
                 ManualOutcome.Ok("ss://$b64@${hostForUri(address)}:$port#${enc(name)}", name)
             }
             ManualProtocol.WIREGUARD, ManualProtocol.AMNEZIAWG -> buildWireGuard(p, v, address, port, name)
+            ManualProtocol.MHRV, ManualProtocol.STORMDNS, ManualProtocol.DNS_CHANGER -> ManualOutcome.Invalid("name", "Profile settings are incomplete.")
         }
+    }
+
+    private fun buildMhrv(v: Map<String, String>, name: String): ManualOutcome {
+        val mode = v["mode"].orEmpty().ifBlank { "apps_script" }
+        if (mode !in setOf("apps_script", "direct")) return ManualOutcome.Invalid("mode", "Choose a supported MHRV mode.")
+        val googleIp = v["googleIp"].orEmpty()
+        if (!isValidHost(googleIp) || googleIp.contains(':')) return ManualOutcome.Invalid("googleIp", "Enter a valid Google edge IPv4 address or host.")
+        val front = v["frontDomain"].orEmpty()
+        if (!isValidHost(front) || front.matches(Regex("^[0-9.]+$"))) return ManualOutcome.Invalid("frontDomain", "Enter a valid front SNI domain.")
+        val config = JSONObject()
+            .put("mode", mode)
+            .put("listen_host", "127.0.0.1")
+            .put("listen_port", 8080)
+            .put("socks5_port", 1081)
+            .put("google_ip", googleIp)
+            .put("front_domain", front)
+            .put("verify_ssl", true)
+            .put("fetch_ips_from_api", false)
+            .put("max_ips_to_scan", 20)
+        if (mode == "apps_script") {
+            val input = v["scriptUrl"].orEmpty().trim()
+            val marker = "/macros/s/"
+            val id = if (input.contains(marker)) input.substringAfter(marker).substringBefore('/').substringBefore('?') else input.substringBefore('/').substringBefore('?')
+            if (id.isBlank() || !Regex("^[A-Za-z0-9_-]{10,}$").matches(id)) return ManualOutcome.Invalid("scriptUrl", "Enter a valid Apps Script deployment URL or deployment ID.")
+            val key = v["authKey"].orEmpty()
+            if (key.length < 16) return ManualOutcome.Invalid("authKey", "The MHRV authentication key must be at least 16 characters.")
+            config.put("script_ids", org.json.JSONArray().put(id))
+                .put("auth_key", key)
+        }
+        val snis = v["sniHosts"].orEmpty().split(',', '\n', ';').map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        if (snis.any { !isValidHost(it) || it.matches(Regex("^[0-9.]+$")) }) return ManualOutcome.Invalid("sniHosts", "SNI pool entries must be valid hostnames.")
+        if (snis.isNotEmpty()) config.put("sni_hosts", org.json.JSONArray().apply { snis.forEach { put(it) } })
+        val profileName = name.ifBlank { "MHRV" }
+        return ManualOutcome.Ok(EngineProfiles.encodeMhrv(profileName, config), profileName)
+    }
+
+    private fun buildStormDns(v: Map<String, String>, name: String): ManualOutcome {
+        val domains = v["domains"].orEmpty().split(',', '\n', ';').map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        if (domains.isEmpty() || domains.any { !isValidHost(it) || it.contains(':') || it.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}$")) }) return ManualOutcome.Invalid("domains", "Enter tunnel domain names supplied by your StormDNS server, not resolver IP addresses.")
+        val key = v["encryptionKey"].orEmpty()
+        if (key.isBlank() || key.contains('\n') || key.length > 512) return ManualOutcome.Invalid("encryptionKey", "Enter the shared encryption key from the StormDNS server.")
+        val encryption = v["encryption"]?.toIntOrNull() ?: 1
+        if (encryption !in 0..5) return ManualOutcome.Invalid("encryption", "Choose an encryption method from 0 to 5.")
+        val resolvers = v["resolvers"].orEmpty().lineSequence().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.toList()
+        if (resolvers.isEmpty() || resolvers.any { !EngineProfiles.isResolverEndpoint(it) }) return ManualOutcome.Invalid("resolvers", "Enter valid IPv4 or IPv6 DNS resolver addresses, optionally followed by :port.")
+        val listenPort = v["listenPort"]?.toIntOrNull() ?: 18000
+        if (listenPort !in 1024..65535) return ManualOutcome.Invalid("listenPort", "Local SOCKS5 port must be between 1024 and 65535.")
+        fun tomlString(value: String) = value.replace("\\", "\\\\").replace("\"", "\\\"")
+        val domainArray = domains.joinToString(", ") { "\"${tomlString(it)}\"" }
+        val config = """
+DOMAINS = [$domainArray]
+DATA_ENCRYPTION_METHOD = $encryption
+ENCRYPTION_KEY = "${tomlString(key)}"
+PROTOCOL_TYPE = "SOCKS5"
+LISTEN_IP = "127.0.0.1"
+LISTEN_PORT = $listenPort
+SOCKS5_AUTH = false
+STARTUP_MODE = "resolvers"
+MTU_TEST_PARALLELISM_RESOLVERS = 12
+MTU_TEST_RETRIES_RESOLVERS = 2
+MTU_TEST_TIMEOUT_RESOLVERS = 1.5
+RECHECK_BATCH_SIZE = 8
+RX_TX_WORKERS = 2
+TUNNEL_PROCESS_WORKERS = 2
+LOG_TO_FILE = true
+""".trim()
+        val profileName = name.ifBlank { "DNS Tunnel" }
+        return ManualOutcome.Ok(EngineProfiles.encodeStormDns(profileName, config, resolvers.joinToString("\n")), profileName)
     }
 
     private fun buildWireGuard(p: ManualProtocol, v: Map<String, String>, address: String, port: Int, name: String): ManualOutcome {
