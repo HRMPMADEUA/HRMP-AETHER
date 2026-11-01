@@ -1444,6 +1444,8 @@ class MainActivity : Activity() {
         val sshUser = field("SSH username", "slipnet_ssh_username", "username")
         val sshPassword = field("SSH password", "slipnet_ssh_password", "Password", secret = true)
         val sshKey = field("SSH private key (optional)", "slipnet_ssh_private_key", "-----BEGIN OPENSSH PRIVATE KEY-----", multiline = true)
+        val sshKeyPassphrase = field("SSH private-key passphrase (optional)", "slipnet_ssh_key_passphrase", "Private-key passphrase", secret = true)
+        val sshAuthType = spinner("SSH authentication method", "slipnet_ssh_auth_type", listOf("Auto", "Password", "Private key", "Password + private key"), "Auto")
         val sshChannels = field("SSH max channels", "slipnet_ssh_channels", "16", "16", numeric = true)
         val sshChannelsCustom = switch("Use a custom SSH channel limit (off = automatic)", "slipnet_ssh_channels_custom", false)
         val sshCipher = spinner("SSH cipher", "slipnet_ssh_cipher", listOf("Auto", "AES-128-GCM", "ChaCha20-Poly1305", "AES-128-CTR (Legacy)"), "Auto")
