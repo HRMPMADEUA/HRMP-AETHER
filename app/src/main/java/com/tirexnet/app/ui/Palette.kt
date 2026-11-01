@@ -8,33 +8,41 @@ import android.view.MotionEvent
 import android.view.View
 import android.widget.TextView
 
+/**
+ * TIREXNET's Psiphon-inspired palette: clear navy/blue surfaces, bright blue
+ * primary actions and a restrained green/orange status system. The theme stays
+ * centralized so changing it never leaves individual screens with old colors.
+ */
 object Palette {
-    /** Single source of truth for the theme. Changed only by MainActivity.applyTheme(), which re-renders. */
     @Volatile var dark: Boolean = true
 
     private fun pick(d: Int, l: Int) = if (dark) d else l
 
-    val bg0 get() = pick(Color.rgb(2, 5, 14), Color.rgb(244, 247, 253))
-    val bg1 get() = pick(Color.rgb(5, 11, 28), Color.rgb(228, 236, 250))
-    val bg2 get() = pick(Color.rgb(10, 20, 48), Color.rgb(214, 226, 247))
-    val cyan get() = pick(Color.rgb(0, 224, 255), Color.rgb(0, 140, 190))
-    val ice get() = pick(Color.rgb(160, 222, 255), Color.rgb(40, 96, 160))
-    val violet get() = pick(Color.rgb(142, 96, 255), Color.rgb(104, 60, 220))
-    val blue get() = pick(Color.rgb(48, 118, 255), Color.rgb(30, 90, 220))
-    val mint get() = pick(Color.rgb(0, 238, 190), Color.rgb(0, 150, 118))
-    val amber get() = pick(Color.rgb(255, 184, 77), Color.rgb(200, 120, 0))
-    val red get() = pick(Color.rgb(255, 92, 120), Color.rgb(212, 40, 72))
-    val text get() = pick(Color.rgb(238, 245, 255), Color.rgb(14, 24, 48))
-    val muted get() = pick(Color.rgb(138, 157, 190), Color.rgb(84, 100, 130))
-    val dim get() = pick(Color.rgb(86, 104, 138), Color.rgb(128, 142, 168))
-    val glassTop get() = pick(Color.argb(52, 150, 200, 255), Color.argb(235, 255, 255, 255))
-    val glassBottom get() = pick(Color.argb(16, 90, 120, 230), Color.argb(200, 238, 244, 255))
-    val stroke get() = pick(Color.argb(64, 130, 190, 255), Color.argb(90, 70, 110, 180))
-    val strokeActive get() = pick(Color.argb(190, 0, 224, 255), Color.argb(220, 0, 140, 190))
-    /** Fill behind text inputs. */
-    val fieldFill get() = pick(Color.argb(70, 6, 14, 34), Color.argb(255, 255, 255, 255))
-    /** Text colour on top of the cyan->mint primary button. */
-    val onPrimary get() = Color.rgb(2, 10, 24)
+    val bg0 get() = pick(Color.rgb(7, 17, 32), Color.rgb(245, 248, 252))
+    val bg1 get() = pick(Color.rgb(10, 29, 52), Color.rgb(235, 242, 249))
+    val bg2 get() = pick(Color.rgb(17, 43, 72), Color.rgb(223, 234, 245))
+
+    // Primary action and interactive accents.
+    val cyan get() = pick(Color.rgb(55, 151, 244), Color.rgb(25, 111, 205))
+    val ice get() = pick(Color.rgb(157, 207, 250), Color.rgb(49, 112, 177))
+    val blue get() = pick(Color.rgb(39, 123, 225), Color.rgb(30, 105, 205))
+    val violet get() = pick(Color.rgb(105, 126, 205), Color.rgb(93, 112, 184))
+
+    // Connection/status colors.
+    val mint get() = pick(Color.rgb(52, 202, 151), Color.rgb(22, 158, 111))
+    val amber get() = pick(Color.rgb(255, 164, 76), Color.rgb(209, 119, 30))
+    val red get() = pick(Color.rgb(244, 105, 119), Color.rgb(207, 61, 78))
+
+    val text get() = pick(Color.rgb(244, 248, 255), Color.rgb(21, 39, 59))
+    val muted get() = pick(Color.rgb(169, 188, 210), Color.rgb(83, 105, 129))
+    val dim get() = pick(Color.rgb(111, 137, 166), Color.rgb(126, 147, 168))
+
+    val glassTop get() = pick(Color.argb(48, 86, 151, 215), Color.argb(246, 255, 255, 255))
+    val glassBottom get() = pick(Color.argb(24, 28, 72, 122), Color.argb(220, 235, 243, 250))
+    val stroke get() = pick(Color.argb(76, 113, 165, 216), Color.argb(94, 99, 139, 178))
+    val strokeActive get() = pick(Color.argb(220, 58, 151, 242), Color.argb(225, 34, 119, 214))
+    val fieldFill get() = pick(Color.argb(92, 4, 15, 29), Color.argb(255, 255, 255, 255))
+    val onPrimary get() = Color.WHITE
 
     fun glass(
         ctx: Context,
@@ -43,10 +51,10 @@ object Palette {
         top: Int = glassTop,
         bottom: Int = glassBottom
     ): GradientDrawable {
-        val d = ctx.resources.displayMetrics.density
+        val density = ctx.resources.displayMetrics.density
         return GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(top, bottom)).apply {
-            cornerRadius = radiusDp * d
-            setStroke(d.toInt().coerceAtLeast(1), strokeColor)
+            cornerRadius = radiusDp * density
+            setStroke(density.toInt().coerceAtLeast(1), strokeColor)
         }
     }
 
