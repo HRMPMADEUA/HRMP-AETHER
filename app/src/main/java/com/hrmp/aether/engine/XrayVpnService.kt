@@ -134,7 +134,13 @@ class XrayVpnService : VpnService() {
 
             val selected = prefs.getStringSet("split_packages", emptySet()).orEmpty()
             val mode = prefs.getString("split_mode", "exclude") ?: "exclude"
-            if (mode == "include") {
+            val slipNetSplitEnabled = prefs.getBoolean("slipnet_split_tunnel", false)
+            // Preserve TIREXNET's original split-tunnel behavior when a user has
+            // selected apps in the existing screen, and also honor the SlipNet
+            // settings toggle. With split tunneling disabled, only TIREXNET itself
+            // stays outside the VPN so account/API controls remain reachable.
+            val useSplitTunneling = slipNetSplitEnabled || selected.isNotEmpty() || mode == "include"
+            if (useSplitTunneling && mode == "include") {
                 var applied = 0
                 selected.forEach { pkg ->
                     if (pkg != packageName) {
@@ -143,13 +149,16 @@ class XrayVpnService : VpnService() {
                     }
                 }
                 if (applied == 0) throw IllegalStateException("Select at least one installed app for Include mode.")
+                runCatching { builder.addDisallowedApplication(packageName) }
             } else {
                 // Keep TIREXNET outside its own tunnel so ping, API and local controls stay reachable.
                 runCatching { builder.addDisallowedApplication(packageName) }
-                selected.forEach { pkg ->
-                    if (pkg != packageName) {
-                        val exists = runCatching { packageManager.getApplicationInfo(pkg, 0) }.isSuccess
-                        if (exists) runCatching { builder.addDisallowedApplication(pkg) }
+                if (useSplitTunneling) {
+                    selected.forEach { pkg ->
+                        if (pkg != packageName) {
+                            val exists = runCatching { packageManager.getApplicationInfo(pkg, 0) }.isSuccess
+                            if (exists) runCatching { builder.addDisallowedApplication(pkg) }
+                        }
                     }
                 }
             }
@@ -221,7 +230,6 @@ class XrayVpnService : VpnService() {
     private fun stopAuxiliaryEngines() {
         MhrvEngine.stop()
         StormDnsEngine.stop()
-        SniSpoofEngine.stop()
     }
 
     private fun stopTunnel() {
