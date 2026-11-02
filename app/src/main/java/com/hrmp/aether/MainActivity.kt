@@ -3799,45 +3799,36 @@ private fun savePanelSession(
     }
     }
 
-    @Volatile private var lastBase = ""
-    @Volatile private var iranDownUntil = 0L
+@Volatile private var lastBase = ""
 
-    /**
-     * Tries the Iranian server first and falls back to the Worker when it cannot be reached (network error,
-     * timeout, 502-504). A token only works on the server that issued it, so authenticated calls go to that
-     * server first, and a 401 from any other server is never treated as "session expired".
-     */
-    private fun request(method: String, path: String, bearer: String?, body: JSONObject?): JSONObject {
-        val all = listOf(ApiConfig.IRAN_BASE, ApiConfig.WORKER_BASE).filter { it.isNotBlank() }
-        val tokenBase = prefs.getString("token_base", "").orEmpty().ifBlank { ApiConfig.WORKER_BASE }
-        // Tokens issued by the retired Worker cannot authenticate against the VPS database.
-        if (!bearer.isNullOrBlank() && tokenBase.isNotBlank() && tokenBase !in all) {
-            prefs.edit().remove("token").remove("token_base").remove("remote_servers_cache").apply()
-            throw ApiUnavailableException("سرور برنامه تغییر کرده؛ لطفاً دوباره وارد حساب شو.")
-        }
-        val order = if (!bearer.isNullOrBlank() && tokenBase in all) listOf(tokenBase) + all.filter { it != tokenBase } else all
-        var last: Exception? = null
-        for ((i, base) in order.withIndex()) {
-            val hasNext = i < order.lastIndex
-            val isIran = base == ApiConfig.IRAN_BASE
-            if (isIran && hasNext && SystemClock.elapsedRealtime() < iranDownUntil) continue
-            try {
-                val r = requestOnce(base, method, path, bearer, body, if (hasNext) ApiConfig.FAST_FAIL_TIMEOUT_MS else ApiConfig.NORMAL_TIMEOUT_MS)
-                if (isIran) iranDownUntil = 0L
-                lastBase = base
-                return r
-            } catch (e: ApiHttpException) {
-                if (e.code in 502..504 && hasNext) { if (isIran) iranDownUntil = SystemClock.elapsedRealtime() + ApiConfig.IRAN_RETRY_AFTER_MS; last = e; continue }
-                if (e.code == 401 && !bearer.isNullOrBlank() && base != tokenBase) { last = ApiUnavailableException("Session belongs to another server."); continue }
-                throw e
-            } catch (e: java.io.IOException) {
-                if (isIran) iranDownUntil = SystemClock.elapsedRealtime() + ApiConfig.IRAN_RETRY_AFTER_MS
-                last = e
-            }
-        }
-        throw (last as? java.io.IOException) ?: ApiUnavailableException(last?.message ?: "No server available.")
+private fun request(
+    method: String,
+    path: String,
+    bearer: String?,
+    body: JSONObject?
+): JSONObject {
+    val base = api.trimEnd('/')
+
+    return try {
+        val result = requestOnce(
+            base,
+            method,
+            path,
+            bearer,
+            body,
+            ApiConfig.NORMAL_TIMEOUT_MS
+        )
+
+        lastBase = base
+        result
+    } catch (e: ApiHttpException) {
+        throw e
+    } catch (e: Exception) {
+        throw ApiUnavailableException(
+            "ارتباط با سرور برنامه برقرار نشد: ${e.message}"
+        )
     }
-
+}
     private fun requestOnce(base: String, method: String, path: String, bearer: String?, body: JSONObject?, timeoutMs: Int): JSONObject {
         val c = URL(base + path).openConnection() as HttpURLConnection
         try {
