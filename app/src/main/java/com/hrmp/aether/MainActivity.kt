@@ -3759,6 +3759,7 @@ private fun buildLogin(): View {
     }
 
     val cached = loadRemoteCache()
+    val successfulPanelIds = HashSet<String>()
     if (cached.isNotEmpty() && servers.isEmpty()) {
         servers = mergeSavedAndRemote(cached)
         serversState = ServersState.READY
