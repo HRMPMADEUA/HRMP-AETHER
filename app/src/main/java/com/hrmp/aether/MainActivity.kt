@@ -3620,87 +3620,183 @@ private fun savePanelSession(
     }
 
     private fun loadServers() {
-        if (token.isBlank()) {
-            servers = loadLocalProfiles()
-            serversState = ServersState.READY
-            rebuildServerList(-1)
-            if (servers.isEmpty()) toast("ابتدا وارد حساب شو یا یک پروفایل محلی ذخیره کن.")
-            return
-        }
-        // Show the last downloaded list right away (works with no internet / without a VPN),
-        // then refresh it in the background. The skeleton is only used on the very first load.
-        val cached = loadRemoteCache()
-        if (cached.isNotEmpty() && servers.isEmpty()) {
-            servers = mergeSavedAndRemote(cached)
-            serversState = ServersState.READY
-        } else if (servers.isEmpty()) {
-            serversState = ServersState.LOADING
-        }
+    val sessions = listOf(
+        Triple("pasarguard", pasarguardToken, "PasarGuard"),
+        Triple("alipanel", alipanelToken, "AliPanel")
+    ).filter { it.second.isNotBlank() }
+
+    if (sessions.isEmpty()) {
+        servers = loadLocalProfiles()
+        serversState = ServersState.READY
         rebuildServerList(-1)
-        val t = token
-        io.execute {
+        if (servers.isEmpty()) {
+            toast("ابتدا وارد یکی از پنل‌ها شو یا یک پروفایل محلی ذخیره کن.")
+        }
+        return
+    }
+
+    val cached = loadRemoteCache()
+    if (cached.isNotEmpty() && servers.isEmpty()) {
+        servers = mergeSavedAndRemote(cached)
+        serversState = ServersState.READY
+    } else if (servers.isEmpty()) {
+        serversState = ServersState.LOADING
+    }
+
+    rebuildServerList(-1)
+
+    io.execute {
+        val remote = ArrayList<ServerItem>()
+        var successfulPanels = 0
+        val errors = ArrayList<String>()
+
+        for ((panelId, panelTokenValue, panelNameValue) in sessions) {
             try {
-                val data = request("GET", "/api/me/configs", t, null)
+                val data = request(
+                    "GET",
+                    "/api/me/configs",
+                    panelTokenValue,
+                    null
+                )
+
                 val arr = data.optJSONArray("configs")
                     ?: data.optJSONArray("profiles")
                     ?: data.optJSONArray("items")
-                    ?: throw IllegalStateException("Worker response has no configs/profiles array.")
-                val remote = ArrayList<ServerItem>()
+                    ?: throw IllegalStateException(
+                        "$panelNameValue response has no configs array"
+                    )
+
+                successfulPanels++
+
                 for (i in 0 until arr.length()) {
                     val item = arr.opt(i)
+
                     val raw = when (item) {
-                        is JSONObject -> item.optString("config", item.optString("uri", item.optString("raw", item.optString("content", item.optString("link", "")))))
+                        is JSONObject -> item.optString(
+                            "config",
+                            item.optString(
+                                "uri",
+                                item.optString(
+                                    "raw",
+                                    item.optString(
+                                        "content",
+                                        item.optString("link", "")
+                                    )
+                                )
+                            )
+                        )
                         is String -> item
                         else -> ""
                     }.trim()
-                    if (raw.isNotBlank()) {
-                        val meta = ProfileParser.parse(raw)
-                        val obj = item as? JSONObject
-                        val panelId = if (obj == null) "" else obj.optString("panelId", obj.optString("panel_id", ""))
-                        val panelName = if (obj == null) "" else obj.optString("panelName", obj.optString("panel_name", ""))
-                        val apiEngine = if (obj == null) "" else obj.optString("engine", obj.optString("protocol", ""))
-                        val resolvedEngine = resolveApiEngine(apiEngine, panelId, panelName, meta.engine)
 
-                        // The server's config name is authoritative. For AliPanel it is the
-                        // client/peer label supplied by the panel adapter, not the endpoint host.
-                        val displayName = configNameFromApi(obj, meta, panelId, remote.size + 1, raw)
+                    if (raw.isBlank()) continue
 
-                        // Country comes only from explicit panel metadata or a flag in the name.
-                        val explicit = listOf("country_code", "countryCode", "cc", "country")
-                            .map { k -> normalizeCountry(obj?.optString(k, "").orEmpty()) }
-                            .firstOrNull { it.isNotEmpty() }.orEmpty()
-                        val country = explicit.ifEmpty { ProfileParser.flagCountryOf(displayName) }
-                        remote.add(ServerItem(displayName, raw, resolvedEngine, meta, false, country, panelId, panelName))
+                    val meta = ProfileParser.parse(raw)
+                    val obj = item as? JSONObject
+
+                    val apiPanelId = obj?.optString(
+                        "panelId",
+                        obj.optString("panel_id", "")
+                    ).orEmpty().ifBlank { panelId }
+
+                    val apiPanelName = obj?.optString(
+                        "panelName",
+                        obj.optString("panel_name", "")
+                    ).orEmpty().ifBlank { panelNameValue }
+
+                    val apiEngine = obj?.optString(
+                        "engine",
+                        obj.optString("protocol", "")
+                    ).orEmpty()
+
+                    val resolvedEngine = resolveApiEngine(
+                        apiEngine,
+                        apiPanelId,
+                        apiPanelName,
+                        meta.engine
+                    )
+
+                    val displayName = configNameFromApi(
+                        obj,
+                        meta,
+                        apiPanelId,
+                        remote.size + 1,
+                        raw
+                    )
+
+                    val explicitCountry = listOf(
+                        "country_code",
+                        "countryCode",
+                        "cc",
+                        "country"
+                    ).map { key ->
+                        normalizeCountry(
+                            obj?.optString(key, "").orEmpty()
+                        )
+                    }.firstOrNull { it.isNotEmpty() }.orEmpty()
+
+                    val country = explicitCountry.ifEmpty {
+                        ProfileParser.flagCountryOf(displayName)
                     }
-                }
-                if (remote.isNotEmpty()) saveRemoteCache(remote) // keep for the next launch without internet
-                runOnUiThread {
-                    servers = mergeSavedAndRemote(remote)
-                    serversState = ServersState.READY
-                    serversError = ""
-                    rebuildServerList(-1)
-                    bindServerSummary()
+
+                    remote.add(
+                        ServerItem(
+                            name = displayName,
+                            raw = raw,
+                            engine = resolvedEngine,
+                            meta = meta,
+                            local = false,
+                            country = country,
+                            panelId = apiPanelId,
+                            panelName = apiPanelName
+                        )
+                    )
                 }
             } catch (e: Exception) {
-                runOnUiThread {
-                    // No internet / server unreachable: fall back to the saved list and local profiles.
-                    val offline = mergeSavedAndRemote(loadRemoteCache())
-                    if (offline.isNotEmpty()) {
-                        servers = offline
-                        serversState = ServersState.READY
-                        serversError = "Connection unavailable"
-                        rebuildServerList(-1)
-                        bindServerSummary()
-                        toast("اتصال به سرور برقرار نشد؛ لیست ذخیره‌شده‌ی قبلی نمایش داده شد.")
-                    } else {
-                        serversError = "Connection unavailable"
-                        serversState = ServersState.ERROR
-                        rebuildServerList(-1)
-                        bindServerSummary()
-                    }
+                errors.add("$panelNameValue: ${e.message ?: "Connection failed"}")
+            }
+        }
+
+        if (successfulPanels > 0) {
+            saveRemoteCache(remote)
+
+            runOnUiThread {
+                servers = mergeSavedAndRemote(remote)
+                serversState = ServersState.READY
+                serversError = ""
+
+                rebuildServerList(-1)
+                bindServerSummary()
+
+                if (errors.isNotEmpty()) {
+                    toast("اطلاعات یکی از پنل‌ها دریافت نشد؛ پنل دیگر بارگذاری شد.")
+                }
+            }
+        } else {
+            runOnUiThread {
+                val offline = mergeSavedAndRemote(loadRemoteCache())
+
+                if (offline.isNotEmpty()) {
+                    servers = offline
+                    serversState = ServersState.READY
+                    serversError = "Connection unavailable"
+
+                    rebuildServerList(-1)
+                    bindServerSummary()
+
+                    toast("اتصال به پنل‌ها برقرار نشد؛ لیست ذخیره‌شده نمایش داده شد.")
+                } else {
+                    serversError = "Connection unavailable"
+                    serversState = ServersState.ERROR
+
+                    rebuildServerList(-1)
+                    bindServerSummary()
+
+                    toast("دریافت کانفیگ‌ها ناموفق بود.")
                 }
             }
         }
+    }
     }
 
     @Volatile private var lastBase = ""
