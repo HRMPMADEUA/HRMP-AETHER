@@ -334,6 +334,7 @@ private fun savePanelSession(
     private var loginButton: TextView? = null
     private var loginPanelLabel: TextView? = null
     private var selectedLoginPanelId: String = "pasarguard"
+    private var addingPanelLogin = false
     private var confirmInput: EditText? = null
     private var registerMode = false
 
