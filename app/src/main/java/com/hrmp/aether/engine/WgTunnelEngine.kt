@@ -17,12 +17,6 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
-/**
- * WireGuard and AmneziaWG engine for TIREXNET.
- *
- * Connection is considered successful only after the backend confirms
- * a healthy peer handshake.
- */
 object WgTunnelEngine {
 
     private const val TUNNEL_ID = 1
@@ -56,14 +50,10 @@ object WgTunnelEngine {
 
                 try {
                     val app = context.applicationContext
-
-                    // Validate and parse before changing the running tunnel.
                     val parsed = buildConfig(raw, amnezia)
 
-                    // Initialize the backend only once.
                     if (backend == null) {
                         val networkMonitor = AndroidNetworkMonitor(app)
-
                         monitor = networkMonitor
 
                         backend = TunnelBackend(
@@ -74,35 +64,27 @@ object WgTunnelEngine {
                     }
 
                     currentBackend = backend
-                        ?: throw IllegalStateException("WireGuard backend unavailable")
+                        ?: throw IllegalStateException(
+                            "WireGuard backend unavailable"
+                        )
 
-                    // Remove an old tunnel before loading another profile.
+                    val previousStatus = currentBackend.status.first()
+
                     if (
-                        currentBackend.status.value
-                            .activeTunnels.containsKey(TUNNEL_ID)
+                        previousStatus.activeTunnels.containsKey(TUNNEL_ID)
                     ) {
-                        currentBackend
-                            .stop(TUNNEL_ID)
-                            .getOrThrow()
+                        currentBackend.stop(TUNNEL_ID).getOrThrow()
                     }
 
                     isActive = false
 
                     val tunnel = object : Tunnel {
 
-                        @Volatile
-                        private var lastReportedState: Tunnel.State =
-                            Tunnel.State.Down
-
                         override val id: Int = TUNNEL_ID
-
                         override val name: String = "TIREXNET"
-
                         override val isMetered: Boolean = false
-
                         override val scriptsEnabled: Boolean = false
 
-                        // Prefer IPv6 endpoints when supported, with IPv4 fallback.
                         override val ipStrategy: Tunnel.IpStrategy =
                             Tunnel.IpStrategy.PreferIpv6(
                                 recoveryEnabled = true
@@ -112,41 +94,33 @@ object WgTunnelEngine {
                             emptySet()
 
                         override fun updateState(state: Tunnel.State) {
-                            lastReportedState = state
+                            // Backend owns transport-state tracking.
                         }
                     }
 
-                    // Start the actual VPN backend.
-                    currentBackend
-                        .start(
-                            tunnel = tunnel,
-                            mode = BackendMode.Vpn(parsed)
-                        )
-                        .getOrThrow()
+                    currentBackend.start(
+                        tunnel = tunnel,
+                        mode = BackendMode.Vpn(parsed)
+                    ).getOrThrow()
 
-                    // Generate initial DNS traffic so the peer can start
-                    // the WireGuard handshake even before another app
-                    // generates traffic.
+                    // Trigger initial DNS traffic for handshake.
                     scope.launch(Dispatchers.IO) {
                         runCatching {
                             InetAddress.getAllByName(PROBE_HOST)
                         }
                     }
 
-                    // Do not mark the app connected just because start()
-                    // returned. Wait for a real healthy handshake.
-                    val healthy = withTimeoutOrNull(
+                    // Backend.status is Flow, not StateFlow.
+                    val healthyStatus = withTimeoutOrNull(
                         HANDSHAKE_TIMEOUT_MS
                     ) {
                         currentBackend.status.first { status ->
                             status.activeTunnels[TUNNEL_ID]
                                 ?.transportState is Tunnel.State.Up.Healthy
                         }
+                    }
 
-                        true
-                    } ?: false
-
-                    if (healthy) {
+                    if (healthyStatus != null) {
                         isActive = true
 
                         val message = if (amnezia) {
@@ -160,12 +134,13 @@ object WgTunnelEngine {
                         }
 
                     } else {
-                        val finalState = currentBackend.status.value
-                            .activeTunnels[TUNNEL_ID]
-                            ?.transportState
+                        val finalStatus =
+                            currentBackend.status.first()
 
-                        // Do not leave a tunnel running when its handshake
-                        // could not be confirmed.
+                        val finalState =
+                            finalStatus.activeTunnels[TUNNEL_ID]
+                                ?.transportState
+
                         runCatching {
                             currentBackend.stop(TUNNEL_ID).getOrThrow()
                         }
@@ -174,7 +149,7 @@ object WgTunnelEngine {
 
                         val message =
                             if (finalState is Tunnel.State.Up.HandshakeFailure) {
-                                "WireGuard handshake failed. Check the endpoint, peer keys and server."
+                                "WireGuard handshake failed. Check endpoint, peer keys and server."
                             } else {
                                 "WireGuard did not receive a healthy handshake within 45 seconds."
                             }
@@ -186,7 +161,6 @@ object WgTunnelEngine {
 
                 } catch (e: Throwable) {
 
-                    // Clean up a partially started tunnel.
                     if (currentBackend != null) {
                         runCatching {
                             currentBackend.stop(TUNNEL_ID).getOrThrow()
@@ -196,20 +170,11 @@ object WgTunnelEngine {
                     isActive = false
 
                     val message = when {
-                        e.message.orEmpty().contains(
-                            "INVALID_SIGNATURE_FORMAT",
-                            ignoreCase = true
-                        ) -> {
-                            "AmneziaWG configuration contains an invalid signature format."
-                        }
-
-                        e is SecurityException -> {
+                        e is SecurityException ->
                             "Android VPN permission is required."
-                        }
 
-                        else -> {
+                        else ->
                             "WireGuard startup failed (${e.javaClass.simpleName}). Check the profile and try again."
-                        }
                     }
 
                     withContext(Dispatchers.Main) {
@@ -220,11 +185,6 @@ object WgTunnelEngine {
         }
     }
 
-    /**
-     * Parse normal WireGuard configs without modifying them.
-     *
-     * AmneziaWG configs are normalized for compatibility.
-     */
     private fun buildConfig(
         raw: String,
         amnezia: Boolean
@@ -276,9 +236,7 @@ object WgTunnelEngine {
         scope.launch {
             operationMutex.withLock {
                 try {
-                    backend
-                        ?.stop(TUNNEL_ID)
-                        ?.getOrThrow()
+                    backend?.stop(TUNNEL_ID)?.getOrThrow()
 
                     isActive = false
 
@@ -286,13 +244,11 @@ object WgTunnelEngine {
                         callback("VPN disconnected.", false)
                     }
 
-                } catch (e: Throwable) {
+                } catch (_: Throwable) {
 
-                    val stillActive = backend
-                        ?.status
-                        ?.value
-                        ?.activeTunnels
-                        ?.containsKey(TUNNEL_ID) == true
+                    val status = backend?.status?.first()
+                    val stillActive =
+                        status?.activeTunnels?.containsKey(TUNNEL_ID) == true
 
                     isActive = stillActive
 
