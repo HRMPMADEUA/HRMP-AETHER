@@ -3860,14 +3860,76 @@ private fun request(
     }
 
     private fun logout() {
-        val old = token
-        token = ""
-        prefs.edit().remove("token").remove("token_base").remove("remote_servers_cache").apply()
-        accUser = ""; accStatus = ""; accPanelUser = ""; usedBytes = -1L; limitBytes = 0L; expireText = ""
-        servers = emptyList(); serversState = ServersState.IDLE; currentTab = 0
-        io.execute { runCatching { request("POST", "/api/logout", old, JSONObject()) } }
-        render()
+    val panelId = activePanelId
+    val oldToken = panelToken(panelId)
+
+    when (panelId.lowercase()) {
+        "alipanel" -> {
+            alipanelToken = ""
+            alipanelUsername = ""
+        }
+        else -> {
+            pasarguardToken = ""
+            pasarguardUsername = ""
+        }
     }
+
+    prefs.edit().apply {
+        when (panelId.lowercase()) {
+            "alipanel" -> {
+                remove("session_alipanel")
+                remove("username_alipanel")
+            }
+            else -> {
+                remove("session_pasarguard")
+                remove("username_pasarguard")
+            }
+        }
+        remove("token")
+        remove("token_base")
+        remove("remote_servers_cache")
+        apply()
+    }
+
+    activePanelId = when {
+        pasarguardToken.isNotBlank() -> "pasarguard"
+        alipanelToken.isNotBlank() -> "alipanel"
+        else -> "pasarguard"
+    }
+
+    token = panelToken(activePanelId)
+
+    prefs.edit()
+        .putString("active_panel_id", activePanelId)
+        .putString("token", token)
+        .apply()
+
+    accUser = ""
+    accStatus = ""
+    accPanelUser = ""
+    usedBytes = -1L
+    limitBytes = 0L
+    expireText = ""
+
+    servers = emptyList()
+    serversState = ServersState.IDLE
+    currentTab = 0
+
+    io.execute {
+        if (oldToken.isNotBlank()) {
+            runCatching {
+                request("POST", "/api/logout", oldToken, JSONObject())
+            }
+        }
+    }
+
+    render()
+
+    if (token.isNotBlank()) {
+        loadAccount()
+        loadServers()
+    }
+}
 
     // =====================================================================
     // Account binding
