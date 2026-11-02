@@ -1418,6 +1418,82 @@ private fun savePanelSession(
         actions.addView(ghostButton("Refresh account") { loadAccount(true) }, LinearLayout.LayoutParams(0, dpi(48), 1f).apply { rightMargin = dpi(6) })
         actions.addView(ghostButton("Log out") { confirmLogout() }, LinearLayout.LayoutParams(0, dpi(48), 1f).apply { leftMargin = dpi(6) })
         col.addView(actions, lp(MATCH, WRAP, 12))
+        // Subscription panel management
+val panelCard = GlassCard(this, 20f, pad = 14)
+
+panelCard.addView(
+    tv("SUBSCRIPTION PANELS", 10f, Palette.cyan, 2)
+)
+
+fun addPanelStatus(name: String, username: String, connected: Boolean) {
+    val row = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(0, dpi(10), 0, dpi(10))
+    }
+
+    val info = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+    }
+
+    info.addView(
+        tv(name, 13f, Palette.text, 2)
+    )
+
+    info.addView(
+        tv(
+            if (connected) "Connected · $username" else "Not connected",
+            10.5f,
+            if (connected) Palette.mint else Palette.muted,
+            0
+        )
+    )
+
+    row.addView(info, LinearLayout.LayoutParams(0, WRAP, 1f))
+
+    row.addView(
+        tv(
+            if (connected) "CONNECTED" else "OFFLINE",
+            9f,
+            if (connected) Palette.mint else Palette.muted,
+            2
+        )
+    )
+
+    panelCard.addView(row, lp(MATCH, WRAP))
+}
+
+addPanelStatus(
+    "PasarGuard · Xray",
+    pasarguardUsername,
+    pasarguardToken.isNotBlank()
+)
+
+addPanelStatus(
+    "AliPanel · WireGuard",
+    alipanelUsername,
+    alipanelToken.isNotBlank()
+)
+
+if (pasarguardToken.isBlank()) {
+    panelCard.addView(
+        primaryButton("Add Xray Profile") {
+            openPanelLogin("pasarguard")
+        },
+        lp(MATCH, dpi(48), 8)
+    )
+}
+
+if (alipanelToken.isBlank()) {
+    panelCard.addView(
+        primaryButton("Add WireGuard Profile") {
+            openPanelLogin("alipanel")
+        },
+        lp(MATCH, dpi(48), 8)
+    )
+}
+
+col.addView(panelCard, lp(MATCH, WRAP, 14))
 
         val anchor = tv("SETTINGS", 10f, Palette.cyan, 2).apply { letterSpacing = 0.22f }
         settingsAnchor = anchor
