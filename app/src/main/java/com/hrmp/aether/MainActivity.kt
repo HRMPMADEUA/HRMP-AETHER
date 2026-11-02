@@ -153,22 +153,53 @@ private var alipanelUsername = ""
 private var activePanelId = "pasarguard"
 
 private fun restorePanelSessions() {
+    val legacyToken = prefs.getString("token", "").orEmpty()
+    val legacyPanel = prefs.getString("login_panel_id", "pasarguard").orEmpty()
+
     pasarguardToken = prefs.getString("session_pasarguard", "").orEmpty()
     alipanelToken = prefs.getString("session_alipanel", "").orEmpty()
 
     pasarguardUsername = prefs.getString("username_pasarguard", "").orEmpty()
     alipanelUsername = prefs.getString("username_alipanel", "").orEmpty()
 
+    // Migrate the previous single-session login without losing it.
+    if (legacyToken.isNotBlank() &&
+        pasarguardToken.isBlank() &&
+        alipanelToken.isBlank()
+    ) {
+        if (legacyPanel.equals("alipanel", true) || legacyPanel.equals("ali", true)) {
+            alipanelToken = legacyToken
+            alipanelUsername = prefs.getString("username", "").orEmpty()
+            prefs.edit()
+                .putString("session_alipanel", alipanelToken)
+                .putString("username_alipanel", alipanelUsername)
+                .apply()
+        } else {
+            pasarguardToken = legacyToken
+            pasarguardUsername = prefs.getString("username", "").orEmpty()
+            prefs.edit()
+                .putString("session_pasarguard", pasarguardToken)
+                .putString("username_pasarguard", pasarguardUsername)
+                .apply()
+        }
+    }
+
+    val savedActive = prefs.getString("active_panel_id", "").orEmpty()
+
     activePanelId = when {
+        savedActive == "alipanel" && alipanelToken.isNotBlank() -> "alipanel"
+        savedActive == "pasarguard" && pasarguardToken.isNotBlank() -> "pasarguard"
         pasarguardToken.isNotBlank() -> "pasarguard"
         alipanelToken.isNotBlank() -> "alipanel"
         else -> "pasarguard"
     }
 
-    token = when (activePanelId) {
-        "alipanel" -> alipanelToken
-        else -> pasarguardToken
-    }
+    token = panelToken(activePanelId)
+
+    prefs.edit()
+        .putString("token", token)
+        .putString("active_panel_id", activePanelId)
+        .apply()
 }
 
 private fun panelToken(panelId: String): String {
@@ -3327,33 +3358,73 @@ private fun savePanelSession(
     // =====================================================================
 
     private fun login() {
-        val user = usernameInput?.text?.toString().orEmpty().trim()
-        val pass = passwordInput?.text?.toString().orEmpty()
-        if (user.isBlank() || pass.isBlank()) { toast("نام کاربری و رمز عبور را وارد کن."); return }
-        loginButton?.apply { text = "Signing in…"; alpha = 0.6f; isEnabled = false }
-        io.execute {
-            try {
-                val response = request("POST", "/api/login", null, JSONObject().put("username", user).put("password", pass).put("panel", selectedLoginPanelId))
-                val newToken = response.optString("token")
-                require(newToken.isNotBlank()) { response.optString("error", "Login token is missing.") }
-                prefs.edit().putString("token", newToken).putString("token_base", lastBase).putString("login_panel_id", selectedLoginPanelId).apply()
-                token = newToken
-                runOnUiThread {
-                    currentTab = 0
-                    serversState = ServersState.IDLE
-                    servers = emptyList()
-                    render()
-                    loadAccount()
+    val user = usernameInput?.text?.toString().orEmpty().trim()
+    val pass = passwordInput?.text?.toString().orEmpty()
+
+    if (user.isBlank() || pass.isBlank()) {
+        toast("نام کاربری و رمز عبور را وارد کن.")
+        return
+    }
+
+    val panelId = selectedLoginPanelId
+
+    loginButton?.apply {
+        text = "Signing in…"
+        alpha = 0.6f
+        isEnabled = false
+    }
+
+    io.execute {
+        try {
+            val body = JSONObject()
+                .put("username", user)
+                .put("password", pass)
+                .put("panel", panelId)
+
+            val response = request("POST", "/api/login", null, body)
+            val newToken = response.optString("token")
+
+            require(newToken.isNotBlank()) {
+                response.optString("error", "Login token is missing.")
+            }
+
+            savePanelSession(panelId, newToken, user)
+
+            prefs.edit()
+                .putString("token_base", lastBase)
+                .putString("login_panel_id", panelId)
+                .apply()
+
+            runOnUiThread {
+                currentTab = 0
+                serversState = ServersState.IDLE
+                servers = emptyList()
+                render()
+                loadAccount()
+            }
+
+        } catch (e: Exception) {
+            runOnUiThread {
+                loginButton?.apply {
+                    text = "Sign in"
+                    alpha = 1f
+                    isEnabled = true
                 }
-            } catch (e: Exception) {
-                runOnUiThread {
-                    loginButton?.apply { text = "Sign in"; alpha = 1f; isEnabled = true }
-                    toast(if ((e.message ?: "").contains("401") || (e.message ?: "").contains("invalid", true)) "نام کاربری یا رمز عبور درست نیست." else "ورود انجام نشد. اتصال اینترنت را بررسی کن و دوباره تلاش کن.")
-                }
+
+                toast(
+                    if (
+                        (e.message ?: "").contains("401") ||
+                        (e.message ?: "").contains("invalid", true)
+                    ) {
+                        "نام کاربری یا رمز عبور درست نیست."
+                    } else {
+                        "ورود انجام نشد. اتصال اینترنت را بررسی کن و دوباره تلاش کن."
+                    }
+                )
             }
         }
     }
-
+    }
     /** Creates an account on the first reachable server (Iranian server, then Worker) and signs in. */
     private fun register() {
         val user = usernameInput?.text?.toString().orEmpty().trim()
