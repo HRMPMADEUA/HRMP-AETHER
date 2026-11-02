@@ -232,6 +232,8 @@ class MainActivity : Activity() {
     private var usernameInput: EditText? = null
     private var passwordInput: EditText? = null
     private var loginButton: TextView? = null
+    private var loginPanelLabel: TextView? = null
+    private var selectedLoginPanelId: String = "pasarguard"
     private var confirmInput: EditText? = null
     private var registerMode = false
 
@@ -2615,9 +2617,19 @@ class MainActivity : Activity() {
         col.addView(tv("با حساب اشتراک وارد شو و کانفیگ‌هایت را مدیریت کن.", 13f, Palette.muted, 0), lp(MATCH, WRAP, 12))
 
         val card = GlassCard(this, 24f, pad = 16)
+        selectedLoginPanelId = prefs.getString("login_panel_id", selectedLoginPanelId)?.let {
+            if (it.equals("alipanel", true) || it.equals("ali", true)) "alipanel" else "pasarguard"
+        } ?: "pasarguard"
         usernameInput = field("Username", false)
         passwordInput = field("Password", true)
-        card.addView(usernameInput!!, lp(MATCH, dpi(54)))
+        loginPanelLabel = tv("Panel: ${if (selectedLoginPanelId == "alipanel") "AliPanel · WireGuard" else "PasarGuard · Xray"}  ·  Change", 12.5f, Palette.cyan, 1).apply {
+            gravity = Gravity.CENTER
+            minHeight = dpi(46)
+            background = Palette.glass(this@MainActivity, 13f, Palette.stroke, Palette.fieldFill, Palette.fieldFill)
+            setOnClickListener { showLoginPanelPicker() }
+        }
+        card.addView(loginPanelLabel, lp(MATCH, dpi(46)))
+        card.addView(usernameInput!!, lp(MATCH, dpi(54), 10))
         card.addView(passwordInput!!, lp(MATCH, dpi(54), 10))
         if (registerMode) {
             confirmInput = field("Confirm password", true)
@@ -2641,6 +2653,20 @@ class MainActivity : Activity() {
             lp(MATCH, WRAP, 16)
         )
         return sv
+    }
+
+    private fun showLoginPanelPicker() {
+        val labels = arrayOf("PasarGuard · Xray", "AliPanel · WireGuard")
+        val checked = if (selectedLoginPanelId == "alipanel") 1 else 0
+        dialogBuilder().setTitle("Select subscription panel")
+            .setSingleChoiceItems(labels, checked) { dialog, which ->
+                selectedLoginPanelId = if (which == 1) "alipanel" else "pasarguard"
+                prefs.edit().putString("login_panel_id", selectedLoginPanelId).apply()
+                loginPanelLabel?.text = "Panel: ${labels[which]}  ·  Change"
+                dialog.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun field(hintText: String, password: Boolean) = EditText(this).apply {
@@ -3238,10 +3264,10 @@ class MainActivity : Activity() {
         loginButton?.apply { text = "Signing in…"; alpha = 0.6f; isEnabled = false }
         io.execute {
             try {
-                val response = request("POST", "/api/login", null, JSONObject().put("username", user).put("password", pass))
+                val response = request("POST", "/api/login", null, JSONObject().put("username", user).put("password", pass).put("panel", selectedLoginPanelId))
                 val newToken = response.optString("token")
                 require(newToken.isNotBlank()) { response.optString("error", "Login token is missing.") }
-                prefs.edit().putString("token", newToken).putString("token_base", lastBase).apply()
+                prefs.edit().putString("token", newToken).putString("token_base", lastBase).putString("login_panel_id", selectedLoginPanelId).apply()
                 token = newToken
                 runOnUiThread {
                     currentTab = 0
@@ -3369,6 +3395,14 @@ class MainActivity : Activity() {
         index: Int,
         raw: String = ""
     ): String {
+        // AliPanel's subscription text labels each individual WireGuard profile
+        // with a canonical line such as "# Name = Turkey". Prefer that exact label
+        // over a generic panel username or the endpoint hostname.
+        if (panelId.equals("ali", true) || panelId.equals("alipanel", true)) {
+            val aliCommentName = Regex("(?im)^\\s*#\\s*Name\\s*=\\s*(.+?)\\s*$")
+                .find(raw)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+            if (aliCommentName.isNotBlank() && !ProfileParser.looksTechnical(aliCommentName)) return aliCommentName
+        }
         // Prefer an actual tunnel/client/profile label over a generic account name.
         val keys = listOf(
             "wireguard_name", "wireguardName", "wg_name", "wgName",
