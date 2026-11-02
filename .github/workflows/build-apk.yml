@@ -5,6 +5,7 @@ on: [push, workflow_dispatch]
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -12,6 +13,42 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+
+      # Prepare TIREXNET release signing key
+      - name: Prepare TIREXNET release signing key
+        env:
+          TIREXNET_KEYSTORE_BASE64: ${{ secrets.TIREXNET_KEYSTORE_BASE64 }}
+          TIREXNET_STORE_PASSWORD: ${{ secrets.TIREXNET_STORE_PASSWORD }}
+          TIREXNET_KEY_ALIAS: ${{ secrets.TIREXNET_KEY_ALIAS }}
+          TIREXNET_KEY_PASSWORD: ${{ secrets.TIREXNET_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          test -n "$TIREXNET_KEYSTORE_BASE64" || {
+            echo "Missing secret: TIREXNET_KEYSTORE_BASE64"
+            exit 1
+          }
+
+          test -n "$TIREXNET_STORE_PASSWORD" || {
+            echo "Missing secret: TIREXNET_STORE_PASSWORD"
+            exit 1
+          }
+
+          test -n "$TIREXNET_KEY_ALIAS" || {
+            echo "Missing secret: TIREXNET_KEY_ALIAS"
+            exit 1
+          }
+
+          test -n "$TIREXNET_KEY_PASSWORD" || {
+            echo "Missing secret: TIREXNET_KEY_PASSWORD"
+            exit 1
+          }
+
+          echo "$TIREXNET_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/tirexnet-release.jks"
+
+          test -s "$RUNNER_TEMP/tirexnet-release.jks"
+
+          echo "TIREXNET_KEYSTORE_PATH=$RUNNER_TEMP/tirexnet-release.jks" >> "$GITHUB_ENV"
 
       - uses: android-actions/setup-android@v3
         with:
@@ -31,17 +68,25 @@ jobs:
       - name: Build MHRV Android native library
         run: |
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+
           cargo install cargo-ndk --locked
+
           cd .native-src/mhrv
+
           cargo ndk -t arm64-v8a -o "$GITHUB_WORKSPACE/app/src/main/jniLibs" build --release --lib
+
           ABI_DIR="$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
+
           test -s "$ABI_DIR/libmhrv_rs.so"
+
           shopt -s nullglob
           TUN2PROXY_LIBS=("$ABI_DIR"/libtun2proxy-*.so)
+
           if [ "${#TUN2PROXY_LIBS[@]}" -gt 0 ]; then
             cp "${TUN2PROXY_LIBS[0]}" "$ABI_DIR/libtun2proxy.so"
             rm -f "${TUN2PROXY_LIBS[@]}"
           fi
+
           test -s "$ABI_DIR/libtun2proxy.so"
 
       # Build StormDNS and SNISPF Android ARM64 engines
@@ -58,9 +103,12 @@ jobs:
       - name: Build StormDNS Android ARM64 client
         run: |
           mkdir -p app/src/main/jniLibs/arm64-v8a
+
           cd .native-src/stormdns
+
           CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -trimpath -buildmode=pie -ldflags='-s -w' \
             -o "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libstormdns.so" ./cmd/client
+
           test -s "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libstormdns.so"
 
       - uses: actions/checkout@v4
@@ -72,14 +120,17 @@ jobs:
       - name: Build Patterniha-compatible rootless SNI fragmentation engine
         run: |
           cd .native-src/snispf/engine
+
           CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -trimpath -buildmode=pie -ldflags='-s -w' \
             -o "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libsnispf.so" ./cmd/snispf
+
           test -s "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libsnispf.so"
 
       # Download Xray engine
       - name: Download Xray engine (legacy VLESS compatible)
         run: |
           mkdir -p app/libs
+
           curl -fL --retry 3 --retry-delay 2 \
             https://github.com/2dust/AndroidLibXrayLite/releases/download/v26.6.27/libv2ray.aar \
             -o app/libs/libv2ray.aar
@@ -88,11 +139,20 @@ jobs:
         with:
           gradle-version: '9.6.1'
 
-      - name: Build TIREXNET APK
-        run: gradle --no-daemon assembleDebug
+      # Build both Debug and signed Release APKs
+      - name: Build TIREXNET APKs
+        run: gradle --no-daemon assembleDebug assembleRelease
 
+      # Upload signed Release APK
       - uses: actions/upload-artifact@v4
         with:
           name: TIREXNET-APK
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+
+      # Upload Debug APK separately
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TIREXNET-DEBUG-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
