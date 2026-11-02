@@ -117,7 +117,16 @@ class MainActivity : Activity() {
      * [meta] holds the endpoint (host/port) that engines and the latency probe need.
      * It must never be rendered. [country] is an ISO-3166 alpha-2 code from trusted metadata, or "".
      */
-    private data class ServerItem(val name: String, val raw: String, val engine: ConfigEngine, val meta: ProfileMeta, val local: Boolean = false, val country: String = "")
+    private data class ServerItem(
+        val name: String,
+        val raw: String,
+        val engine: ConfigEngine,
+        val meta: ProfileMeta,
+        val local: Boolean = false,
+        val country: String = "",
+        val panelId: String = "",
+        val panelName: String = ""
+    )
     private class PingHolder(val text: TextView, val button: FrameLayout, val spinner: ProgressBar, val icon: IconView)
     private enum class ServersState { IDLE, LOADING, ERROR, READY }
 
@@ -1015,7 +1024,11 @@ class MainActivity : Activity() {
                     row.addView(flagBox(46, 14f, item.country, if (sel) Palette.cyan else Palette.ice).also { it.setSelectedState(sel) }, lp(dpi(50), dpi(50)))
                     val info = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(12), 0, dpi(8), 0) }
                     info.addView(tv(item.name, 14.5f, Palette.text, 1).apply { maxLines = 2; ellipsize = TextUtils.TruncateAt.END })
-                    val sub = if (sel) "Selected" else if (item.local) "Saved on this phone" else ""
+                    val sub = listOf(
+                        if (sel) "Selected" else "",
+                        item.panelName.ifBlank { if (item.panelId.equals("ali", true) || item.panelId.equals("alipanel", true)) "AliPanel" else "" },
+                        if (item.local) "Saved on this phone" else ""
+                    ).map { it.trim() }.filter { it.isNotEmpty() }.distinct().joinToString(" • ")
                     if (sub.isNotEmpty()) info.addView(tv(sub, 10.5f, if (sel) Palette.cyan else Palette.muted, 0), lp(MATCH, WRAP, 4))
                     row.addView(info, LinearLayout.LayoutParams(0, WRAP, 1f))
 
@@ -2771,7 +2784,13 @@ class MainActivity : Activity() {
             showTab(1)
             return
         }
-        val engine = ConfigDetector.detect(raw)
+        val selected = selectedItem()
+        val detectedEngine = ConfigDetector.detect(raw)
+        val engine = when {
+            selected?.panelId.equals("ali", ignoreCase = true) || selected?.panelId.equals("alipanel", ignoreCase = true) -> ConfigEngine.WIREGUARD
+            selected != null && selected.engine != ConfigEngine.UNKNOWN -> selected.engine
+            else -> detectedEngine
+        }
         if (engine == ConfigEngine.UNKNOWN) {
             toast("فرمت کانفیگ شناسایی نشد. Xray / WireGuard / OpenVPN / DNS Changer / SlipNet لازم است.")
             showTab(1)
@@ -3321,10 +3340,88 @@ class MainActivity : Activity() {
         }
     }
 
+    /** Resolve engine from trusted API metadata before falling back to raw-text detection.
+     * AliPanel profiles are guaranteed to be classic WireGuard by the server API contract.
+     */
+    private fun resolveApiEngine(
+        engineValue: String,
+        panelIdValue: String,
+        panelNameValue: String,
+        fallback: ConfigEngine
+    ): ConfigEngine {
+        val engine = engineValue.trim().uppercase(Locale.US).replace('-', '_').replace(' ', '_')
+        val panelId = panelIdValue.trim().lowercase(Locale.US)
+        val panelName = panelNameValue.trim().lowercase(Locale.US)
+        if (panelId in setOf("ali", "alipanel", "wireguard") || panelName == "alipanel") {
+            return ConfigEngine.WIREGUARD
+        }
+        return when (engine) {
+            "WIREGUARD", "WIRE_GUARD", "WG", "WIREGUARD_TUNNEL" -> ConfigEngine.WIREGUARD
+            "AMNEZIAWG", "AMNEZIA_WG", "AWG" -> ConfigEngine.AMNEZIAWG
+            else -> fallback
+        }
+    }
+
+    private fun configNameFromApi(
+        item: JSONObject?,
+        meta: ProfileMeta,
+        panelId: String,
+        index: Int,
+        raw: String = ""
+    ): String {
+        // Prefer an actual tunnel/client/profile label over a generic account name.
+        val keys = listOf(
+            "wireguard_name", "wireguardName", "wg_name", "wgName",
+            "config_name", "configName", "tunnel_name", "tunnelName",
+            "profile_name", "profileName", "peer_name", "peerName",
+            "client_name", "clientName", "display_name", "displayName",
+            "remarks", "remark", "title", "label", "alias", "tag", "note",
+            "name", "username", "user_name", "userName"
+        )
+        val apiNames = ArrayList<String>()
+        fun collectNames(source: JSONObject?) {
+            if (source == null) return
+            keys.forEach { key ->
+                val value = source.optString(key, "").trim()
+                if (value.isNotBlank() && !value.equals("null", true)) apiNames.add(value)
+            }
+        }
+        collectNames(item)
+        // Some panel adapters nest the peer/client metadata instead of flattening it.
+        if (item != null) {
+            listOf("metadata", "meta", "client", "peer", "profile", "wireguard", "wg")
+                .forEach { key -> collectNames(item.optJSONObject(key)) }
+        }
+        val preferred = apiNames.firstOrNull { !ProfileParser.looksTechnical(it) }
+        if (!preferred.isNullOrBlank()) return preferred
+
+        // Standard WireGuard files do not define a tunnel name. Some panels add a
+        // harmless comment, which can preserve the original profile filename/label.
+        val commentName = Regex("(?im)^\\s*#\\s*(?:name|profile|remark|tunnel)\\s*[:=]\\s*(.+?)\\s*$")
+            .find(raw)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+        if (commentName.isNotBlank() && !ProfileParser.looksTechnical(commentName)) return commentName
+
+        val parsed = meta.name.trim()
+        if (parsed.isNotBlank() && !ProfileParser.looksTechnical(parsed)) return parsed
+        return if (panelId.equals("ali", true) || panelId.equals("alipanel", true)) {
+            "WireGuard Profile $index"
+        } else {
+            ProfileParser.bestName(emptyList(), index)
+        }
+    }
+
     // Last successfully downloaded subscription list, kept on the phone for offline use.
     private fun saveRemoteCache(remote: List<ServerItem>) {
         val arr = JSONArray()
-        remote.forEach { arr.put(JSONObject().put("name", it.name).put("raw", it.raw).put("country", it.country)) }
+        remote.forEach { profile ->
+            arr.put(JSONObject()
+                .put("name", profile.name)
+                .put("raw", profile.raw)
+                .put("country", profile.country)
+                .put("engine", profile.engine.name)
+                .put("panelId", profile.panelId)
+                .put("panelName", profile.panelName))
+        }
         prefs.edit().putString("remote_servers_cache", arr.toString()).apply()
     }
 
@@ -3337,9 +3434,13 @@ class MainActivity : Activity() {
             val raw = o.optString("raw", "").trim()
             if (raw.isEmpty()) continue
             val meta = ProfileParser.parse(raw)
-            val name = ProfileParser.bestName(listOf(o.optString("name", ""), meta.name), out.size + 1)
-            out.add(ServerItem(name, raw, meta.engine, meta, false,
-                normalizeCountry(o.optString("country", "")).ifEmpty { ProfileParser.flagCountryOf(name) }))
+            val panelId = o.optString("panelId", "")
+            val panelName = o.optString("panelName", "")
+            val engine = resolveApiEngine(o.optString("engine", ""), panelId, panelName, meta.engine)
+            val name = configNameFromApi(o, meta, panelId, out.size + 1, raw)
+            out.add(ServerItem(name, raw, engine, meta, false,
+                normalizeCountry(o.optString("country", "")).ifEmpty { ProfileParser.flagCountryOf(name) },
+                panelId, panelName))
         }
         return out
     }
@@ -3381,23 +3482,21 @@ class MainActivity : Activity() {
                     if (raw.isNotBlank()) {
                         val meta = ProfileParser.parse(raw)
                         val obj = item as? JSONObject
-                        // Subscription display name first, then the name inside the config itself.
-                        // A hostname is never used as a title.
-                        val keys = listOf("name", "remarks", "remark", "title", "ps", "label", "display_name", "displayName")
-                        val extra = ArrayList<String>()
-                        obj?.keys()?.forEach { k ->
-                            val kl = k.lowercase(Locale.US)
-                            if (k !in keys && listOf("name", "remark", "title", "label", "tag", "note", "desc").any { kl.contains(it) }) extra.add(k)
-                        }
-                        val given = (keys + extra).map { k -> obj?.optString(k, "").orEmpty() }
-                        val displayName = ProfileParser.bestName(given + meta.name, remote.size + 1)
-                        // Country only from explicit metadata supplied with the profile.
+                        val panelId = if (obj == null) "" else obj.optString("panelId", obj.optString("panel_id", ""))
+                        val panelName = if (obj == null) "" else obj.optString("panelName", obj.optString("panel_name", ""))
+                        val apiEngine = if (obj == null) "" else obj.optString("engine", obj.optString("protocol", ""))
+                        val resolvedEngine = resolveApiEngine(apiEngine, panelId, panelName, meta.engine)
+
+                        // The server's config name is authoritative. For AliPanel it is the
+                        // client/peer label supplied by the panel adapter, not the endpoint host.
+                        val displayName = configNameFromApi(obj, meta, panelId, remote.size + 1, raw)
+
+                        // Country comes only from explicit panel metadata or a flag in the name.
                         val explicit = listOf("country_code", "countryCode", "cc", "country")
                             .map { k -> normalizeCountry(obj?.optString(k, "").orEmpty()) }
                             .firstOrNull { it.isNotEmpty() }.orEmpty()
-                        // No explicit field: use the flag already written in the profile name.
                         val country = explicit.ifEmpty { ProfileParser.flagCountryOf(displayName) }
-                        remote.add(ServerItem(displayName, raw, meta.engine, meta, false, country))
+                        remote.add(ServerItem(displayName, raw, resolvedEngine, meta, false, country, panelId, panelName))
                     }
                 }
                 if (remote.isNotEmpty()) saveRemoteCache(remote) // keep for the next launch without internet
