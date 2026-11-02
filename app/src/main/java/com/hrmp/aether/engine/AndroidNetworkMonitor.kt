@@ -2,7 +2,6 @@ package com.tirexnet.app.engine
 
 import android.content.Context
 import android.net.ConnectivityManager
-import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
@@ -12,16 +11,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.net.Inet6Address
 
-/**
- * Tracks the physical internet connection used by WireGuard.
- *
- * Important:
- * Android reports the active VPN as the default network after a VPN
- * has been established. Passing that VPN network back to WireGuard can
- * cause tunnel recursion and a connected-without-traffic condition.
- *
- * This monitor therefore accepts only networks with NET_CAPABILITY_NOT_VPN.
- */
 class AndroidNetworkMonitor(context: Context) : NetworkMonitor {
 
     private val appContext = context.applicationContext
@@ -58,7 +47,7 @@ class AndroidNetworkMonitor(context: Context) : NetworkMonitor {
 
         override fun onLinkPropertiesChanged(
             network: Network,
-            linkProperties: LinkProperties
+            linkProperties: android.net.LinkProperties
         ) {
             refresh()
         }
@@ -77,20 +66,10 @@ class AndroidNetworkMonitor(context: Context) : NetworkMonitor {
         refresh()
     }
 
-    /**
-     * Selects the real underlying network.
-     *
-     * The current default network is preferred only if it is not a VPN.
-     * Otherwise, the best available physical internet network is selected.
-     */
     @Synchronized
     private fun refresh() {
         try {
-            val active = runCatching {
-                cm.activeNetwork
-            }.getOrNull()
-
-            // Prefer the current default network only when it is physical.
+            val active = cm.activeNetwork
             val activeCandidate = active?.let { createCandidate(it) }
 
             if (activeCandidate != null) {
@@ -98,14 +77,9 @@ class AndroidNetworkMonitor(context: Context) : NetworkMonitor {
                 return
             }
 
-            // The default network may be the VPN itself.
-            // Search all available networks and explicitly reject VPN networks.
-            val candidates = runCatching {
-                cm.allNetworks
-                    .mapNotNull { network ->
-                        createCandidate(network)
-                    }
-            }.getOrDefault(emptyList())
+            val candidates = cm.allNetworks.mapNotNull {
+                createCandidate(it)
+            }
 
             val selected = candidates.maxWithOrNull(
                 compareBy<Candidate> { it.validated }
@@ -114,47 +88,38 @@ class AndroidNetworkMonitor(context: Context) : NetworkMonitor {
 
             mutableState.value = selected?.snapshot
 
-        } catch (_: SecurityException) {
-            mutableState.value = null
         } catch (_: Throwable) {
             mutableState.value = null
         }
     }
 
     private fun createCandidate(network: Network): Candidate? {
-        val capabilities = runCatching {
-            cm.getNetworkCapabilities(network)
-        }.getOrNull() ?: return null
+        val capabilities = cm.getNetworkCapabilities(network)
+            ?: return null
 
-        // Never use a VPN network as the WireGuard underlay.
         if (!capabilities.hasCapability(
                 NetworkCapabilities.NET_CAPABILITY_NOT_VPN
             )
-        ) {
-            return null
-        }
+        ) return null
 
-        // The underlying network must support internet access.
         if (!capabilities.hasCapability(
                 NetworkCapabilities.NET_CAPABILITY_INTERNET
             )
-        ) {
-            return null
-        }
+        ) return null
 
-        val links = runCatching {
-            cm.getLinkProperties(network)
-        }.getOrNull()
+        val links = cm.getLinkProperties(network)
 
-        val hasIpv6: Boolean? = links?.linkAddresses?.any { link ->
-            val address = link.address
+        // NetworkSnapshot requires a non-null Boolean.
+        val hasIpv6: Boolean =
+            links?.linkAddresses?.any { link ->
+                val address = link.address
 
-            address is Inet6Address &&
-                !address.isLoopbackAddress &&
-                !address.isLinkLocalAddress &&
-                !address.isMulticastAddress &&
-                !address.isAnyLocalAddress
-        }
+                address is Inet6Address &&
+                    !address.isLoopbackAddress &&
+                    !address.isLinkLocalAddress &&
+                    !address.isMulticastAddress &&
+                    !address.isAnyLocalAddress
+            } ?: false
 
         val snapshot = NetworkSnapshot(
             network.toString(),
@@ -183,10 +148,6 @@ class AndroidNetworkMonitor(context: Context) : NetworkMonitor {
             else -> 0
         }
 
-        return Candidate(
-            snapshot = snapshot,
-            validated = validated,
-            priority = priority
-        )
+        return Candidate(snapshot, validated, priority)
     }
 }
