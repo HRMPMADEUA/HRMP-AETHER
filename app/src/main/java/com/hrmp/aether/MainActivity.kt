@@ -140,7 +140,76 @@ class MainActivity : Activity() {
     private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
 
     // ---- session / connection state
-    private var token = ""
+    // ---- session / connection state
+private var token = ""
+
+// Independent panel sessions
+private var pasarguardToken = ""
+private var alipanelToken = ""
+
+private var pasarguardUsername = ""
+private var alipanelUsername = ""
+
+private var activePanelId = "pasarguard"
+
+private fun restorePanelSessions() {
+    pasarguardToken = prefs.getString("session_pasarguard", "").orEmpty()
+    alipanelToken = prefs.getString("session_alipanel", "").orEmpty()
+
+    pasarguardUsername = prefs.getString("username_pasarguard", "").orEmpty()
+    alipanelUsername = prefs.getString("username_alipanel", "").orEmpty()
+
+    activePanelId = when {
+        pasarguardToken.isNotBlank() -> "pasarguard"
+        alipanelToken.isNotBlank() -> "alipanel"
+        else -> "pasarguard"
+    }
+
+    token = when (activePanelId) {
+        "alipanel" -> alipanelToken
+        else -> pasarguardToken
+    }
+}
+
+private fun panelToken(panelId: String): String {
+    return when (panelId.lowercase()) {
+        "ali", "alipanel" -> alipanelToken
+        else -> pasarguardToken
+    }
+}
+
+private fun savePanelSession(
+    panelId: String,
+    newToken: String,
+    username: String
+) {
+    val editor = prefs.edit()
+
+    when (panelId.lowercase()) {
+        "ali", "alipanel" -> {
+            alipanelToken = newToken
+            alipanelUsername = username
+
+            editor.putString("session_alipanel", newToken)
+            editor.putString("username_alipanel", username)
+        }
+
+        else -> {
+            pasarguardToken = newToken
+            pasarguardUsername = username
+
+            editor.putString("session_pasarguard", newToken)
+            editor.putString("username_pasarguard", username)
+        }
+    }
+
+    activePanelId = panelId.lowercase()
+    token = newToken
+
+    editor.putString("active_panel_id", activePanelId)
+    editor.putString("token", newToken)
+    editor.apply()
+}
     private var pendingRaw = ""
     private var pendingEngine = ConfigEngine.UNKNOWN
     private var state = OrbState.DISCONNECTED
@@ -294,7 +363,7 @@ class MainActivity : Activity() {
         window.statusBarColor = Color.TRANSPARENT
         window.navigationBarColor = Color.TRANSPARENT
 
-        token = prefs.getString("token", "") ?: ""
+        restorePanelSessions()
         statusMessage = safeSavedStatus(prefs.getString("connection_message", "").orEmpty())
         sortByPing = prefs.getBoolean("sort_by_ping", false)
         regionFilter = prefs.getString("region_filter", "ALL") ?: "ALL"
