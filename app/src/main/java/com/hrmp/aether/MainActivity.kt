@@ -573,7 +573,7 @@ private fun savePanelSession(
         contentFrame = content
         column.addView(content, LinearLayout.LayoutParams(MATCH, 0, 1f))
 
-        if (token.isBlank()) {
+        if (token.isBlank() || addingPanelLogin) {
             nav = null
             tabViews = emptyList()
             content.addView(buildLogin(), FrameLayout.LayoutParams(MATCH, MATCH))
@@ -2787,9 +2787,27 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
     }
 
     // --------------------------------------------------------------- Login
-    private fun buildLogin(): View {
+    private fun openPanelLogin(panelId: String) {
+    selectedLoginPanelId = panelId
+    addingPanelLogin = true
+    registerMode = false
+    prefs.edit()
+        .putString("login_panel_id", panelId)
+        .apply()
+    render()
+    }
+private fun buildLogin(): View {
         val (sv, col) = tabScroll()
         col.addView(tv("SECURE ACCESS", 10f, Palette.cyan, 2).apply { letterSpacing = 0.26f }, lp(WRAP, WRAP, 22))
+        if (addingPanelLogin && token.isNotBlank()) {
+    col.addView(
+        ghostButton("← Back to profile") {
+            addingPanelLogin = false
+            render()
+        },
+        lp(MATCH, dpi(44), 8)
+    )
+        }
         col.addView(tv("Your internet.\nYour rules.", 36f, Palette.text, 3).apply { setLineSpacing(0f, 1.05f) }, lp(WRAP, WRAP, 10))
         col.addView(tv("با حساب اشتراک وارد شو و کانفیگ‌هایت را مدیریت کن.", 13f, Palette.muted, 0), lp(MATCH, WRAP, 12))
 
@@ -3473,11 +3491,14 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
                 .apply()
 
             runOnUiThread {
-                currentTab = 0
-                serversState = ServersState.IDLE
-                servers = emptyList()
-                render()
-                loadAccount()
+    addingPanelLogin = false
+    currentTab = 3
+    serversState = ServersState.IDLE
+    servers = emptyList()
+
+    render()
+    loadAccount()
+    loadServers()
             }
 
         } catch (e: Exception) {
