@@ -3790,6 +3790,7 @@ private fun buildLogin(): View {
                     )
 
                 successfulPanels++
+                successfulPanelIds.add(panelId.lowercase())
 
                 for (i in 0 until arr.length()) {
                     val item = arr.opt(i)
@@ -3881,10 +3882,28 @@ private fun buildLogin(): View {
         }
 
         if (successfulPanels > 0) {
-            saveRemoteCache(remote)
+            val updatedRemote = ArrayList<ServerItem>()
+updatedRemote.addAll(remote)
+
+val knownRaw = updatedRemote
+    .map { it.raw.trim() }
+    .toHashSet()
+
+cached.forEach { old ->
+    val oldPanel = old.panelId.lowercase()
+
+    if (
+        oldPanel !in successfulPanelIds &&
+        knownRaw.add(old.raw.trim())
+    ) {
+        updatedRemote.add(old)
+    }
+}
+
+saveRemoteCache(updatedRemote)
 
             runOnUiThread {
-                servers = mergeSavedAndRemote(remote)
+                servers = mergeSavedAndRemote(updatedRemote)
                 serversState = ServersState.READY
                 serversError = ""
 
