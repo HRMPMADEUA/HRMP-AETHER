@@ -3627,59 +3627,84 @@ private fun buildLogin(): View {
     }
 
     private fun configNameFromApi(
-        item: JSONObject?,
-        meta: ProfileMeta,
-        panelId: String,
-        index: Int,
-        raw: String = ""
-    ): String {
-        // AliPanel's subscription text labels each individual WireGuard profile
-        // with a canonical line such as "# Name = Turkey". Prefer that exact label
-        // over a generic panel username or the endpoint hostname.
-        if (panelId.equals("ali", true) || panelId.equals("alipanel", true)) {
-            val aliCommentName = Regex("(?im)^\\s*#\\s*Name\\s*=\\s*(.+?)\\s*$")
-                .find(raw)?.groupValues?.getOrNull(1)?.trim().orEmpty()
-            if (aliCommentName.isNotBlank() && !ProfileParser.looksTechnical(aliCommentName)) return aliCommentName
-        }
-        // Prefer an actual tunnel/client/profile label over a generic account name.
-        val keys = listOf(
-            "wireguard_name", "wireguardName", "wg_name", "wgName",
-            "config_name", "configName", "tunnel_name", "tunnelName",
-            "profile_name", "profileName", "peer_name", "peerName",
-            "client_name", "clientName", "display_name", "displayName",
-            "remarks", "remark", "title", "label", "alias", "tag", "note",
-            "name", "username", "user_name", "userName"
-        )
-        val apiNames = ArrayList<String>()
-        fun collectNames(source: JSONObject?) {
-            if (source == null) return
-            keys.forEach { key ->
-                val value = source.optString(key, "").trim()
-                if (value.isNotBlank() && !value.equals("null", true)) apiNames.add(value)
-            }
-        }
-        collectNames(item)
-        // Some panel adapters nest the peer/client metadata instead of flattening it.
-        if (item != null) {
-            listOf("metadata", "meta", "client", "peer", "profile", "wireguard", "wg")
-                .forEach { key -> collectNames(item.optJSONObject(key)) }
-        }
-        val preferred = apiNames.firstOrNull { !ProfileParser.looksTechnical(it) }
-        if (!preferred.isNullOrBlank()) return preferred
+    item: JSONObject?,
+    meta: ProfileMeta,
+    panelId: String,
+    index: Int,
+    raw: String = ""
+): String {
+    fun validName(value: String): Boolean {
+        val v = value.trim()
+        return v.isNotBlank() &&
+            !ProfileParser.looksTechnical(v) &&
+            !ProfileParser.isPlaceholder(v) &&
+            !Regex("^\\d+$").matches(v)
+    }
 
-        // Standard WireGuard files do not define a tunnel name. Some panels add a
-        // harmless comment, which can preserve the original profile filename/label.
-        val commentName = Regex("(?im)^\\s*#\\s*(?:name|profile|remark|tunnel)\\s*[:=]\\s*(.+?)\\s*$")
+    // AliPanel: نام اصلی داخل کامنت کانفیگ
+    if (panelId.equals("ali", true) || panelId.equals("alipanel", true)) {
+        val name = Regex("(?im)^\\s*#\\s*Name\\s*=\\s*(.+?)\\s*$")
             .find(raw)?.groupValues?.getOrNull(1)?.trim().orEmpty()
-        if (commentName.isNotBlank() && !ProfileParser.looksTechnical(commentName)) return commentName
 
-        val parsed = meta.name.trim()
-        if (parsed.isNotBlank() && !ProfileParser.looksTechnical(parsed)) return parsed
-        return if (panelId.equals("ali", true) || panelId.equals("alipanel", true)) {
-            "WireGuard Profile $index"
-        } else {
-            ProfileParser.bestName(emptyList(), index)
+        if (validName(name)) return name
+    }
+
+    // اولویت با اسم واقعی داخل خود کانفیگ
+    if (validName(meta.name)) return meta.name.trim()
+
+    val keys = listOf(
+        "wireguard_name", "wireguardName",
+        "wg_name", "wgName",
+        "config_name", "configName",
+        "tunnel_name", "tunnelName",
+        "profile_name", "profileName",
+        "peer_name", "peerName",
+        "client_name", "clientName",
+        "display_name", "displayName",
+        "filename", "file_name",
+        "remarks", "remark",
+        "title", "label", "alias", "tag", "note",
+        "name", "username", "user_name", "userName"
+    )
+
+    val names = ArrayList<String>()
+
+    fun collect(source: JSONObject?) {
+        if (source == null) return
+
+        for (key in keys) {
+            val value = source.optString(key, "").trim()
+            if (validName(value)) names.add(value)
         }
+    }
+
+    collect(item)
+
+    if (item != null) {
+        listOf(
+            "metadata", "meta", "client",
+            "peer", "profile", "wireguard", "wg"
+        ).forEach {
+            collect(item.optJSONObject(it))
+        }
+    }
+
+    names.firstOrNull()?.let { return it }
+
+    val commentName = Regex(
+        "(?im)^\\s*#\\s*(?:name|profile|remark|tunnel)\\s*[:=]\\s*(.+?)\\s*$"
+    ).find(raw)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+
+    if (validName(commentName)) return commentName
+
+    return if (
+        panelId.equals("ali", true) ||
+        panelId.equals("alipanel", true)
+    ) {
+        "WireGuard Profile $index"
+    } else {
+        "Server $index"
+    }
     }
 
     // Last successfully downloaded subscription list, kept on the phone for offline use.
