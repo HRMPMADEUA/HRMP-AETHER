@@ -19,49 +19,145 @@ jobs:
         env:
           TIREXNET_KEYSTORE_BASE64: ${{ secrets.TIREXNET_KEYSTORE_BASE64 }}
           TIREXNET_STORE_PASSWORD: ${{ secrets.TIREXNET_STORE_PASSWORD }}
-          TIREXNET_KEY_ALIAS: ${{ secrets.TIREXNET_KEY_ALIAS }}
           TIREXNET_KEY_PASSWORD: ${{ secrets.TIREXNET_KEY_PASSWORD }}
         run: |
           set -euo pipefail
 
           test -n "$TIREXNET_KEYSTORE_BASE64" || {
-            echo "Missing secret: TIREXNET_KEYSTORE_BASE64"
+            echo "::error::Missing secret: TIREXNET_KEYSTORE_BASE64"
             exit 1
           }
 
           test -n "$TIREXNET_STORE_PASSWORD" || {
-            echo "Missing secret: TIREXNET_STORE_PASSWORD"
-            exit 1
-          }
-
-          test -n "$TIREXNET_KEY_ALIAS" || {
-            echo "Missing secret: TIREXNET_KEY_ALIAS"
+            echo "::error::Missing secret: TIREXNET_STORE_PASSWORD"
             exit 1
           }
 
           test -n "$TIREXNET_KEY_PASSWORD" || {
-            echo "Missing secret: TIREXNET_KEY_PASSWORD"
+            echo "::error::Missing secret: TIREXNET_KEY_PASSWORD"
             exit 1
           }
 
-          echo "$TIREXNET_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/tirexnet-release.jks"
+          printf '%s' "$TIREXNET_KEYSTORE_BASE64" \
+            | base64 --decode > "$RUNNER_TEMP/tirexnet-release.jks"
 
-          test -s "$RUNNER_TEMP/tirexnet-release.jks"
+          test -s "$RUNNER_TEMP/tirexnet-release.jks" || {
+            echo "::error::Decoded keystore is empty."
+            exit 1
+          }
 
           echo "TIREXNET_KEYSTORE_PATH=$RUNNER_TEMP/tirexnet-release.jks" >> "$GITHUB_ENV"
+
           printf 'TIREXNET_STORE_PASSWORD=%s\n' "$TIREXNET_STORE_PASSWORD" >> "$GITHUB_ENV"
-          printf 'TIREXNET_KEY_ALIAS=%s\n' "$TIREXNET_KEY_ALIAS" >> "$GITHUB_ENV"
           printf 'TIREXNET_KEY_PASSWORD=%s\n' "$TIREXNET_KEY_PASSWORD" >> "$GITHUB_ENV"
 
-      - name: Verify release signing environment
+          echo "Keystore file prepared."
+
+      # Automatically detect the real private key alias
+      - name: Detect TIREXNET signing alias
+        env:
+          TIREXNET_KEY_ALIAS_INPUT: ${{ secrets.TIREXNET_KEY_ALIAS }}
         run: |
           set -euo pipefail
+
+          echo "Reading aliases from release keystore..."
+
+          mapfile -t KEY_ALIASES < <(
+            keytool -list -v \
+              -keystore "$TIREXNET_KEYSTORE_PATH" \
+              -storepass "$TIREXNET_STORE_PASSWORD" 2>/dev/null |
+            awk '
+              /^Alias name: / {
+                alias = substr($0, 13)
+              }
+
+              /^Entry type: PrivateKeyEntry/ {
+                print alias
+              }
+            '
+          )
+
+          if [ "${#KEY_ALIASES[@]}" -eq 0 ]; then
+            echo "::error::No private signing key found in keystore."
+            echo "Check the keystore file and store password."
+
+            keytool -list \
+              -keystore "$TIREXNET_KEYSTORE_PATH" \
+              -storepass "$TIREXNET_STORE_PASSWORD" || true
+
+            exit 1
+          fi
+
+          SELECTED_ALIAS=""
+
+          if [ -n "${TIREXNET_KEY_ALIAS_INPUT:-}" ]; then
+            for alias in "${KEY_ALIASES[@]}"; do
+              if [ "$alias" = "$TIREXNET_KEY_ALIAS_INPUT" ]; then
+                SELECTED_ALIAS="$alias"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "$SELECTED_ALIAS" ]; then
+            if [ "${#KEY_ALIASES[@]}" -eq 1 ]; then
+              SELECTED_ALIAS="${KEY_ALIASES[0]}"
+              echo "Using the only private key found in keystore."
+            else
+              echo "::error::Multiple private keys found and configured alias does not match."
+
+              echo "Available aliases:"
+              printf ' - %s\n' "${KEY_ALIASES[@]}"
+
+              echo "Set TIREXNET_KEY_ALIAS to one of these exact aliases."
+              exit 1
+            fi
+          fi
+
+          printf 'TIREXNET_KEY_ALIAS=%s\n' "$SELECTED_ALIAS" >> "$GITHUB_ENV"
+
+          echo "Resolved signing alias: $SELECTED_ALIAS"
+
+      # Test the actual private key and password before Gradle
+      - name: Validate TIREXNET signing key
+        run: |
+          set -euo pipefail
+
           test -n "$TIREXNET_KEYSTORE_PATH"
           test -s "$TIREXNET_KEYSTORE_PATH"
           test -n "$TIREXNET_STORE_PASSWORD"
-          test -n "$TIREXNET_KEY_ALIAS"
           test -n "$TIREXNET_KEY_PASSWORD"
-          echo "Release signing environment is ready."
+          test -n "$TIREXNET_KEY_ALIAS"
+
+          CHECK_DIR="$RUNNER_TEMP/tirexnet-signing-check"
+          CHECK_JAR="$RUNNER_TEMP/tirexnet-signing-check.jar"
+
+          mkdir -p "$CHECK_DIR"
+          printf 'TIREXNET signing validation\n' > "$CHECK_DIR/check.txt"
+
+          jar --create \
+            --file "$CHECK_JAR" \
+            -C "$CHECK_DIR" check.txt
+
+          if ! jarsigner \
+            -keystore "$TIREXNET_KEYSTORE_PATH" \
+            -storepass "$TIREXNET_STORE_PASSWORD" \
+            -keypass "$TIREXNET_KEY_PASSWORD" \
+            "$CHECK_JAR" \
+            "$TIREXNET_KEY_ALIAS"; then
+
+            echo "::error::Signing validation failed. Check TIREXNET_KEY_PASSWORD and the selected private key."
+            exit 1
+          fi
+
+          if ! jarsigner -verify "$CHECK_JAR" >/dev/null 2>&1; then
+            echo "::error::The signing test could not be verified."
+            exit 1
+          fi
+
+          rm -rf "$CHECK_DIR" "$CHECK_JAR"
+
+          echo "TIREXNET signing key successfully validated."
 
       - uses: android-actions/setup-android@v3
         with:
@@ -80,6 +176,8 @@ jobs:
 
       - name: Build MHRV Android native library
         run: |
+          set -euo pipefail
+
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
 
           cargo install cargo-ndk --locked
@@ -115,6 +213,8 @@ jobs:
 
       - name: Build StormDNS Android ARM64 client
         run: |
+          set -euo pipefail
+
           mkdir -p app/src/main/jniLibs/arm64-v8a
 
           cd .native-src/stormdns
@@ -132,6 +232,8 @@ jobs:
 
       - name: Build Patterniha-compatible rootless SNI fragmentation engine
         run: |
+          set -euo pipefail
+
           cd .native-src/snispf/engine
 
           CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -trimpath -buildmode=pie -ldflags='-s -w' \
@@ -142,11 +244,15 @@ jobs:
       # Download Xray engine
       - name: Download Xray engine (legacy VLESS compatible)
         run: |
+          set -euo pipefail
+
           mkdir -p app/libs
 
           curl -fL --retry 3 --retry-delay 2 \
             https://github.com/2dust/AndroidLibXrayLite/releases/download/v26.6.27/libv2ray.aar \
             -o app/libs/libv2ray.aar
+
+          test -s app/libs/libv2ray.aar
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -154,7 +260,10 @@ jobs:
 
       # Build both Debug and signed Release APKs
       - name: Build TIREXNET APKs
-        run: gradle --no-daemon assembleDebug assembleRelease
+        run: |
+          set -euo pipefail
+
+          gradle --no-daemon assembleDebug assembleRelease
 
       # Upload signed Release APK
       - uses: actions/upload-artifact@v4
