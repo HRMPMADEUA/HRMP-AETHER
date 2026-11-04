@@ -218,6 +218,21 @@ jobs:
             -require="golang.org/x/mobile@${MIN_MOBILE_VERSION}" \
             -replace="${XRAY_MODULE}=${XRAY_DIR}"
 
+          # gomobile receives the Xray package only on its command line.
+          # Without an import inside this module, `go mod tidy` drops the
+          # Xray requirement and its whole dependency graph. This tools-style
+          # package keeps them in go.mod/go.sum. It is never built or shipped.
+          mkdir -p xraydep
+          cat > xraydep/deps.go <<'GO'
+          //go:build tools
+
+          // Package xraydep keeps AndroidLibXrayLite and its dependencies
+          // in go.mod and go.sum so gomobile can bind the Xray package.
+          package xraydep
+
+          import _ "github.com/2dust/AndroidLibXrayLite"
+          GO
+
           echo "::group::go mod tidy"
           go mod tidy
           echo "::endgroup::"
@@ -241,7 +256,15 @@ jobs:
           # at the version the graph already selected: no downgrade.
           go get -tool "golang.org/x/mobile/cmd/gobind@${SEL_MOBILE}"
 
-          RESOLVED_XRAY="$(cd "$(go list -f '{{.Dir}}' "$XRAY_MODULE")" && pwd -P)"
+          grep -Fq "$XRAY_MODULE" go.mod || {
+            echo "::error::go mod tidy removed $XRAY_MODULE from go.mod"
+            exit 1
+          }
+
+          XRAY_LISTED_DIR="$(go list -f '{{.Dir}}' "$XRAY_MODULE")"
+          test -n "$XRAY_LISTED_DIR"
+
+          RESOLVED_XRAY="$(cd "$XRAY_LISTED_DIR" && pwd -P)"
 
           echo "Expected Xray: $XRAY_DIR"
           echo "Resolved Xray: $RESOLVED_XRAY"
