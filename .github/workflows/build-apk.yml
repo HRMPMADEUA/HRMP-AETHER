@@ -178,10 +178,6 @@ jobs:
 
           cd .native-src/slipnet/gomobile-build
 
-          # Xray is built from the checked-out local source.
-          # v0.0.0 is a placeholder version because the local
-          # replace directive points directly to the source tree.
-
           XRAY_DIR="$(cd ../../xray && pwd)"
 
           go mod edit \
@@ -193,10 +189,9 @@ jobs:
           go mod edit \
             -replace="${XRAY_MODULE}=../../xray"
 
-          # Do not run go mod tidy here.
-          # Xray is explicitly passed to gomobile bind below.
-
-          go mod download
+          # Register gobind as a Go tool dependency.
+          # This addresses the missing gobind dependency from Run #230.
+          go get -tool "golang.org/x/mobile/cmd/gobind@$MOBILE_VERSION"
 
           RESOLVED_XRAY="$(go list -f '{{.Dir}}' "$XRAY_MODULE")"
 
@@ -204,6 +199,10 @@ jobs:
           echo "Resolved Xray: $RESOLVED_XRAY"
 
           test "$RESOLVED_XRAY" = "$XRAY_DIR"
+
+          go list -m golang.org/x/mobile
+
+          grep -Fq 'golang.org/x/mobile/cmd/gobind' go.mod
 
           # Add Xray to the SlipNet full build.
 
