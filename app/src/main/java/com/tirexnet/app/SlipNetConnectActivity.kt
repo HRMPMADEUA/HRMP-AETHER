@@ -115,7 +115,8 @@ class SlipNetConnectActivity : ComponentActivity() {
             for (index in 0 until array.length()) {
                 val raw = array.optJSONObject(index)?.optString("raw", "")?.trim().orEmpty()
                 val lower = raw.lowercase()
-                if (lower.startsWith("slipnet://") || lower.startsWith("slipnet-enc://") || lower.startsWith("vless://")) {
+                if (lower.startsWith("slipnet://") || lower.startsWith("slipnet-enc://") ||
+                    lower.startsWith("slipnet-bundle-enc://") || lower.startsWith("vless://")) {
                     result.add(raw)
                 }
             }
@@ -294,7 +295,16 @@ class SlipNetConnectActivity : ComponentActivity() {
             .apply()
 
         try {
-            connectionManager.connect(profile)
+            when (connectionManager.connectionState.value) {
+                is app.slipnet.domain.model.ConnectionState.Connected,
+                is app.slipnet.domain.model.ConnectionState.Connecting -> {
+                    // VpnConnectionManager.connect() intentionally ignores a second
+                    // request while active. Its reconnect() path safely replaces the
+                    // currently selected SlipNet profile instead.
+                    connectionManager.reconnect(profile)
+                }
+                else -> connectionManager.connect(profile)
+            }
             openWorkspace()
         } catch (error: Throwable) {
             showFailure("SlipNet could not start the VPN service: ${error.message ?: "service start failed"}")
