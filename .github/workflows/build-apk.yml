@@ -148,11 +148,31 @@ jobs:
           test -s "$HOME/android-openssl/android-ssl/arm64-v8a/lib/libssl.a"
           test -s "$HOME/android-openssl/android-ssl/arm64-v8a/lib/libcrypto.a"
 
+      - name: Resolve Go version required by SlipNet and Xray
+        id: gover
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SLIP_GO="$(awk '$1 == "go" { print $2; exit }' .native-src/slipnet/gomobile-build/go.mod)"
+          XRAY_GO="$(awk '$1 == "go" { print $2; exit }' .native-src/xray/go.mod)"
+
+          test -n "$SLIP_GO"
+          test -n "$XRAY_GO"
+
+          WANT_GO="$(printf '%s\n%s\n' "$SLIP_GO" "$XRAY_GO" | sort -V | tail -n 1)"
+
+          echo "SlipNet gomobile-build requires Go: $SLIP_GO"
+          echo "AndroidLibXrayLite requires Go:     $XRAY_GO"
+          echo "Using Go:                           $WANT_GO"
+
+          echo "version=$WANT_GO" >> "$GITHUB_OUTPUT"
+
       - name: Setup Go for SlipNet and Xray
         uses: actions/setup-go@v6
         with:
-          go-version-file: .native-src/slipnet/gomobile-build/go.mod
-          cache-dependency-path: .native-src/slipnet/gomobile-build/go.sum
+          go-version: ${{ steps.gover.outputs.version }}
+          cache: false
 
       # ==================================================
       # COMBINED SLIPNET + XRAY GO RUNTIME
@@ -165,81 +185,200 @@ jobs:
 
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865"
 
-          MOBILE_VERSION="v0.0.0-20260611195102-4dd8f1dbf5d2"
+          MIN_MOBILE_VERSION="v0.0.0-20260611195102-4dd8f1dbf5d2"
           XRAY_MODULE="github.com/2dust/AndroidLibXrayLite"
+          XRAY_DIR="$(cd "$GITHUB_WORKSPACE/.native-src/xray" && pwd -P)"
+          BIND_DIR="$GITHUB_WORKSPACE/.native-src/slipnet/gomobile-build"
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          NDK_CC="$NDK_BIN/aarch64-linux-android24-clang"
 
-          echo "Installing gomobile version $MOBILE_VERSION"
+          export PATH="$(go env GOPATH)/bin:$PATH"
 
-          go install "golang.org/x/mobile/cmd/gomobile@$MOBILE_VERSION"
+          echo "::group::Toolchain"
+          go version
+          go env GOTOOLCHAIN GOFLAGS GOWORK GOPROXY
+          echo "::endgroup::"
 
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          test -x "$NDK_CC"
+          grep -lq '^package libv2ray' "$XRAY_DIR"/*.go
 
-          "$(go env GOPATH)/bin/gomobile" init
+          # --------------------------------------------------
+          # 1. Make the combined Go module consistent.
+          #    Xray must be a real module dependency with all of
+          #    its transitive requirements and go.sum entries.
+          # --------------------------------------------------
 
-          cd .native-src/slipnet/gomobile-build
+          cd "$BIND_DIR"
 
-          XRAY_DIR="$(cd ../../xray && pwd)"
+          cp go.mod "$RUNNER_TEMP/gomobile-build.go.mod.before"
+          [ ! -f go.sum ] || cp go.sum "$RUNNER_TEMP/gomobile-build.go.sum.before"
 
           go mod edit \
-            -require="${XRAY_MODULE}@v0.0.0"
+            -require="${XRAY_MODULE}@v0.0.0" \
+            -require="golang.org/x/mobile@${MIN_MOBILE_VERSION}" \
+            -replace="${XRAY_MODULE}=${XRAY_DIR}"
 
-          go mod edit \
-            -require="golang.org/x/mobile@$MOBILE_VERSION"
+          echo "::group::go mod tidy"
+          go mod tidy
+          echo "::endgroup::"
 
-          go mod edit \
-            -replace="${XRAY_MODULE}=../../xray"
+          # Let the module graph choose x/mobile (Xray may require a
+          # newer one than the minimum) and install gomobile/gobind at
+          # exactly that version so tool and runtime packages match.
+          SEL_MOBILE="$(go list -m -f '{{.Version}}' golang.org/x/mobile)"
+          echo "x/mobile selected by module graph: $SEL_MOBILE"
+          echo "x/mobile workflow minimum:         $MIN_MOBILE_VERSION"
 
-          # Register gobind as a Go tool dependency.
-          # This addresses the missing gobind dependency from Run #230.
-          go get -tool "golang.org/x/mobile/cmd/gobind@$MOBILE_VERSION"
+          (
+            cd "$RUNNER_TEMP"
+            go install "golang.org/x/mobile/cmd/gomobile@${SEL_MOBILE}"
+            go install "golang.org/x/mobile/cmd/gobind@${SEL_MOBILE}"
+          )
 
-          RESOLVED_XRAY="$(go list -f '{{.Dir}}' "$XRAY_MODULE")"
+          gomobile init
+
+          # Register gobind as a Go tool dependency (Run #230 fix),
+          # at the version the graph already selected: no downgrade.
+          go get -tool "golang.org/x/mobile/cmd/gobind@${SEL_MOBILE}"
+
+          RESOLVED_XRAY="$(cd "$(go list -f '{{.Dir}}' "$XRAY_MODULE")" && pwd -P)"
 
           echo "Expected Xray: $XRAY_DIR"
           echo "Resolved Xray: $RESOLVED_XRAY"
 
           test "$RESOLVED_XRAY" = "$XRAY_DIR"
 
-          go list -m golang.org/x/mobile
-
           grep -Fq 'golang.org/x/mobile/cmd/gobind' go.mod
 
-          # Add Xray to the SlipNet full build.
+          # --------------------------------------------------
+          # 2. Show exactly what gobind will see for Xray on
+          #    android/arm64. Hard failures only for conditions
+          #    that always produce "no exported names".
+          # --------------------------------------------------
+
+          export_android_env() {
+            export GOOS=android GOARCH=arm64 CGO_ENABLED=1 CC="$NDK_CC"
+          }
+
+          echo "::group::Xray package as loaded for android/arm64"
+          (
+            export_android_env
+            go list -e -f 'Name={{.Name}}{{"\n"}}Dir={{.Dir}}{{"\n"}}GoFiles={{.GoFiles}}{{"\n"}}IgnoredGoFiles={{.IgnoredGoFiles}}{{"\n"}}Error={{if .Error}}{{.Error}}{{end}}{{"\n"}}DepsErrors={{range .DepsErrors}}{{.Err}}; {{end}}' "$XRAY_MODULE"
+          )
+          echo "::endgroup::"
+
+          PKG_NAME="$(export_android_env; go list -e -f '{{.Name}}' "$XRAY_MODULE")"
+          PKG_FILES="$(export_android_env; go list -e -f '{{len .GoFiles}}' "$XRAY_MODULE")"
+          PKG_ERROR="$(export_android_env; go list -e -f '{{if .Error}}{{.Error}}{{end}}' "$XRAY_MODULE")"
+          PKG_DEPS_ERROR="$(export_android_env; go list -e -f '{{range .DepsErrors}}{{.Err}}; {{end}}' "$XRAY_MODULE")"
+
+          if [ "$PKG_NAME" != "libv2ray" ] || [ "$PKG_FILES" -lt 1 ]; then
+            echo "::error::Xray package resolves to name='$PKG_NAME' with $PKG_FILES Go files for android/arm64 (expected libv2ray). gobind would report 'no exported names'."
+            exit 1
+          fi
+
+          if [ -n "$PKG_ERROR" ] || [ -n "$PKG_DEPS_ERROR" ]; then
+            echo "::error::Xray package has load errors: $PKG_ERROR $PKG_DEPS_ERROR"
+            exit 1
+          fi
+
+          echo "::group::Standalone compile of Xray for android/arm64"
+          (
+            export_android_env
+            go build -trimpath "$XRAY_MODULE"
+          ) || echo "::warning::Standalone android/arm64 compile of the Xray package failed; the real compiler error is printed above."
+          echo "::endgroup::"
+
+          echo "::group::gobind probe (Xray package alone)"
+          rm -rf "$RUNNER_TEMP/gobind-probe"
+          mkdir -p "$RUNNER_TEMP/gobind-probe"
+          (
+            export_android_env
+            gobind -lang=go,java -outdir="$RUNNER_TEMP/gobind-probe" "$XRAY_MODULE"
+          ) || echo "::warning::gobind cannot bind the Xray package alone; see the output above."
+          find "$RUNNER_TEMP/gobind-probe" -name 'Libv2ray.java' -print
+          echo "::endgroup::"
+
+          # --------------------------------------------------
+          # 3. Add Xray to SlipNet's build-full target.
+          # --------------------------------------------------
+
+          echo "::group::SlipNet Makefile before patch"
+          cat -n Makefile
+          echo "::endgroup::"
 
           python3 - <<'PY'
           from pathlib import Path
+          import re
+
+          XRAY = "github.com/2dust/AndroidLibXrayLite"
 
           makefile = Path("Makefile")
-          content = makefile.read_text()
+          text = makefile.read_text()
 
-          old = "\t\tsnowflake-mobile/snowflake\n"
+          # Add the Xray package to the same bind command as Snowflake.
+          if XRAY not in text:
+              anchor = "\t\tsnowflake-mobile/snowflake\n"
 
-          new = (
-              "\t\tsnowflake-mobile/snowflake "
-              + chr(92)
-              + "\n"
-              + "\t\tgithub.com/2dust/AndroidLibXrayLite\n"
-          )
-
-          if "github.com/2dust/AndroidLibXrayLite" not in content:
-              if old not in content:
+              if anchor not in text:
                   raise SystemExit(
                       "ERROR: Expected SlipNet Makefile entry was not found."
                   )
 
-              content = content.replace(old, new, 1)
+              text = text.replace(
+                  anchor,
+                  "\t\tsnowflake-mobile/snowflake \\\n\t\t" + XRAY + "\n",
+                  1,
+              )
 
-          content = content.replace(
+          # The app ships arm64-v8a only.
+          text = text.replace(
               "android/arm,android/arm64,android/amd64",
-              "android/arm64"
+              "android/arm64",
           )
 
-          makefile.write_text(content)
+          # Xray/quic-go need -checklinkname=0 at link time (upstream
+          # AndroidLibXrayLite builds with it). Add it to every -ldflags.
+          def add_flag(line):
+              if "checklinkname" in line:
+                  return line
+              return re.sub(
+                  r"(-ldflags(?:=|\s+)\s*)([\"'])",
+                  r"\1\2-checklinkname=0 ",
+                  line,
+              )
+
+          text = "".join(add_flag(line) for line in text.splitlines(True))
+
+          if "checklinkname=0" not in text:
+              raise SystemExit(
+                  "ERROR: could not add -checklinkname=0: no quoted -ldflags "
+                  "found in the SlipNet Makefile (see the printed Makefile)."
+              )
+
+          # Prove Xray landed inside the build-full recipe.
+          match = re.search(
+              r"(?m)^build-full:[^\n]*\n((?:[ \t][^\n]*\n|\n)*)",
+              text,
+          )
+
+          if not match or XRAY not in match.group(0):
+              raise SystemExit(
+                  "ERROR: Xray package is not inside the build-full recipe."
+              )
+
+          makefile.write_text(text)
 
           print("Combined SlipNet + Xray configuration prepared.")
           PY
 
-          # Build one combined AAR.
+          echo "::group::SlipNet Makefile after patch"
+          cat -n Makefile
+          echo "::endgroup::"
+
+          # --------------------------------------------------
+          # 4. Build one combined AAR.
+          # --------------------------------------------------
 
           make build-full
 
@@ -252,21 +391,63 @@ jobs:
 
           test -s "$AAR"
 
-          # Verify generated Java bindings.
+          # --------------------------------------------------
+          # 5. Verify what the Kotlin code actually calls.
+          #    (Files first, then grep: grep -q on a pipe can
+          #    SIGPIPE the producer under pipefail.)
+          # --------------------------------------------------
 
-          unzip -p "$AAR" classes.jar \
-            > "$RUNNER_TEMP/tirexnet-golibs-classes.jar"
+          CLASSES_JAR="$RUNNER_TEMP/tirexnet-golibs-classes.jar"
 
-          jar tf "$RUNNER_TEMP/tirexnet-golibs-classes.jar" \
-            | grep -qx 'go/Seq.class'
+          unzip -p "$AAR" classes.jar > "$CLASSES_JAR"
+          jar tf "$CLASSES_JAR" > "$RUNNER_TEMP/golibs-classes.txt"
+          unzip -Z1 "$AAR" > "$RUNNER_TEMP/golibs-aar.txt"
 
-          jar tf "$RUNNER_TEMP/tirexnet-golibs-classes.jar" \
-            | grep -qx 'libv2ray/Libv2ray.class'
+          for cls in \
+            go/Seq.class \
+            libv2ray/Libv2ray.class \
+            libv2ray/CoreController.class \
+            libv2ray/CoreCallbackHandler.class
+          do
+            grep -qx "$cls" "$RUNNER_TEMP/golibs-classes.txt" || {
+              echo "::error::golibs-full.aar is missing $cls"
+              exit 1
+            }
+          done
 
-          # Verify ARM64 Go runtime.
+          javap -public -cp "$CLASSES_JAR" \
+            libv2ray.Libv2ray \
+            libv2ray.CoreController \
+            libv2ray.CoreCallbackHandler \
+            > "$RUNNER_TEMP/libv2ray-api.txt"
 
-          unzip -Z1 "$AAR" \
-            | grep -qx 'jni/arm64-v8a/libgojni.so'
+          cat "$RUNNER_TEMP/libv2ray-api.txt"
+
+          require_api() {
+            grep -Fq -- "$1" "$RUNNER_TEMP/libv2ray-api.txt" || {
+              echo "::error::XrayVpnService.kt needs '$1' but golibs-full.aar does not provide it"
+              exit 1
+            }
+          }
+
+          require_api 'initCoreEnv(java.lang.String, java.lang.String)'
+          require_api 'newCoreController(libv2ray.CoreCallbackHandler)'
+          require_api 'startLoop(java.lang.String, int)'
+          require_api 'stopLoop()'
+          require_api 'long startup()'
+          require_api 'long shutdown()'
+          require_api 'long onEmitStatus(long, java.lang.String)'
+
+          # Exactly one Go runtime for arm64.
+          echo "libgojni entries in AAR:"
+          grep 'libgojni\.so$' "$RUNNER_TEMP/golibs-aar.txt" || true
+
+          GOJNI_ARM64="$(grep -c '^jni/arm64-v8a/libgojni\.so$' "$RUNNER_TEMP/golibs-aar.txt" || true)"
+
+          test "$GOJNI_ARM64" -eq 1 || {
+            echo "::error::Expected exactly one jni/arm64-v8a/libgojni.so, found $GOJNI_ARM64"
+            exit 1
+          }
 
           echo "Combined SlipNet + Xray AAR verified."
 
