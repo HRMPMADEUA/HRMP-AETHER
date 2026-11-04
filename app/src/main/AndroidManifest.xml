@@ -4,12 +4,31 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <application android:allowBackup="false" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round" android:label="TIREXNET" android:usesCleartextTraffic="false"
-        android:theme="@android:style/Theme.Material.NoActionBar" android:supportsRtl="true">
-        <activity android:name=".MainActivity" android:exported="true"
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
+    <application
+        android:name=".TirexApplication"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="TIREXNET"
+        android:usesCleartextTraffic="false"
+        android:theme="@android:style/Theme.Material.NoActionBar"
+        android:supportsRtl="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
             android:screenOrientation="portrait"
             android:windowSoftInputMode="adjustResize"
             android:configChanges="keyboardHidden|orientation|screenSize">
@@ -18,24 +37,111 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- SlipNet is an internal screen of the same installed TIREXNET app. -->
+        <activity
+            android:name="app.slipnet.presentation.MainActivity"
+            android:exported="true"
+            android:theme="@style/Theme.SlipNet"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="slipnet" />
+                <data android:scheme="slipnet-enc" />
+                <data android:scheme="slipnet-bundle-enc" />
+                <data android:scheme="vless" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name="com.tirexnet.app.SlipNetConnectActivity"
+            android:exported="false"
+            android:theme="@style/Theme.SlipNet" />
+        <activity
+            android:name="com.tirexnet.app.SlipNetSettingsActivity"
+            android:exported="false"
+            android:theme="@style/Theme.SlipNet" />
+        <activity
+            android:name="com.tirexnet.app.SlipNetLicenseActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Material.NoActionBar" />
+        <activity
+            android:name="app.slipnet.presentation.scanner.QrScannerActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
         <receiver android:name=".AppInstallReceiver" android:exported="false" />
         <receiver android:name=".engine.TirexActionReceiver" android:exported="false" />
-        <service android:name=".engine.TirexTileService" android:exported="true"
-            android:icon="@drawable/ic_stat_tirex" android:label="TIREXNET"
+        <service
+            android:name=".engine.TirexTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_stat_tirex"
+            android:label="TIREXNET"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter><action android:name="android.service.quicksettings.action.QS_TILE" /></intent-filter>
         </service>
-        <service android:name=".engine.DnsChangerVpnService" android:exported="false"
-            android:permission="android.permission.BIND_VPN_SERVICE" android:foregroundServiceType="specialUse">
+
+        <service
+            android:name=".engine.DnsChangerVpnService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Applies user-selected DNS resolvers through a dedicated DNS-only VPN interface." />
             <intent-filter><action android:name="android.net.VpnService" /></intent-filter>
         </service>
-        <service android:name=".engine.XrayVpnService" android:exported="false"
-            android:permission="android.permission.BIND_VPN_SERVICE" android:foregroundServiceType="specialUse">
+        <service
+            android:name=".engine.XrayVpnService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Establishes the user's explicitly requested Xray VPN tunnel." />
             <intent-filter><action android:name="android.net.VpnService" /></intent-filter>
         </service>
+
+        <!-- SlipNet real VPN stack: DNS tunnels, QUIC, SSH, NaiveProxy, Tor, VLESS. -->
+        <service
+            android:name="app.slipnet.service.SlipNetVpnService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="User-initiated SlipNet VPN tunnel service." />
+            <intent-filter><action android:name="android.net.VpnService" /></intent-filter>
+        </service>
+        <service
+            android:name="app.slipnet.service.ScanService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <service
+            android:name="app.slipnet.service.QuickSettingsTile"
+            android:exported="true"
+            android:icon="@drawable/ic_vpn_key"
+            android:label="TIREXNET SlipNet"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter><action android:name="android.service.quicksettings.action.QS_TILE" /></intent-filter>
+            <meta-data android:name="android.service.quicksettings.TOGGLEABLE_TILE" android:value="true" />
+        </service>
+        <receiver android:name="app.slipnet.service.BootReceiver" android:exported="true">
+            <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED" /></intent-filter>
+        </receiver>
+        <receiver android:name="app.slipnet.widget.VpnWidgetProvider" android:exported="true">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_vpn_toggle_info" />
+        </receiver>
+        <receiver android:name="app.slipnet.widget.VpnWidgetCompactProvider" android:exported="true">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_vpn_compact_info" />
+        </receiver>
+        <receiver android:name="app.slipnet.widget.VpnWidgetToggleReceiver" android:exported="false" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>
