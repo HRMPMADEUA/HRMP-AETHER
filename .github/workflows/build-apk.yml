@@ -1,20 +1,83 @@
-name: TIREXNET Android Build
+name: TIREXNET Android Build (Full SlipNet Runtime)
 
 on: [push, workflow_dispatch]
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout TIREXNET
+        uses: actions/checkout@v4
+
+      - name: Checkout SlipNet source and pinned native submodules
+        uses: actions/checkout@v4
+        with:
+          repository: anonvector/SlipNet
+          ref: 2ed00fd0072ad0b558e30ec6b5e8b30948f98894
+          path: .native-src/slipnet
+          submodules: recursive
 
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
 
-      # Prepare TIREXNET release signing key
+      - name: Setup Android SDK and both NDK toolchains
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-37.0 build-tools;37.0.0 ndk;27.2.12479018 ndk;29.0.14206865'
+
+      - name: Install Rust toolchain for SlipNet QUIC runtime
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Stage complete SlipNet source, resources and full native assets
+        run: bash scripts/integrate-slipnet.sh .native-src/slipnet
+
+      - name: Add the exact upstream AGPL notice to the app
+        run: |
+          set -euo pipefail
+          mkdir -p app/src/main/assets/third_party
+          cp .native-src/slipnet/LICENSE app/src/main/assets/third_party/SLIPNET-AGPL-3.0.txt
+          cp THIRD_PARTY-SLIPNET.md app/src/main/assets/third_party/SLIPNET-SOURCE-NOTICE.md
+          test -s app/src/main/assets/third_party/SLIPNET-AGPL-3.0.txt
+          test -s app/src/main/assets/third_party/SLIPNET-SOURCE-NOTICE.md
+
+      - name: Build Android OpenSSL for SlipNet Rust QUIC
+        run: |
+          set -euo pipefail
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865"
+          export OPENSSL_VERSION="3.0.15"
+          export OUTPUT_DIR="$RUNNER_TEMP/android-openssl/android-ssl"
+          bash app/scripts/build-openssl-android.sh
+          mkdir -p "$HOME/android-openssl"
+          cp -a "$RUNNER_TEMP/android-openssl/android-ssl" "$HOME/android-openssl/"
+          test -s "$HOME/android-openssl/android-ssl/arm64-v8a/lib/libssl.a"
+          test -s "$HOME/android-openssl/android-ssl/arm64-v8a/lib/libcrypto.a"
+
+      - name: Setup Go for SlipNet mobile libraries
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: .native-src/slipnet/gomobile-build/go.mod
+          cache-dependency-path: .native-src/slipnet/gomobile-build/go.sum
+
+      - name: Build SlipNet Go mobile libraries (NoizDNS, VayDNS, Soar, Snowflake)
+        run: |
+          set -euo pipefail
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865"
+          go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20260204172633-1dceadbbeea3
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          "$(go env GOPATH)/bin/gomobile" init
+          cd .native-src/slipnet/gomobile-build
+          make build-full
+          mkdir -p "$GITHUB_WORKSPACE/app/libs"
+          cp ../app/libs/golibs-full.aar "$GITHUB_WORKSPACE/app/libs/golibs-full.aar"
+          test -s "$GITHUB_WORKSPACE/app/libs/golibs-full.aar"
+
+      # Existing TIREXNET release signing: same keystore and alias are retained.
       - name: Prepare TIREXNET release signing key
         env:
           TIREXNET_KEYSTORE_BASE64: ${{ secrets.TIREXNET_KEYSTORE_BASE64 }}
@@ -22,148 +85,42 @@ jobs:
           TIREXNET_KEY_PASSWORD: ${{ secrets.TIREXNET_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-
-          test -n "$TIREXNET_KEYSTORE_BASE64" || {
-            echo "::error::Missing secret: TIREXNET_KEYSTORE_BASE64"
-            exit 1
-          }
-
-          test -n "$TIREXNET_STORE_PASSWORD" || {
-            echo "::error::Missing secret: TIREXNET_STORE_PASSWORD"
-            exit 1
-          }
-
-          test -n "$TIREXNET_KEY_PASSWORD" || {
-            echo "::error::Missing secret: TIREXNET_KEY_PASSWORD"
-            exit 1
-          }
-
-          printf '%s' "$TIREXNET_KEYSTORE_BASE64" \
-            | base64 --decode > "$RUNNER_TEMP/tirexnet-release.jks"
-
-          test -s "$RUNNER_TEMP/tirexnet-release.jks" || {
-            echo "::error::Decoded keystore is empty."
-            exit 1
-          }
-
+          test -n "$TIREXNET_KEYSTORE_BASE64" || { echo "::error::Missing secret TIREXNET_KEYSTORE_BASE64"; exit 1; }
+          test -n "$TIREXNET_STORE_PASSWORD" || { echo "::error::Missing secret TIREXNET_STORE_PASSWORD"; exit 1; }
+          test -n "$TIREXNET_KEY_PASSWORD" || { echo "::error::Missing secret TIREXNET_KEY_PASSWORD"; exit 1; }
+          printf '%s' "$TIREXNET_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/tirexnet-release.jks"
+          test -s "$RUNNER_TEMP/tirexnet-release.jks"
           echo "TIREXNET_KEYSTORE_PATH=$RUNNER_TEMP/tirexnet-release.jks" >> "$GITHUB_ENV"
-
           printf 'TIREXNET_STORE_PASSWORD=%s\n' "$TIREXNET_STORE_PASSWORD" >> "$GITHUB_ENV"
           printf 'TIREXNET_KEY_PASSWORD=%s\n' "$TIREXNET_KEY_PASSWORD" >> "$GITHUB_ENV"
 
-          echo "Keystore file prepared."
-
-      # Automatically detect the real private key alias
       - name: Detect TIREXNET signing alias
         env:
           TIREXNET_KEY_ALIAS_INPUT: ${{ secrets.TIREXNET_KEY_ALIAS }}
         run: |
           set -euo pipefail
-
-          echo "Reading aliases from release keystore..."
-
-          mapfile -t KEY_ALIASES < <(
-            keytool -list -v \
-              -keystore "$TIREXNET_KEYSTORE_PATH" \
-              -storepass "$TIREXNET_STORE_PASSWORD" 2>/dev/null |
-            awk '
-              /^Alias name: / {
-                alias = substr($0, 13)
-              }
-
-              /^Entry type: PrivateKeyEntry/ {
-                print alias
-              }
-            '
-          )
-
-          if [ "${#KEY_ALIASES[@]}" -eq 0 ]; then
-            echo "::error::No private signing key found in keystore."
-            echo "Check the keystore file and store password."
-
-            keytool -list \
-              -keystore "$TIREXNET_KEYSTORE_PATH" \
-              -storepass "$TIREXNET_STORE_PASSWORD" || true
-
-            exit 1
-          fi
-
+          mapfile -t KEY_ALIASES < <(keytool -list -v -keystore "$TIREXNET_KEYSTORE_PATH" -storepass "$TIREXNET_STORE_PASSWORD" 2>/dev/null | awk '/^Alias name: / { alias=substr($0,13) } /^Entry type: PrivateKeyEntry/ { print alias }')
+          test "${#KEY_ALIASES[@]}" -gt 0 || { echo "::error::No private key found in keystore"; exit 1; }
           SELECTED_ALIAS=""
-
           if [ -n "${TIREXNET_KEY_ALIAS_INPUT:-}" ]; then
-            for alias in "${KEY_ALIASES[@]}"; do
-              if [ "$alias" = "$TIREXNET_KEY_ALIAS_INPUT" ]; then
-                SELECTED_ALIAS="$alias"
-                break
-              fi
-            done
+            for alias in "${KEY_ALIASES[@]}"; do [ "$alias" = "$TIREXNET_KEY_ALIAS_INPUT" ] && SELECTED_ALIAS="$alias"; done
           fi
-
           if [ -z "$SELECTED_ALIAS" ]; then
-            if [ "${#KEY_ALIASES[@]}" -eq 1 ]; then
-              SELECTED_ALIAS="${KEY_ALIASES[0]}"
-              echo "Using the only private key found in keystore."
-            else
-              echo "::error::Multiple private keys found and configured alias does not match."
-
-              echo "Available aliases:"
-              printf ' - %s\n' "${KEY_ALIASES[@]}"
-
-              echo "Set TIREXNET_KEY_ALIAS to one of these exact aliases."
-              exit 1
-            fi
+            [ "${#KEY_ALIASES[@]}" -eq 1 ] || { echo "::error::Set TIREXNET_KEY_ALIAS to an existing private-key alias"; printf '%s\n' "${KEY_ALIASES[@]}"; exit 1; }
+            SELECTED_ALIAS="${KEY_ALIASES[0]}"
           fi
+          echo "TIREXNET_KEY_ALIAS=$SELECTED_ALIAS" >> "$GITHUB_ENV"
 
-          printf 'TIREXNET_KEY_ALIAS=%s\n' "$SELECTED_ALIAS" >> "$GITHUB_ENV"
-
-          echo "Resolved signing alias: $SELECTED_ALIAS"
-
-      # Test the actual private key and password before Gradle
       - name: Validate TIREXNET signing key
         run: |
           set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/sign-check"
+          printf 'TIREXNET signing validation\n' > "$RUNNER_TEMP/sign-check/check.txt"
+          jar --create --file "$RUNNER_TEMP/sign-check.jar" -C "$RUNNER_TEMP/sign-check" check.txt
+          jarsigner -keystore "$TIREXNET_KEYSTORE_PATH" -storepass "$TIREXNET_STORE_PASSWORD" -keypass "$TIREXNET_KEY_PASSWORD" "$RUNNER_TEMP/sign-check.jar" "$TIREXNET_KEY_ALIAS"
+          jarsigner -verify "$RUNNER_TEMP/sign-check.jar" >/dev/null
 
-          test -n "$TIREXNET_KEYSTORE_PATH"
-          test -s "$TIREXNET_KEYSTORE_PATH"
-          test -n "$TIREXNET_STORE_PASSWORD"
-          test -n "$TIREXNET_KEY_PASSWORD"
-          test -n "$TIREXNET_KEY_ALIAS"
-
-          CHECK_DIR="$RUNNER_TEMP/tirexnet-signing-check"
-          CHECK_JAR="$RUNNER_TEMP/tirexnet-signing-check.jar"
-
-          mkdir -p "$CHECK_DIR"
-          printf 'TIREXNET signing validation\n' > "$CHECK_DIR/check.txt"
-
-          jar --create \
-            --file "$CHECK_JAR" \
-            -C "$CHECK_DIR" check.txt
-
-          if ! jarsigner \
-            -keystore "$TIREXNET_KEYSTORE_PATH" \
-            -storepass "$TIREXNET_STORE_PASSWORD" \
-            -keypass "$TIREXNET_KEY_PASSWORD" \
-            "$CHECK_JAR" \
-            "$TIREXNET_KEY_ALIAS"; then
-
-            echo "::error::Signing validation failed. Check TIREXNET_KEY_PASSWORD and the selected private key."
-            exit 1
-          fi
-
-          if ! jarsigner -verify "$CHECK_JAR" >/dev/null 2>&1; then
-            echo "::error::The signing test could not be verified."
-            exit 1
-          fi
-
-          rm -rf "$CHECK_DIR" "$CHECK_JAR"
-
-          echo "TIREXNET signing key successfully validated."
-
-      - uses: android-actions/setup-android@v3
-        with:
-          packages: 'platform-tools platforms;android-35 build-tools;35.0.0 ndk;27.2.12479018'
-
-      # Build MHRV Rust Android JNI engine
+      # Existing TIREXNET MHRV Rust engine.
       - uses: actions/checkout@v4
         with:
           repository: therealaleph/MasterHttpRelayVPN-RUST
@@ -177,30 +134,17 @@ jobs:
       - name: Build MHRV Android native library
         run: |
           set -euo pipefail
-
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
-
           cargo install cargo-ndk --locked
-
           cd .native-src/mhrv
-
           cargo ndk -t arm64-v8a -o "$GITHUB_WORKSPACE/app/src/main/jniLibs" build --release --lib
-
           ABI_DIR="$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
-
           test -s "$ABI_DIR/libmhrv_rs.so"
-
           shopt -s nullglob
           TUN2PROXY_LIBS=("$ABI_DIR"/libtun2proxy-*.so)
-
-          if [ "${#TUN2PROXY_LIBS[@]}" -gt 0 ]; then
-            cp "${TUN2PROXY_LIBS[0]}" "$ABI_DIR/libtun2proxy.so"
-            rm -f "${TUN2PROXY_LIBS[@]}"
-          fi
-
+          if [ "${#TUN2PROXY_LIBS[@]}" -gt 0 ]; then cp "${TUN2PROXY_LIBS[0]}" "$ABI_DIR/libtun2proxy.so"; rm -f "${TUN2PROXY_LIBS[@]}"; fi
           test -s "$ABI_DIR/libtun2proxy.so"
 
-      # Build StormDNS and SNISPF Android ARM64 engines
       - uses: actions/setup-go@v6
         with:
           go-version: '1.25.0'
@@ -214,14 +158,9 @@ jobs:
       - name: Build StormDNS Android ARM64 client
         run: |
           set -euo pipefail
-
           mkdir -p app/src/main/jniLibs/arm64-v8a
-
           cd .native-src/stormdns
-
-          CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -trimpath -buildmode=pie -ldflags='-s -w' \
-            -o "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libstormdns.so" ./cmd/client
-
+          CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -trimpath -buildmode=pie -ldflags='-s -w' -o "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libstormdns.so" ./cmd/client
           test -s "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libstormdns.so"
 
       - uses: actions/checkout@v4
@@ -230,51 +169,75 @@ jobs:
           ref: 70ff7966ca6aa928ef63619f0b3fbaa136088325
           path: .native-src/snispf
 
-      - name: Build Patterniha-compatible rootless SNI fragmentation engine
+      - name: Build Patterniha-compatible SNI fragmentation engine
         run: |
           set -euo pipefail
-
           cd .native-src/snispf/engine
-
-          CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -trimpath -buildmode=pie -ldflags='-s -w' \
-            -o "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libsnispf.so" ./cmd/snispf
-
+          CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -trimpath -buildmode=pie -ldflags='-s -w' -o "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libsnispf.so" ./cmd/snispf
           test -s "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libsnispf.so"
 
-      # Download Xray engine
       - name: Download Xray engine (legacy VLESS compatible)
         run: |
           set -euo pipefail
-
           mkdir -p app/libs
-
-          curl -fL --retry 3 --retry-delay 2 \
-            https://github.com/2dust/AndroidLibXrayLite/releases/download/v26.6.27/libv2ray.aar \
-            -o app/libs/libv2ray.aar
-
+          curl -fL --retry 3 --retry-delay 2 https://github.com/2dust/AndroidLibXrayLite/releases/download/v26.6.27/libv2ray.aar -o app/libs/libv2ray.aar
           test -s app/libs/libv2ray.aar
 
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.6.1'
 
-      # Build both Debug and signed Release APKs
-      - name: Build TIREXNET APKs
+      - name: Build TIREXNET with the full SlipNet runtime
+        env:
+          SLIPNET_CONFIG_ENCRYPTION_KEY: ${{ secrets.SLIPNET_CONFIG_ENCRYPTION_KEY }}
         run: |
           set -euo pipefail
-
           gradle --no-daemon assembleDebug assembleRelease
+          test -s app/build/outputs/apk/release/app-release.apk
 
-      # Upload signed Release APK
+      - name: Create AGPL corresponding-source archive
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/release-source/TIREXNET-SLIPNET-corresponding-source"
+          mkdir -p "$OUT"
+          git archive HEAD | tar -x -C "$OUT"
+          mkdir -p "$OUT/app/src/main/java/app" "$OUT/app/src/main/java/com/tirexnet/app" "$OUT/app/src/main/cpp" "$OUT/app/src/main/rust" "$OUT/app/src/main/jniLibs" "$OUT/app/src/main/assets" "$OUT/third_party"
+          cp -a app/src/main/java/app/slipnet "$OUT/app/src/main/java/app/"
+          cp app/src/main/java/com/tirexnet/app/TirexApplication.kt "$OUT/app/src/main/java/com/tirexnet/app/"
+          cp app/src/main/java/com/tirexnet/app/TirexSlipNetEntryPoint.kt "$OUT/app/src/main/java/com/tirexnet/app/"
+          cp -a app/src/main/cpp/. "$OUT/app/src/main/cpp/"
+          cp -a app/src/main/rust/. "$OUT/app/src/main/rust/"
+          cp -a app/src/main/jniLibs/arm64-v8a "$OUT/app/src/main/jniLibs/"
+          cp -a app/src/main/assets/. "$OUT/app/src/main/assets/"
+          mkdir -p "$OUT/app/scripts" "$OUT/app/libs"
+          cp -a app/scripts/. "$OUT/app/scripts/"
+          cp app/libs/golibs-full.aar app/libs/libv2ray.aar "$OUT/app/libs/"
+          cp -a app/src/main/res/. "$OUT/app/src/main/res/"
+          cp app/src/main/java/com/hrmp/aether/MainActivity.kt "$OUT/app/src/main/java/com/hrmp/aether/MainActivity.kt"
+          cp -a .native-src/slipnet "$OUT/third_party/SlipNet"
+          cp -a .native-src/mhrv "$OUT/third_party/MasterHttpRelayVPN-RUST"
+          cp -a .native-src/stormdns "$OUT/third_party/StormDNS"
+          cp -a .native-src/snispf "$OUT/third_party/snispf"
+          # Remove build products and Git metadata; keep all source and required runtime AAR/JNI assets.
+          find "$OUT" -name .git -exec rm -rf {} +
+          find "$OUT" -type d \( -name target -o -name .picoquic-build -o -name .gradle \) -prune -exec rm -rf {} +
+          cp .native-src/slipnet/LICENSE "$OUT/THIRD_PARTY-SLIPNET-AGPL-3.0.txt"
+          tar -czf release-source/TIREXNET-SLIPNET-corresponding-source.tar.gz -C release-source TIREXNET-SLIPNET-corresponding-source
+
       - uses: actions/upload-artifact@v4
         with:
           name: TIREXNET-APK
           path: app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
 
-      # Upload Debug APK separately
       - uses: actions/upload-artifact@v4
         with:
           name: TIREXNET-DEBUG-APK
           path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TIREXNET-SLIPNET-AGPL-Corresponding-Source
+          path: release-source/TIREXNET-SLIPNET-corresponding-source.tar.gz
           if-no-files-found: error
