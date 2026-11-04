@@ -41,7 +41,6 @@ jobs:
             app/src/main/rust/slipstream-rust \
             app/src/main/rust/slipstream-rust-plus \
             dnstt \
-            dnstt-mobile \
             lyrebird \
             noizdns \
             vaydns \
