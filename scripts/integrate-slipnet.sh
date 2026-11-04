@@ -14,7 +14,7 @@ APP="$ROOT/app"
   exit 3
 }
 
-mkdir -p "$APP/src/main/java/app/slipnet" \
+mkdir -p "$APP/src/main/java/app/slipnet/tunnel" \
          "$APP/src/main/java/com/tirexnet/app" \
          "$APP/src/main/cpp" "$APP/src/main/rust" \
          "$APP/src/main/jniLibs/arm64-v8a" "$APP/src/main/res" \
@@ -94,9 +94,120 @@ find "$APP/src/main/java/app/slipnet" -type f -name '*.kt' -print0 | \
     -e 's/app\.slipnet\.BuildConfig/com.tirexnet.app.BuildConfig/g' \
     -e 's/BuildConfig\.FLAVOR == "lite"/false/g'
 
-# Verify that no unsupported Lite flavor checks remain.
+# Kotlin 2.4/KSP cannot reify the intersection type inferred by a seven-flow
+# vararg combine returning arrayOf(Any). Split the seven values into two
+# strongly-typed flows and combine those typed records instead.
+python3 - "$APP/src/main/java/app/slipnet/presentation/settings/SettingsViewModel.kt" <<'PYSETTINGS'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text(encoding='utf-8')
+old_block = '''            val mainFlow = combine(
+                preferencesDataStore.autoConnectOnBoot,
+                preferencesDataStore.darkMode,
+                preferencesDataStore.debugLogging,
+                preferencesDataStore.proxyListenAddress,
+                preferencesDataStore.proxyListenPort,
+                preferencesDataStore.disableQuic,
+                preferencesDataStore.vpnMtu
+            ) { values ->
+                arrayOf(values[0], values[1], values[2], values[3], values[4], values[5], values[6])
+            }
+'''
+new_block = '''            data class MainSettingsCore(
+                val autoConnectOnBoot: Boolean,
+                val darkMode: DarkMode,
+                val debugLogging: Boolean,
+                val proxyListenAddress: String
+            )
+            data class MainSettingsNetwork(
+                val proxyListenPort: Int,
+                val disableQuic: Boolean,
+                val vpnMtu: Int
+            )
+            data class MainSettings(
+                val autoConnectOnBoot: Boolean,
+                val darkMode: DarkMode,
+                val debugLogging: Boolean,
+                val proxyListenAddress: String,
+                val proxyListenPort: Int,
+                val disableQuic: Boolean,
+                val vpnMtu: Int
+            )
+
+            val mainCoreFlow = combine(
+                preferencesDataStore.autoConnectOnBoot,
+                preferencesDataStore.darkMode,
+                preferencesDataStore.debugLogging,
+                preferencesDataStore.proxyListenAddress
+            ) { autoConnect, darkMode, debugLogging, address ->
+                MainSettingsCore(autoConnect, darkMode, debugLogging, address)
+            }
+            val mainNetworkFlow = combine(
+                preferencesDataStore.proxyListenPort,
+                preferencesDataStore.disableQuic,
+                preferencesDataStore.vpnMtu
+            ) { port, disableQuic, mtu ->
+                MainSettingsNetwork(port, disableQuic, mtu)
+            }
+            val mainFlow = combine(mainCoreFlow, mainNetworkFlow) { core, network ->
+                MainSettings(
+                    core.autoConnectOnBoot,
+                    core.darkMode,
+                    core.debugLogging,
+                    core.proxyListenAddress,
+                    network.proxyListenPort,
+                    network.disableQuic,
+                    network.vpnMtu
+                )
+            }
+'''
+count = source.count(old_block)
+if count != 1:
+    raise SystemExit(f'Expected one original seven-flow mainFlow block in {path}; found {count}.')
+source = source.replace(old_block, new_block, 1)
+replacements = {
+    'main[0] as Boolean': 'main.autoConnectOnBoot',
+    'main[1] as DarkMode': 'main.darkMode',
+    'main[2] as Boolean': 'main.debugLogging',
+    'main[3] as String': 'main.proxyListenAddress',
+    'main[4] as Int': 'main.proxyListenPort',
+    'main[5] as Boolean': 'main.disableQuic',
+    'main[6] as Int': 'main.vpnMtu',
+}
+for before, after in replacements.items():
+    count = source.count(before)
+    if count != 1:
+        raise SystemExit(f'Expected one SettingsUiState reference {before!r}; found {count}.')
+    source = source.replace(before, after, 1)
+if 'arrayOf(values[0], values[1], values[2], values[3], values[4], values[5], values[6])' in source:
+    raise SystemExit('Unsafe seven-flow array combine remains after patch.')
+path.write_text(source, encoding='utf-8')
+print('Patched SettingsViewModel: typed main settings flows (Kotlin 2.4/KSP safe).')
+PYSETTINGS
+
+# Verify that no unsupported Lite flavor checks or unsafe SettingsViewModel
+# vararg-array inference remain.
 if grep -R -n 'BuildConfig\.FLAVOR' "$APP/src/main/java/app/slipnet"; then
   echo "::error::Unsupported SlipNet FLAVOR reference remains."
+  exit 1
+fi
+SETTINGS_VIEW_MODEL="$APP/src/main/java/app/slipnet/presentation/settings/SettingsViewModel.kt"
+test -s "$SETTINGS_VIEW_MODEL" || {
+  echo "::error::SlipNet SettingsViewModel was not staged."
+  exit 1
+}
+grep -Fq 'data class MainSettingsCore' "$SETTINGS_VIEW_MODEL" || {
+  echo "::error::Kotlin 2.4 typed SettingsViewModel patch is missing."
+  exit 1
+}
+grep -Fq 'main.autoConnectOnBoot' "$SETTINGS_VIEW_MODEL" || {
+  echo "::error::Typed SettingsViewModel fields were not applied."
+  exit 1
+}
+if grep -Eq 'main\[[0-6]\] as ' "$SETTINGS_VIEW_MODEL"; then
+  echo "::error::Unsafe SettingsViewModel array casts remain."
   exit 1
 fi
 # Upstream keeps constants in SlipNetApp; TIREXNET owns the one Hilt Application.
@@ -157,34 +268,23 @@ class TirexApplication : Application() {
 }
 KOTLIN
 
-# Patch the native SlipNet screen to accept password-protected bundle links and open its Settings tab.
+# Patch the native SlipNet launcher to accept password-protected bundle deep links.
 python3 - "$APP/src/main/java/app/slipnet/presentation/MainActivity.kt" <<'PYSN'
 from pathlib import Path
-import re, sys
-p = Path(sys.argv[1])
-s = p.read_text()
-if 'import androidx.compose.runtime.LaunchedEffect' not in s:
-    s = s.replace('import androidx.compose.runtime.collectAsState\n',
-                  'import androidx.compose.runtime.collectAsState\nimport androidx.compose.runtime.LaunchedEffect\n')
-if 'import app.slipnet.presentation.navigation.NavRoutes' not in s:
-    s = s.replace('import app.slipnet.presentation.navigation.NavGraph\n',
-                  'import app.slipnet.presentation.navigation.NavGraph\nimport app.slipnet.presentation.navigation.NavRoutes\n')
-pattern = re.compile(r'(?m)^(\s*)val navController = rememberNavController\(\)\n\1NavGraph\(navController = navController\)')
-match = pattern.search(s)
-if not match:
-    raise SystemExit('Could not patch SlipNet navigation host; upstream source changed.')
-indent = match.group(1)
-new = (indent + 'val navController = rememberNavController()\n' +
-       indent + 'LaunchedEffect(Unit) {\n' +
-       indent + '    if (intent?.getBooleanExtra("com.tirexnet.app.OPEN_SLIPNET_SETTINGS", false) == true) {\n' +
-       indent + '        navController.navigate(NavRoutes.Settings.route) { launchSingleTop = true }\n' +
-       indent + '        intent.removeExtra("com.tirexnet.app.OPEN_SLIPNET_SETTINGS")\n' +
-       indent + '    }\n' + indent + '}\n' +
-       indent + 'NavGraph(navController = navController)')
-s = s[:match.start()] + new + s[match.end():]
-s = s.replace('uri.startsWith("slipnet://") || uri.startsWith("slipnet-enc://") || uri.startsWith("vless://")',
-              'uri.startsWith("slipnet://") || uri.startsWith("slipnet-enc://") || uri.startsWith("slipnet-bundle-enc://") || uri.startsWith("vless://")')
-p.write_text(s)
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text(encoding="utf-8")
+old_uri = 'uri.startsWith("slipnet://") || uri.startsWith("slipnet-enc://") || uri.startsWith("vless://")'
+new_uri = 'uri.startsWith("slipnet://") || uri.startsWith("slipnet-enc://") || uri.startsWith("slipnet-bundle-enc://") || uri.startsWith("vless://")'
+if new_uri not in source:
+    count = source.count(old_uri)
+    if count != 1:
+        raise SystemExit(f"Expected one SlipNet deep-link URI anchor; found {count}.")
+    source = source.replace(old_uri, new_uri, 1)
+if "slipnet-bundle-enc://" not in source:
+    raise SystemExit("Encrypted SlipNet bundle scheme was not added to deep-link handling.")
+path.write_text(source, encoding="utf-8")
 PYSN
 
 # Patch TIREXNET so SlipNet profiles/settings launch the included native runtime.
@@ -302,8 +402,7 @@ replacement = '''    private fun showSlipNetRuntimeNotice() {
     }
 
     private fun openSlipNetSettings() {
-        startActivity(Intent(this, SlipNetConnectActivity::class.java)
-            .putExtra(SlipNetConnectActivity.EXTRA_OPEN_SETTINGS, true))
+        startActivity(Intent(this, SlipNetSettingsActivity::class.java))
     }
 
     private fun openSlipNetWorkspace() {
