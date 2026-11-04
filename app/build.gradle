@@ -18,7 +18,9 @@ android {
         targetSdk 35
         versionCode 6
         versionName '3.3'
-        ndk { abiFilters 'arm64-v8a' }
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
         buildConfigField 'boolean', 'INCLUDE_TOR', 'true'
         buildConfigField 'boolean', 'INCLUDE_NAIVE', 'true'
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
@@ -38,7 +40,8 @@ android {
     }
 
     buildTypes {
-        debug { }
+        debug {
+        }
         release {
             signingConfig signingConfigs.release
             minifyEnabled false
@@ -56,7 +59,9 @@ android {
     }
 
     packaging {
-        jniLibs { useLegacyPackaging true }
+        jniLibs {
+            useLegacyPackaging true
+        }
         resources {
             excludes += [
                 'META-INF/AL2.0',
@@ -69,36 +74,55 @@ android {
     }
 
     externalNativeBuild {
-        ndkBuild { path file('src/main/cpp/Android.mk') }
+        ndkBuild {
+            path file('src/main/cpp/Android.mk')
+        }
     }
 }
 
 kotlin {
-    compilerOptions { jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17 }
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+    }
 }
 
-// SlipNet's Rust QUIC/Slipstream engine is built for the same ARM64 ABI as TIREXNET.
+// SlipNet Rust QUIC/Slipstream engine
 def cargoHome = System.getenv('HOME') + '/.cargo'
 def cargoBin = "$cargoHome/bin"
+
 def opensslBaseDir = file("${System.getenv('HOME')}/android-openssl/android-ssl")
-def opensslAbiDir = opensslBaseDir.resolve('arm64-v8a')
+def opensslAbiDir = new File(opensslBaseDir, 'arm64-v8a')
+
 def cargoProfile = 'release'
 def configEncryptionKey = System.getenv('SLIPNET_CONFIG_ENCRYPTION_KEY') ?: ''
 
-if (!configEncryptionKey.isEmpty() && !(configEncryptionKey ==~ /[0-9a-fA-F]{64}/)) {
-    throw new GradleException('SLIPNET_CONFIG_ENCRYPTION_KEY must be exactly 64 hexadecimal characters when configured.')
+if (!configEncryptionKey.isEmpty() &&
+        !(configEncryptionKey ==~ /[0-9a-fA-F]{64}/)) {
+    throw new GradleException(
+        'SLIPNET_CONFIG_ENCRYPTION_KEY must be exactly 64 hexadecimal characters when configured.'
+    )
 }
 
 tasks.register('verifySlipNetOpenSsl') {
     group = 'verification'
+
     doLast {
         ['libssl.a', 'libcrypto.a'].each { lib ->
-            if (!opensslAbiDir.resolve("lib/${lib}").isFile()) {
-                throw new GradleException("Missing SlipNet OpenSSL file: ${opensslAbiDir}/lib/${lib}")
+            def libraryFile = new File(opensslAbiDir, "lib/${lib}")
+
+            if (!libraryFile.isFile()) {
+                throw new GradleException(
+                    "Missing SlipNet OpenSSL file: ${libraryFile}"
+                )
             }
         }
-        if (!opensslAbiDir.resolve('include/openssl').isDirectory()) {
-            throw new GradleException("Missing SlipNet OpenSSL headers under ${opensslAbiDir}/include")
+
+        def opensslHeaders = new File(opensslAbiDir, 'include/openssl')
+
+        if (!opensslHeaders.isDirectory()) {
+            throw new GradleException(
+                "Missing SlipNet OpenSSL headers under ${opensslAbiDir}/include"
+            )
         }
     }
 }
@@ -106,97 +130,209 @@ tasks.register('verifySlipNetOpenSsl') {
 cargo {
     cargoCommand = "$cargoBin/cargo"
     rustcCommand = "$cargoBin/rustc"
+
     module = 'src/main/rust/slipstream-rust'
     libname = 'slipstream'
+
     targets = ['arm64']
     profile = cargoProfile
     rustupChannel = 'stable'
+
     extraCargoBuildArguments = [
-        '-p', 'slipstream-client',
+        '-p',
+        'slipstream-client',
         '--lib',
-        '--features', 'openssl-static,picoquic-minimal-build'
+        '--features',
+        'openssl-static,picoquic-minimal-build'
     ]
+
     exec = { spec, toolchain ->
+
         def currentPath = System.getenv('PATH') ?: ''
-        spec.environment('PATH', "$cargoHome/bin:$currentPath")
-        spec.environment('RUST_ANDROID_GRADLE_PYTHON_COMMAND', 'python3')
-        spec.environment('RUST_ANDROID_GRADLE_CC_LINK_ARG', '-Wl,-z,max-page-size=16384,-soname,libslipstream.so')
-        spec.environment('RUST_ANDROID_GRADLE_LINKER_WRAPPER_PY', "$projectDir/src/main/rust/linker-wrapper.py")
-        spec.environment('RUST_ANDROID_GRADLE_TARGET', "target/${toolchain.target}/release/libslipstream.so")
-        spec.environment('ANDROID_NDK_HOME', android.ndkDirectory.absolutePath)
+
+        spec.environment(
+            'PATH',
+            "$cargoHome/bin:$currentPath"
+        )
+
+        spec.environment(
+            'RUST_ANDROID_GRADLE_PYTHON_COMMAND',
+            'python3'
+        )
+
+        spec.environment(
+            'RUST_ANDROID_GRADLE_CC_LINK_ARG',
+            '-Wl,-z,max-page-size=16384,-soname,libslipstream.so'
+        )
+
+        spec.environment(
+            'RUST_ANDROID_GRADLE_LINKER_WRAPPER_PY',
+            "$projectDir/src/main/rust/linker-wrapper.py"
+        )
+
+        spec.environment(
+            'RUST_ANDROID_GRADLE_TARGET',
+            "target/${toolchain.target}/release/libslipstream.so"
+        )
+
+        spec.environment(
+            'ANDROID_NDK_HOME',
+            android.ndkDirectory.absolutePath
+        )
+
         spec.environment('ANDROID_ABI', 'arm64-v8a')
         spec.environment('ANDROID_PLATFORM', 'android-26')
-        spec.environment('PICOQUIC_BUILD_DIR', "$projectDir/src/main/rust/slipstream-rust/.picoquic-build/arm64-v8a")
+
+        spec.environment(
+            'PICOQUIC_BUILD_DIR',
+            "$projectDir/src/main/rust/slipstream-rust/.picoquic-build/arm64-v8a"
+        )
+
         spec.environment('PICOQUIC_AUTO_BUILD', '1')
         spec.environment('BUILD_TYPE', 'Release')
-        spec.environment('OPENSSL_DIR', opensslAbiDir.absolutePath)
-        spec.environment('OPENSSL_LIB_DIR', opensslAbiDir.resolve('lib').absolutePath)
-        spec.environment('OPENSSL_INCLUDE_DIR', opensslAbiDir.resolve('include').absolutePath)
-        spec.environment('OPENSSL_ROOT_DIR', opensslAbiDir.absolutePath)
-        spec.environment('OPENSSL_CRYPTO_LIBRARY', opensslAbiDir.resolve('lib/libcrypto.a').absolutePath)
-        spec.environment('OPENSSL_SSL_LIBRARY', opensslAbiDir.resolve('lib/libssl.a').absolutePath)
+
+        spec.environment(
+            'OPENSSL_DIR',
+            opensslAbiDir.absolutePath
+        )
+
+        spec.environment(
+            'OPENSSL_LIB_DIR',
+            new File(opensslAbiDir, 'lib').absolutePath
+        )
+
+        spec.environment(
+            'OPENSSL_INCLUDE_DIR',
+            new File(opensslAbiDir, 'include').absolutePath
+        )
+
+        spec.environment(
+            'OPENSSL_ROOT_DIR',
+            opensslAbiDir.absolutePath
+        )
+
+        spec.environment(
+            'OPENSSL_CRYPTO_LIBRARY',
+            new File(opensslAbiDir, 'lib/libcrypto.a').absolutePath
+        )
+
+        spec.environment(
+            'OPENSSL_SSL_LIBRARY',
+            new File(opensslAbiDir, 'lib/libssl.a').absolutePath
+        )
+
         spec.environment('OPENSSL_USE_STATIC_LIBS', '1')
-        spec.environment('CONFIG_ENCRYPTION_KEY', configEncryptionKey)
-        spec.environment('CARGO_ENCODED_RUSTFLAGS', "--remap-path-prefix=${System.getProperty('user.home')}=~")
-        def prebuilt = android.ndkDirectory.resolve('toolchains/llvm/prebuilt').listFiles()?.find { it.isDirectory() }
+
+        spec.environment(
+            'CONFIG_ENCRYPTION_KEY',
+            configEncryptionKey
+        )
+
+        spec.environment(
+            'CARGO_ENCODED_RUSTFLAGS',
+            "--remap-path-prefix=${System.getProperty('user.home')}=~"
+        )
+
+        // Find Android NDK LLVM prebuilt directory
+        def llvmPrebuiltRoot = new File(
+            android.ndkDirectory,
+            'toolchains/llvm/prebuilt'
+        )
+
+        def prebuilt = llvmPrebuiltRoot.listFiles()?.find {
+            it.isDirectory()
+        }
+
         if (prebuilt != null) {
-            spec.environment('AR', prebuilt.resolve('bin/llvm-ar').absolutePath)
-            spec.environment('RANLIB', prebuilt.resolve('bin/llvm-ranlib').absolutePath)
+            spec.environment(
+                'AR',
+                new File(prebuilt, 'bin/llvm-ar').absolutePath
+            )
+
+            spec.environment(
+                'RANLIB',
+                new File(prebuilt, 'bin/llvm-ranlib').absolutePath
+            )
         }
     }
 }
 
 tasks.configureEach { task ->
-    if (task.name == 'cargoBuildArm64') task.dependsOn('verifySlipNetOpenSsl')
-    if (task.name in ['mergeDebugJniLibFolders', 'mergeReleaseJniLibFolders']) {
+
+    if (task.name == 'cargoBuildArm64') {
+        task.dependsOn('verifySlipNetOpenSsl')
+    }
+
+    if (task.name in [
+        'mergeDebugJniLibFolders',
+        'mergeReleaseJniLibFolders'
+    ]) {
         task.dependsOn('cargoBuild')
-        task.inputs.dir(layout.buildDirectory.dir('rustJniLibs/android'))
+        task.inputs.dir(
+            layout.buildDirectory.dir('rustJniLibs/android')
+        )
     }
 }
 
 dependencies {
+
     implementation 'com.wgtunnel:parser:1.6.14'
     implementation 'com.wgtunnel:backend:1.6.14'
     implementation 'com.wgtunnel:backend-android-jni:1.6.14'
     implementation 'com.wgtunnel:hevtunnel:1.6.14'
+
     implementation files('libs/libv2ray.aar')
 
-    // SlipNet Go mobile runtime (NoizDNS, VayDNS, Soar, Snowflake).
+    // SlipNet Go mobile runtime
     implementation files('libs/golibs-full.aar')
 
-    // Compose UI used by SlipNet's complete profile/settings screens.
-    def composeBom = platform('androidx.compose:compose-bom:2026.01.01')
+    // Compose
+    def composeBom = platform(
+        'androidx.compose:compose-bom:2026.01.01'
+    )
+
     implementation composeBom
     implementation 'androidx.compose.ui:ui'
     implementation 'androidx.compose.ui:ui-graphics'
     implementation 'androidx.compose.ui:ui-tooling-preview'
     implementation 'androidx.compose.material3:material3'
     implementation 'androidx.compose.material:material-icons-extended'
+
     implementation 'androidx.activity:activity-compose:1.12.4'
     implementation 'androidx.navigation:navigation-compose:2.9.7'
+
     implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.10.0'
     implementation 'androidx.lifecycle:lifecycle-runtime-compose:2.10.0'
     implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0'
+
     implementation 'androidx.hilt:hilt-navigation-compose:1.3.0'
 
-    // Hilt + Room + DataStore used by SlipNet's real VPN service and profile database.
+    // Hilt + Room + DataStore
     implementation 'com.google.dagger:hilt-android:2.57.1'
     ksp 'com.google.dagger:hilt-compiler:2.57.1'
+
     implementation 'androidx.room:room-runtime:2.8.4'
     implementation 'androidx.room:room-ktx:2.8.4'
     ksp 'androidx.room:room-compiler:2.8.4'
+
     implementation 'androidx.datastore:datastore-preferences:1.2.0'
     implementation 'com.google.code.gson:gson:2.13.2'
+
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0'
 
-    // SSH/TLS, DNS-over-HTTPS, import/export and profile tools.
+    // SSH / TLS / DNS / Import-Export
     implementation 'com.github.mwiede:jsch:2.27.7'
     implementation 'org.bouncycastle:bcprov-jdk18on:1.80'
     implementation 'com.squareup.okhttp3:okhttp:5.3.2'
+
     implementation 'sh.calvin.reorderable:reorderable:3.0.0'
+
     implementation 'com.google.zxing:core:3.5.4'
     implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
+
     implementation 'androidx.core:core-ktx:1.17.0'
 }
 
-ksp { arg('room.schemaLocation', "$projectDir/schemas") }
+ksp {
+    arg('room.schemaLocation', "$projectDir/schemas")
+}
