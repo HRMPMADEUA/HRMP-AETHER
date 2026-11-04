@@ -1,6 +1,8 @@
 name: TIREXNET Android Build (Full SlipNet Runtime)
 
-on: [push, workflow_dispatch]
+on:
+  push:
+  workflow_dispatch:
 
 jobs:
   build:
@@ -8,11 +10,10 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      # Checkout TIREXNET
       - name: Checkout TIREXNET
         uses: actions/checkout@v4
 
-      # Checkout SlipNet without broken recursive submodules
+      # Do not recursively checkout submodules: dnstt-mobile is unavailable upstream.
       - name: Checkout SlipNet source
         uses: actions/checkout@v4
         with:
@@ -21,15 +22,11 @@ jobs:
           path: .native-src/slipnet
           submodules: false
 
-      # Initialize only available native dependencies
       - name: Initialize available SlipNet submodules
         shell: bash
         run: |
           set -euo pipefail
-
           cd .native-src/slipnet
-
-          echo "Initializing available SlipNet submodules..."
 
           git submodule update --init --recursive --jobs 4 -- \
             app/src/main/rust/slipstream-rust \
@@ -40,57 +37,57 @@ jobs:
             vaydns \
             vaydns-mobile
 
-          echo "Validating SlipNet source..."
-
           test -f LICENSE
           test -d gomobile-build
 
-          echo "SlipNet checkout completed."
-
-      # Java
       - name: Setup Java
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
 
-      # Android SDK and NDK
-      - name: Setup Android SDK and both NDK toolchains
+      - name: Setup Android SDK and NDK toolchains
         uses: android-actions/setup-android@v3
         with:
-          packages: 'platform-tools platforms;android-37.0 build-tools;37.0.0 ndk;27.2.12479018 ndk;29.0.14206865'
+          packages: 'platform-tools platforms;android-37 build-tools;37.0.0 ndk;27.2.12479018 ndk;29.0.14206865'
 
-      # Rust
-      - name: Install Rust toolchain for SlipNet QUIC runtime
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
 
-      # Integrate SlipNet
-      - name: Stage complete SlipNet source, resources and full native assets
+      - name: Stage SlipNet source and resources
         run: bash scripts/integrate-slipnet.sh .native-src/slipnet
 
-      # AGPL license
-      - name: Add the exact upstream AGPL notice to the app
+      # Generate this notice in CI. THIRD_PARTY-SLIPNET.md is not in the TIREXNET repo.
+      - name: Add SlipNet AGPL license and source notice
+        shell: bash
         run: |
           set -euo pipefail
-
           mkdir -p app/src/main/assets/third_party
 
           cp .native-src/slipnet/LICENSE \
             app/src/main/assets/third_party/SLIPNET-AGPL-3.0.txt
 
-          cp THIRD_PARTY-SLIPNET.md \
-            app/src/main/assets/third_party/SLIPNET-SOURCE-NOTICE.md
+          cat > app/src/main/assets/third_party/SLIPNET-SOURCE-NOTICE.md <<'NOTICE'
+          # SlipNet third-party source notice
+
+          Project: SlipNet
+          Repository: https://github.com/anonvector/SlipNet
+          Pinned upstream commit: 2ed00fd0072ad0b558e30ec6b5e8b30948f98894
+          License: GNU Affero General Public License version 3.0 (AGPL-3.0).
+
+          The corresponding source code and upstream license are included in
+          the TIREXNET-SLIPNET-AGPL-Corresponding-Source artifact.
+          NOTICE
 
           test -s app/src/main/assets/third_party/SLIPNET-AGPL-3.0.txt
           test -s app/src/main/assets/third_party/SLIPNET-SOURCE-NOTICE.md
 
-      # OpenSSL for SlipNet QUIC
-      - name: Build Android OpenSSL for SlipNet Rust QUIC
+      - name: Build Android OpenSSL for SlipNet QUIC
+        shell: bash
         run: |
           set -euo pipefail
-
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865"
           export OPENSSL_VERSION="3.0.15"
           export OUTPUT_DIR="$RUNNER_TEMP/android-openssl/android-ssl"
@@ -98,50 +95,40 @@ jobs:
           bash app/scripts/build-openssl-android.sh
 
           mkdir -p "$HOME/android-openssl"
-
-          cp -a "$RUNNER_TEMP/android-openssl/android-ssl" \
-            "$HOME/android-openssl/"
+          cp -a "$RUNNER_TEMP/android-openssl/android-ssl" "$HOME/android-openssl/"
 
           test -s "$HOME/android-openssl/android-ssl/arm64-v8a/lib/libssl.a"
           test -s "$HOME/android-openssl/android-ssl/arm64-v8a/lib/libcrypto.a"
 
-      # Go for SlipNet
       - name: Setup Go for SlipNet mobile libraries
         uses: actions/setup-go@v6
         with:
           go-version-file: .native-src/slipnet/gomobile-build/go.mod
           cache-dependency-path: .native-src/slipnet/gomobile-build/go.sum
 
-      # Build SlipNet Go libraries
       - name: Build SlipNet Go mobile libraries
+        shell: bash
         run: |
           set -euo pipefail
-
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865"
 
           go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20260204172633-1dceadbbeea3
-
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-
           "$(go env GOPATH)/bin/gomobile" init
 
           cd .native-src/slipnet/gomobile-build
-
           make build-full
 
           mkdir -p "$GITHUB_WORKSPACE/app/libs"
-
-          cp ../app/libs/golibs-full.aar \
-            "$GITHUB_WORKSPACE/app/libs/golibs-full.aar"
-
+          cp ../app/libs/golibs-full.aar "$GITHUB_WORKSPACE/app/libs/golibs-full.aar"
           test -s "$GITHUB_WORKSPACE/app/libs/golibs-full.aar"
 
-      # Signing key
       - name: Prepare TIREXNET release signing key
         env:
           TIREXNET_KEYSTORE_BASE64: ${{ secrets.TIREXNET_KEYSTORE_BASE64 }}
           TIREXNET_STORE_PASSWORD: ${{ secrets.TIREXNET_STORE_PASSWORD }}
           TIREXNET_KEY_PASSWORD: ${{ secrets.TIREXNET_KEY_PASSWORD }}
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -149,12 +136,10 @@ jobs:
             echo "::error::Missing secret TIREXNET_KEYSTORE_BASE64"
             exit 1
           }
-
           test -n "$TIREXNET_STORE_PASSWORD" || {
             echo "::error::Missing secret TIREXNET_STORE_PASSWORD"
             exit 1
           }
-
           test -n "$TIREXNET_KEY_PASSWORD" || {
             echo "::error::Missing secret TIREXNET_KEY_PASSWORD"
             exit 1
@@ -162,18 +147,16 @@ jobs:
 
           printf '%s' "$TIREXNET_KEYSTORE_BASE64" \
             | base64 --decode > "$RUNNER_TEMP/tirexnet-release.jks"
-
           test -s "$RUNNER_TEMP/tirexnet-release.jks"
 
           echo "TIREXNET_KEYSTORE_PATH=$RUNNER_TEMP/tirexnet-release.jks" >> "$GITHUB_ENV"
-
           printf 'TIREXNET_STORE_PASSWORD=%s\n' "$TIREXNET_STORE_PASSWORD" >> "$GITHUB_ENV"
           printf 'TIREXNET_KEY_PASSWORD=%s\n' "$TIREXNET_KEY_PASSWORD" >> "$GITHUB_ENV"
 
-      # Detect signing alias
       - name: Detect TIREXNET signing alias
         env:
           TIREXNET_KEY_ALIAS_INPUT: ${{ secrets.TIREXNET_KEY_ALIAS }}
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -182,12 +165,8 @@ jobs:
               -keystore "$TIREXNET_KEYSTORE_PATH" \
               -storepass "$TIREXNET_STORE_PASSWORD" 2>/dev/null |
             awk '
-              /^Alias name: / {
-                alias=substr($0,13)
-              }
-              /^Entry type: PrivateKeyEntry/ {
-                print alias
-              }
+              /^Alias name: / { alias=substr($0,13) }
+              /^Entry type: PrivateKeyEntry/ { print alias }
             '
           )
 
@@ -197,10 +176,11 @@ jobs:
           }
 
           SELECTED_ALIAS=""
-
           if [ -n "${TIREXNET_KEY_ALIAS_INPUT:-}" ]; then
             for alias in "${KEY_ALIASES[@]}"; do
-              [ "$alias" = "$TIREXNET_KEY_ALIAS_INPUT" ] && SELECTED_ALIAS="$alias"
+              if [ "$alias" = "$TIREXNET_KEY_ALIAS_INPUT" ]; then
+                SELECTED_ALIAS="$alias"
+              fi
             done
           fi
 
@@ -210,21 +190,17 @@ jobs:
               printf '%s\n' "${KEY_ALIASES[@]}"
               exit 1
             }
-
             SELECTED_ALIAS="${KEY_ALIASES[0]}"
           fi
 
           echo "TIREXNET_KEY_ALIAS=$SELECTED_ALIAS" >> "$GITHUB_ENV"
 
-      # Validate signing key
       - name: Validate TIREXNET signing key
+        shell: bash
         run: |
           set -euo pipefail
-
           mkdir -p "$RUNNER_TEMP/sign-check"
-
-          printf 'TIREXNET signing validation\n' \
-            > "$RUNNER_TEMP/sign-check/check.txt"
+          printf 'TIREXNET signing validation\n' > "$RUNNER_TEMP/sign-check/check.txt"
 
           jar --create \
             --file "$RUNNER_TEMP/sign-check.jar" \
@@ -239,7 +215,6 @@ jobs:
 
           jarsigner -verify "$RUNNER_TEMP/sign-check.jar" >/dev/null
 
-      # MHRV source
       - name: Checkout MHRV
         uses: actions/checkout@v4
         with:
@@ -247,48 +222,36 @@ jobs:
           ref: v1.9.38
           path: .native-src/mhrv
 
-      - name: Install Rust toolchain for MHRV
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android
-
-      # Build MHRV
       - name: Build MHRV Android native library
+        shell: bash
         run: |
           set -euo pipefail
-
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
 
+          rustup target add aarch64-linux-android
           cargo install cargo-ndk --locked
 
           cd .native-src/mhrv
-
           cargo ndk -t arm64-v8a \
             -o "$GITHUB_WORKSPACE/app/src/main/jniLibs" \
             build --release --lib
 
           ABI_DIR="$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
-
           test -s "$ABI_DIR/libmhrv_rs.so"
 
           shopt -s nullglob
-
           TUN2PROXY_LIBS=("$ABI_DIR"/libtun2proxy-*.so)
-
           if [ "${#TUN2PROXY_LIBS[@]}" -gt 0 ]; then
             cp "${TUN2PROXY_LIBS[0]}" "$ABI_DIR/libtun2proxy.so"
             rm -f "${TUN2PROXY_LIBS[@]}"
           fi
-
           test -s "$ABI_DIR/libtun2proxy.so"
 
-      # Go for existing engines
       - name: Setup Go for existing engines
         uses: actions/setup-go@v6
         with:
           go-version: '1.25.0'
 
-      # StormDNS
       - name: Checkout StormDNS
         uses: actions/checkout@v4
         with:
@@ -297,22 +260,19 @@ jobs:
           path: .native-src/stormdns
 
       - name: Build StormDNS Android ARM64 client
+        shell: bash
         run: |
           set -euo pipefail
-
           mkdir -p app/src/main/jniLibs/arm64-v8a
-
           cd .native-src/stormdns
 
           CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
-            go build -trimpath -buildmode=pie \
-            -ldflags='-s -w' \
+            go build -trimpath -buildmode=pie -ldflags='-s -w' \
             -o "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libstormdns.so" \
             ./cmd/client
 
           test -s "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libstormdns.so"
 
-      # SNISPF
       - name: Checkout SNISPF
         uses: actions/checkout@v4
         with:
@@ -321,24 +281,22 @@ jobs:
           path: .native-src/snispf
 
       - name: Build Patterniha-compatible SNI fragmentation engine
+        shell: bash
         run: |
           set -euo pipefail
-
           cd .native-src/snispf/engine
 
           CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
-            go build -trimpath -buildmode=pie \
-            -ldflags='-s -w' \
+            go build -trimpath -buildmode=pie -ldflags='-s -w' \
             -o "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libsnispf.so" \
             ./cmd/snispf
 
           test -s "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libsnispf.so"
 
-      # Xray
       - name: Download Xray engine
+        shell: bash
         run: |
           set -euo pipefail
-
           mkdir -p app/libs
 
           curl -fL --retry 3 --retry-delay 2 \
@@ -347,32 +305,28 @@ jobs:
 
           test -s app/libs/libv2ray.aar
 
-      # Gradle
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.6.1'
 
-      # Build APK
-      - name: Build TIREXNET with the full SlipNet runtime
+      - name: Build TIREXNET with SlipNet runtime
         env:
           SLIPNET_CONFIG_ENCRYPTION_KEY: ${{ secrets.SLIPNET_CONFIG_ENCRYPTION_KEY }}
+        shell: bash
         run: |
           set -euo pipefail
-
           gradle --no-daemon assembleDebug assembleRelease
-
           test -s app/build/outputs/apk/release/app-release.apk
+          test -s app/build/outputs/apk/debug/app-debug.apk
 
-      # Corresponding source archive
       - name: Create AGPL corresponding-source archive
+        shell: bash
         run: |
           set -euo pipefail
 
           OUT="$GITHUB_WORKSPACE/release-source/TIREXNET-SLIPNET-corresponding-source"
-
           mkdir -p "$OUT"
-
           git archive HEAD | tar -x -C "$OUT"
 
           mkdir -p \
@@ -382,31 +336,36 @@ jobs:
             "$OUT/app/src/main/rust" \
             "$OUT/app/src/main/jniLibs" \
             "$OUT/app/src/main/assets" \
-            "$OUT/third_party"
+            "$OUT/third_party" \
+            "$OUT/app/scripts" \
+            "$OUT/app/libs"
 
-          cp -a app/src/main/java/app/slipnet "$OUT/app/src/main/java/app/"
+          if [ -d app/src/main/java/app/slipnet ]; then
+            cp -a app/src/main/java/app/slipnet "$OUT/app/src/main/java/app/"
+          fi
 
           cp app/src/main/java/com/tirexnet/app/TirexApplication.kt \
             "$OUT/app/src/main/java/com/tirexnet/app/"
-
           cp app/src/main/java/com/tirexnet/app/TirexSlipNetEntryPoint.kt \
             "$OUT/app/src/main/java/com/tirexnet/app/"
 
-          cp -a app/src/main/cpp/. "$OUT/app/src/main/cpp/"
-          cp -a app/src/main/rust/. "$OUT/app/src/main/rust/"
-          cp -a app/src/main/jniLibs/arm64-v8a "$OUT/app/src/main/jniLibs/"
-          cp -a app/src/main/assets/. "$OUT/app/src/main/assets/"
-
-          mkdir -p "$OUT/app/scripts" "$OUT/app/libs"
-
-          cp -a app/scripts/. "$OUT/app/scripts/"
+          [ ! -d app/src/main/cpp ] || cp -a app/src/main/cpp/. "$OUT/app/src/main/cpp/"
+          [ ! -d app/src/main/rust ] || cp -a app/src/main/rust/. "$OUT/app/src/main/rust/"
+          [ ! -d app/src/main/jniLibs/arm64-v8a ] || cp -a app/src/main/jniLibs/arm64-v8a "$OUT/app/src/main/jniLibs/"
+          [ ! -d app/src/main/assets ] || cp -a app/src/main/assets/. "$OUT/app/src/main/assets/"
+          [ ! -d app/src/main/res ] || cp -a app/src/main/res/. "$OUT/app/src/main/res/"
+          [ ! -d app/scripts ] || cp -a app/scripts/. "$OUT/app/scripts/"
 
           cp app/libs/golibs-full.aar app/libs/libv2ray.aar "$OUT/app/libs/"
 
-          cp -a app/src/main/res/. "$OUT/app/src/main/res/"
-
-          cp app/src/main/java/com/hrmp/aether/MainActivity.kt \
-            "$OUT/app/src/main/java/com/hrmp/aether/MainActivity.kt"
+          if [ -f app/src/main/java/com/hrmp/aether/MainActivity.kt ]; then
+            mkdir -p "$OUT/app/src/main/java/com/hrmp/aether"
+            cp app/src/main/java/com/hrmp/aether/MainActivity.kt \
+              "$OUT/app/src/main/java/com/hrmp/aether/MainActivity.kt"
+          elif [ -f app/src/main/java/com/tirexnet/app/MainActivity.kt ]; then
+            cp app/src/main/java/com/tirexnet/app/MainActivity.kt \
+              "$OUT/app/src/main/java/com/tirexnet/app/MainActivity.kt"
+          fi
 
           cp -a .native-src/slipnet "$OUT/third_party/SlipNet"
           cp -a .native-src/mhrv "$OUT/third_party/MasterHttpRelayVPN-RUST"
@@ -414,20 +373,16 @@ jobs:
           cp -a .native-src/snispf "$OUT/third_party/snispf"
 
           find "$OUT" -name .git -exec rm -rf {} +
-
           find "$OUT" -type d \
             \( -name target -o -name .picoquic-build -o -name .gradle \) \
             -prune -exec rm -rf {} +
 
-          cp .native-src/slipnet/LICENSE \
-            "$OUT/THIRD_PARTY-SLIPNET-AGPL-3.0.txt"
+          cp .native-src/slipnet/LICENSE "$OUT/THIRD_PARTY-SLIPNET-AGPL-3.0.txt"
 
           tar -czf \
             release-source/TIREXNET-SLIPNET-corresponding-source.tar.gz \
-            -C release-source \
-            TIREXNET-SLIPNET-corresponding-source
+            -C release-source TIREXNET-SLIPNET-corresponding-source
 
-      # Release APK
       - name: Upload TIREXNET Release APK
         uses: actions/upload-artifact@v4
         with:
@@ -435,7 +390,6 @@ jobs:
           path: app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
 
-      # Debug APK
       - name: Upload TIREXNET Debug APK
         uses: actions/upload-artifact@v4
         with:
@@ -443,7 +397,6 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
-      # SlipNet source
       - name: Upload SlipNet corresponding source
         uses: actions/upload-artifact@v4
         with:
