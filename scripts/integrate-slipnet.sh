@@ -86,12 +86,19 @@ if up.exists():
     ET.ElementTree(root).write(target, encoding="utf-8", xml_declaration=True)
 PYRES
 
-# R and BuildConfig are generated in TIREXNET's namespace, not app.slipnet.
+# R and BuildConfig are generated in TIREXNET's namespace.
+# TIREXNET integrates the FULL SlipNet edition only.
 find "$APP/src/main/java/app/slipnet" -type f -name '*.kt' -print0 | \
   xargs -0 -r sed -i \
     -e 's/app\.slipnet\.R/com.tirexnet.app.R/g' \
-    -e 's/app\.slipnet\.BuildConfig/com.tirexnet.app.BuildConfig/g'
+    -e 's/app\.slipnet\.BuildConfig/com.tirexnet.app.BuildConfig/g' \
+    -e 's/BuildConfig\.FLAVOR == "lite"/false/g'
 
+# Verify that no unsupported Lite flavor checks remain.
+if grep -R -n 'BuildConfig\.FLAVOR' "$APP/src/main/java/app/slipnet"; then
+  echo "::error::Unsupported SlipNet FLAVOR reference remains."
+  exit 1
+fi
 # Upstream keeps constants in SlipNetApp; TIREXNET owns the one Hilt Application.
 cat > "$APP/src/main/java/app/slipnet/SlipNetApp.kt" <<'KOTLIN'
 package app.slipnet
