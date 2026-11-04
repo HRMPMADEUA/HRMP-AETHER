@@ -41,6 +41,7 @@ jobs:
             app/src/main/rust/slipstream-rust \
             app/src/main/rust/slipstream-rust-plus \
             dnstt \
+            dnstt-mobile \
             lyrebird \
             noizdns \
             vaydns \
@@ -89,6 +90,65 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/integrate-slipnet.sh .native-src/slipnet
+
+      - name: Verify combined TIREXNET, SlipNet and Xray staging
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SETTINGS="app/src/main/java/app/slipnet/presentation/settings/SettingsViewModel.kt"
+          SLIPNET_MAIN="app/src/main/java/app/slipnet/presentation/MainActivity.kt"
+          TIREX_MAIN="app/src/main/java/com/hrmp/aether/MainActivity.kt"
+
+          test -s "$SETTINGS"
+          test -s "$SLIPNET_MAIN"
+          test -s "$TIREX_MAIN"
+          test -s app/src/main/cpp/Android.mk
+          test -s app/src/main/java/com/tirexnet/app/TirexApplication.kt
+          test -s app/src/main/java/com/tirexnet/app/TirexSlipNetEntryPoint.kt
+          test -s app/src/main/java/com/tirexnet/app/SlipNetConnectActivity.kt
+          test -s app/src/main/java/com/tirexnet/app/SlipNetSettingsActivity.kt
+          test -s app/src/main/java/com/hrmp/aether/engine/XrayVpnService.kt
+
+          grep -Fq 'data class MainSettingsCore' "$SETTINGS"
+          grep -Fq 'main.autoConnectOnBoot' "$SETTINGS"
+          grep -Fq 'slipnet-bundle-enc://' "$SLIPNET_MAIN"
+          grep -Fq 'openSlipNetRuntime(raw)' "$TIREX_MAIN"
+          grep -Fq 'slipNetConnectionManager.disconnect()' "$TIREX_MAIN"
+
+          if grep -Eq 'main\[[0-6]\] as ' "$SETTINGS"; then
+            echo "::error::Unsafe Kotlin heterogeneous-array casts remain in SlipNet SettingsViewModel."
+            exit 1
+          fi
+
+          python3 - <<'PYMANIFEST'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          manifest = ET.parse("app/src/main/AndroidManifest.xml").getroot()
+          android = "{http://schemas.android.com/apk/res/android}"
+          app = manifest.find("application")
+          assert app is not None, "Android application element is missing"
+          assert app.get(android + "name") == ".TirexApplication", "TIREXNET Hilt Application is not configured"
+          activities = {x.get(android + "name") for x in app.findall("activity")}
+          services = {x.get(android + "name") for x in app.findall("service")}
+          required_activities = {
+              ".MainActivity",
+              "app.slipnet.presentation.MainActivity",
+              "com.tirexnet.app.SlipNetConnectActivity",
+              "com.tirexnet.app.SlipNetSettingsActivity",
+          }
+          required_services = {
+              ".engine.XrayVpnService",
+              "app.slipnet.service.SlipNetVpnService",
+              ".engine.DnsChangerVpnService",
+          }
+          missing = (required_activities - activities) | (required_services - services)
+          assert not missing, "Manifest entries missing: " + ", ".join(sorted(missing))
+          print("Manifest integration checks passed.")
+          PYMANIFEST
+
+          echo "TIREXNET + full SlipNet + Xray integration staging verified."
 
       - name: Add SlipNet and Xray licenses
         shell: bash
@@ -670,7 +730,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          gradle --no-daemon assembleDebug assembleRelease
+          gradle --no-daemon --stacktrace assembleDebug assembleRelease
 
           test -s app/build/outputs/apk/release/app-release.apk
           test -s app/build/outputs/apk/debug/app-debug.apk
