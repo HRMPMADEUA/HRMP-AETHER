@@ -9,7 +9,9 @@ data class MasterDnsProfile(
     val name: String,
     val clientConfig: String,
     val resolvers: String,
-    val listenPort: Int
+    val listenPort: Int,
+    /** First resolver host, used only for display/ping metadata. */
+    val host: String = ""
 )
 
 object MasterDnsProfiles {
@@ -23,7 +25,8 @@ object MasterDnsProfiles {
         resolvers: String,
         listenPort: Int,
         workers: Int,
-        mtu: Int
+        mtu: Int,
+        logLevel: String = "WARN"
     ): String {
         val json = JSONObject()
             .put("name", name.trim().take(80))
@@ -34,6 +37,7 @@ object MasterDnsProfiles {
             .put("listen_port", listenPort)
             .put("workers", workers)
             .put("mtu", mtu)
+            .put("log_level", logLevel)
         val encoded = Base64.encodeToString(
             json.toString().toByteArray(StandardCharsets.UTF_8),
             Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
@@ -72,6 +76,9 @@ object MasterDnsProfiles {
         require(mtu in 576..9000)
 
         val domainArray = domains.joinToString(", ") { tomlString(it) }
+        val logLevel = json.optString("log_level", "WARN").uppercase()
+        require(logLevel in setOf("ERROR", "WARN", "INFO", "DEBUG"))
+
         val config = """
 DOMAINS = [$domainArray]
 DATA_ENCRYPTION_METHOD = $method
@@ -86,16 +93,24 @@ MIN_UPLOAD_MTU = $mtu
 MAX_UPLOAD_MTU = $mtu
 MIN_DOWNLOAD_MTU = $mtu
 MAX_DOWNLOAD_MTU = $mtu
-LOG_LEVEL = "WARN"
+LOG_LEVEL = "$logLevel"
 """.trim()
 
         MasterDnsProfile(
             name = name,
             clientConfig = config,
             resolvers = resolvers.joinToString("\n"),
-            listenPort = listenPort
+            listenPort = listenPort,
+            host = resolverHost(resolvers.first())
         )
     }.getOrNull()
+
+    private fun resolverHost(value: String): String {
+        val t = value.trim()
+        if (t.startsWith("[")) return t.substringAfter('[').substringBefore(']')
+        if (t.count { it == ':' } >= 2) return t.substringBefore('/')
+        return t.substringBefore('/').substringBefore(':')
+    }
 
     private fun splitLines(raw: String): List<String> = raw
         .lineSequence()
