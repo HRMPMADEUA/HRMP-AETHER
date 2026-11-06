@@ -75,6 +75,7 @@ import com.tirexnet.app.engine.TirexActions
 import com.tirexnet.app.engine.TirexNotifier
 import com.tirexnet.app.engine.TrafficMonitor
 import com.tirexnet.app.engine.StormDnsEngine
+import com.tirexnet.app.engine.MasterDnsEngine
 import com.tirexnet.app.engine.CottenDnsEngine
 import com.tirexnet.app.engine.SniSpoofEngine
 import com.tirexnet.app.engine.WgTunnelEngine
@@ -299,6 +300,7 @@ private fun savePanelSession(
     private var addStatus: TextView? = null
     private var addScroll: ScrollView? = null
     private var manualProtoRow: LinearLayout? = null
+    private var manualGroupRow: LinearLayout? = null
     private var manualFieldsBox: LinearLayout? = null
     private var manualError: TextView? = null
     private var manualSaveBtn: TextView? = null
@@ -2041,6 +2043,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         val label = when (engine) {
             ConfigEngine.MHRV -> "MHRV"
             ConfigEngine.DNS_TUNNEL -> "StormDNS"
+            ConfigEngine.MASTERDNS -> "MasterDNS"
             ConfigEngine.COTTENDNS -> "CottenDNS"
             ConfigEngine.SNI_SPOOF -> "Patterniha SNI"
             else -> "Tunnel"
@@ -2050,6 +2053,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
             val error = when (engine) {
                 ConfigEngine.MHRV -> MhrvEngine.start(this, raw)
                 ConfigEngine.DNS_TUNNEL -> StormDnsEngine.start(this, raw)
+                ConfigEngine.MASTERDNS -> MasterDnsEngine.start(this, raw)
                 ConfigEngine.COTTENDNS -> CottenDnsEngine.start(this, raw)
                 ConfigEngine.SNI_SPOOF -> SniSpoofEngine.start(this, raw)
                 else -> "Unsupported auxiliary engine."
@@ -2094,6 +2098,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         when (engine) {
             ConfigEngine.MHRV -> MhrvEngine.stop()
             ConfigEngine.DNS_TUNNEL -> StormDnsEngine.stop()
+            ConfigEngine.MASTERDNS -> MasterDnsEngine.stop()
             ConfigEngine.COTTENDNS -> CottenDnsEngine.stop()
             ConfigEngine.SNI_SPOOF -> SniSpoofEngine.stop()
             else -> Unit
@@ -2710,7 +2715,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         }
         val regionServers = servers.filter { regionFilter == "ALL" || it.country.equals(regionFilter, true) }
         val candidates = (if (prefs.getString("connection_mode", "vpn") == "proxy")
-            regionServers.filter { it.engine in setOf(ConfigEngine.XRAY, ConfigEngine.MHRV, ConfigEngine.DNS_TUNNEL, ConfigEngine.COTTENDNS, ConfigEngine.SNI_SPOOF) }
+            regionServers.filter { it.engine in setOf(ConfigEngine.XRAY, ConfigEngine.MHRV, ConfigEngine.DNS_TUNNEL, ConfigEngine.MASTERDNS, ConfigEngine.COTTENDNS, ConfigEngine.SNI_SPOOF) }
         else regionServers.filter { it.engine != ConfigEngine.SLIPNET && it.meta.host.isNotBlank() }).take(60)
         if (candidates.isEmpty()) {
             cancelSmartConnect(false)
@@ -3070,10 +3075,10 @@ private fun buildLogin(): View {
         val proxyMode = prefs.getString("connection_mode", "vpn") == "proxy"
         if (
             proxyMode &&
-            engine !in setOf(ConfigEngine.XRAY, ConfigEngine.MHRV, ConfigEngine.DNS_TUNNEL, ConfigEngine.COTTENDNS, ConfigEngine.SNI_SPOOF) &&
+            engine !in setOf(ConfigEngine.XRAY, ConfigEngine.MHRV, ConfigEngine.DNS_TUNNEL, ConfigEngine.MASTERDNS, ConfigEngine.COTTENDNS, ConfigEngine.SNI_SPOOF) &&
             !(engine == ConfigEngine.SLIPNET && prefs.getBoolean("slipnet_proxy_only", false))
         ) {
-            toast("Local proxy mode supports Xray, MHRV, StormDNS, CottenDNS, Patterniha SNI, or SlipNet proxy-only profiles.")
+            toast("Local proxy mode supports Xray, MHRV, StormDNS, MasterDNS, CottenDNS, Patterniha SNI, or SlipNet proxy-only profiles.")
             return
         }
         pendingRaw = raw
@@ -3269,7 +3274,7 @@ private fun buildLogin(): View {
                     runOnUiThread { applyStatus(message, active) }
                 }
             }
-            ConfigEngine.MHRV, ConfigEngine.DNS_TUNNEL, ConfigEngine.COTTENDNS, ConfigEngine.SNI_SPOOF -> startAuxiliaryProxyEngine(pendingEngine, pendingRaw)
+            ConfigEngine.MHRV, ConfigEngine.DNS_TUNNEL, ConfigEngine.MASTERDNS, ConfigEngine.COTTENDNS, ConfigEngine.SNI_SPOOF -> startAuxiliaryProxyEngine(pendingEngine, pendingRaw)
             ConfigEngine.SLIPNET -> startSlipNetRuntime(pendingRaw)
             ConfigEngine.DNS_CHANGER -> {
                 applyStatus("Starting DNS Changer…", false)
@@ -3313,7 +3318,7 @@ private fun buildLogin(): View {
             issued = true
             startService(Intent(this, DnsChangerVpnService::class.java).setAction(DnsChangerVpnService.ACTION_STOP))
         }
-        if (engine in setOf("XRAY", "MHRV", "DNS_TUNNEL", "COTTENDNS", "SNI_SPOOF") || XrayVpnService.isActive) {
+        if (engine in setOf("XRAY", "MHRV", "DNS_TUNNEL", "MASTERDNS", "COTTENDNS", "SNI_SPOOF") || XrayVpnService.isActive) {
             issued = true
             startService(Intent(this, XrayVpnService::class.java).setAction(XrayVpnService.ACTION_STOP))
         }
@@ -3323,6 +3328,7 @@ private fun buildLogin(): View {
             if (!XrayVpnService.isActive) {
                 MhrvEngine.stop()
                 StormDnsEngine.stop()
+                MasterDnsEngine.stop()
                 CottenDnsEngine.stop()
                 SniSpoofEngine.stop()
             }
@@ -3551,7 +3557,7 @@ private fun buildLogin(): View {
             val msg = when {
                 o.bundleFailures > 0 -> "رمز بسته SlipNet اشتباه است یا فایل bundle خراب شده است."
                 o.duplicates > 0 && o.invalid == 0 -> "این کانفیگ قبلاً در لیست هست."
-                else -> "کانفیگ پشتیبانی‌شده‌ای پیدا نشد. Xray / WireGuard / AmneziaWG / OpenVPN / MHRV / StormDNS / CottenDNS / Patterniha / SlipNet لازم است."
+                else -> "کانفیگ پشتیبانی‌شده‌ای پیدا نشد. Xray / WireGuard / AmneziaWG / OpenVPN / MHRV / StormDNS / MasterDNS / CottenDNS / Patterniha / SlipNet لازم است."
             }
             importFailed(msg)
             return
@@ -3588,6 +3594,7 @@ private fun buildLogin(): View {
         ConfigEngine.OPENVPN -> "OPENVPN"
         ConfigEngine.MHRV -> "MHRV"
         ConfigEngine.DNS_TUNNEL -> "STORMDNS"
+        ConfigEngine.MASTERDNS -> "MASTERDNS"
         ConfigEngine.COTTENDNS -> "COTTENDNS"
         ConfigEngine.DNS_CHANGER -> "DNS CHANGER"
         ConfigEngine.SNI_SPOOF -> "PATTERNIHA SNI"
@@ -4425,12 +4432,17 @@ private fun request(
         // --- 2. Manual entry
         val manual = GlassCard(this, 22f, pad = 16)
         manual.addView(tv("MANUAL ENTRY", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
-        manual.addView(tv("Choose a protocol; DNS Changer creates an independent DNS-only connection profile.", 11.5f, Palette.muted, 0), lp(MATCH, WRAP, 6))
+        manual.addView(tv("Pick a family, then a protocol. Only the fields that protocol uses are shown.", 11.5f, Palette.muted, 0), lp(MATCH, WRAP, 6))
+        val groupScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        val groupRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        groupScroll.addView(groupRow, FrameLayout.LayoutParams(WRAP, WRAP))
+        manualGroupRow = groupRow
+        manual.addView(groupScroll, lp(MATCH, WRAP, 12))
         val protoScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
         val protoRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         protoScroll.addView(protoRow, FrameLayout.LayoutParams(WRAP, WRAP))
         manualProtoRow = protoRow
-        manual.addView(protoScroll, lp(MATCH, WRAP, 12))
+        manual.addView(protoScroll, lp(MATCH, WRAP, 2))
         val fieldsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         manualFieldsBox = fieldsBox
         manual.addView(fieldsBox, lp(MATCH, WRAP))
@@ -4445,7 +4457,7 @@ private fun request(
         // --- 3. Raw editor
         val rawCard = GlassCard(this, 22f, pad = 16)
         rawCard.addView(tv("RAW CONFIG", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
-        rawCard.addView(tv("Paste Xray, WireGuard, OpenVPN, MHRV, StormDNS, CottenDNS, Patterniha or SlipNet share links. SlipNet links can be imported here; runtime availability is shown in SlipNet settings.", 11.5f, Palette.muted, 0), lp(MATCH, WRAP, 6))
+        rawCard.addView(tv("Paste Xray, WireGuard, OpenVPN, MHRV, StormDNS, MasterDNS (masterdns://), CottenDNS, Patterniha or SlipNet (slipnet://) share links. SlipNet links can be imported here; runtime availability is shown in SlipNet settings.", 11.5f, Palette.muted, 0), lp(MATCH, WRAP, 6))
         val raw = EditText(this).apply {
             hint = "vless://…  |  { \"outbounds\": … }  |  [Interface] …"
             textSize = 12f
@@ -4485,7 +4497,7 @@ private fun request(
             (getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
                 .hideSoftInputFromWindow(v.windowToken, 0)
         }
-        addStatus = null; manualFieldsBox = null; manualProtoRow = null; manualError = null
+        addStatus = null; manualFieldsBox = null; manualProtoRow = null; manualGroupRow = null; manualError = null
         manualSaveBtn = null; rawInput = null; addScroll = null
         manualFieldViews.clear()
         v.animate().alpha(0f).setDuration(160).withEndAction { (v.parent as? ViewGroup)?.removeView(v) }.start()
@@ -4532,24 +4544,36 @@ private fun request(
             pressable(0.95f)
         }
 
+    private fun selectManualProtocol(p: ManualProtocol) {
+        if (p == manualProtocol) return
+        val name = manualValues["name"].orEmpty()
+        val address = manualValues["address"].orEmpty()
+        manualProtocol = p
+        manualValues.clear()
+        manualValues.putAll(ManualProfile.defaultsFor(p))
+        manualValues["name"] = name
+        if (ManualProfile.fields(p).any { it.key == "address" }) manualValues["address"] = address
+        manualError?.visibility = View.GONE
+        buildProtocolChips()
+        rebuildManualFields()
+    }
+
     private fun buildProtocolChips() {
+        val groupRow = manualGroupRow
         val row = manualProtoRow ?: return
+        groupRow?.let { gr ->
+            gr.removeAllViews()
+            for (g in ManualProtocol.groups) {
+                gr.addView(chip(g, g == manualProtocol.group) {
+                    if (g != manualProtocol.group) {
+                        ManualProtocol.values().firstOrNull { it.group == g }?.let { selectManualProtocol(it) }
+                    }
+                }, lp(WRAP, WRAP, 0, 0, 0, 8))
+            }
+        }
         row.removeAllViews()
-        for (p in ManualProtocol.values()) {
-            row.addView(chip(p.label, p == manualProtocol) {
-                if (p != manualProtocol) {
-                    val name = manualValues["name"].orEmpty()
-                    val address = manualValues["address"].orEmpty()
-                    manualProtocol = p
-                    manualValues.clear()
-                    manualValues.putAll(ManualProfile.defaultsFor(p))
-                    manualValues["name"] = name
-                    manualValues["address"] = address
-                    manualError?.visibility = View.GONE
-                    buildProtocolChips()
-                    rebuildManualFields()
-                }
-            }, lp(WRAP, WRAP, 0, 0, 0, 8))
+        for (p in ManualProtocol.values().filter { it.group == manualProtocol.group }) {
+            row.addView(chip(p.label, p == manualProtocol) { selectManualProtocol(p) }, lp(WRAP, WRAP, 0, 0, 0, 8))
         }
     }
 
@@ -4560,9 +4584,14 @@ private fun request(
         val box = manualFieldsBox ?: return
         box.removeAllViews()
         manualFieldViews.clear()
+        var lastSection = ""
         for (f in ManualProfile.fields(manualProtocol)) {
             val cond = f.showWhen
             if (cond != null && !cond(manualValues)) continue
+            if (f.section.isNotEmpty() && f.section != lastSection) {
+                lastSection = f.section
+                box.addView(tv(f.section.uppercase(), 8.5f, Palette.cyan, 1).apply { letterSpacing = 0.18f }, lp(MATCH, WRAP, 18))
+            }
             box.addView(tv(f.label + if (f.required) " *" else "", 11f, Palette.muted, 1), lp(MATCH, WRAP, 12))
             if (f.kind == FieldKind.CHOICE) {
                 val hs = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
@@ -4613,6 +4642,17 @@ private fun request(
         if (manualProtocol == ManualProtocol.DNS_CHANGER) {
             box.addView(tv(
                 "Dedicated DNS mode • forwards classic DNS (UDP/53) to the selected resolvers. Other traffic stays on the normal network. Android allows only one active VPN at a time, so disconnect another VPN before using this profile.",
+                10.5f, Palette.cyan, 0
+            ), lp(MATCH, WRAP, 12))
+        }
+        if (manualProtocol.isSlipNet) {
+            box.addView(tv(
+                "Saved as an official SlipNet profile and run by the in-app SlipNet engine (DNSTT / VayDNS / Soar and optional SSH).",
+                10.5f, Palette.cyan, 0
+            ), lp(MATCH, WRAP, 12))
+        } else if (manualProtocol == ManualProtocol.MASTERDNS) {
+            box.addView(tv(
+                "Runs the MasterDnsVPN client locally (SOCKS5 on 127.0.0.1) and routes the whole device through it. Domains, key and encryption method must match the server.",
                 10.5f, Palette.cyan, 0
             ), lp(MATCH, WRAP, 12))
         }
