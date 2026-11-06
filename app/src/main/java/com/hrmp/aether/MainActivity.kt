@@ -91,6 +91,7 @@ import com.tirexnet.app.ui.ConnectOrb
 import com.tirexnet.app.ui.EmptyArt
 import com.tirexnet.app.ui.FlagBadge
 import com.tirexnet.app.ui.GlassCard
+import com.tirexnet.app.ui.Kit
 import com.tirexnet.app.ui.GlassNavBar
 import com.tirexnet.app.ui.Icon
 import com.tirexnet.app.ui.IconView
@@ -314,6 +315,7 @@ private fun savePanelSession(
     private var manualCountry = ""
     private val manualValues = HashMap<String, String>()
     private val manualFieldViews = HashMap<String, EditText>()
+    private var manualForm: Kit.FieldForm? = null
 
     // ---- views (rebuilt by render())
     private var tabViews: List<View> = emptyList()
@@ -1134,11 +1136,8 @@ private fun savePanelSession(
                 for (i in 0 until 3) box.addView(SkeletonView(this), lp(MATCH, dpi(76), if (i == 0) 0 else 10))
             }
             ServersState.ERROR -> {
-                val c = GlassCard(this, 20f, Palette.withAlpha(Palette.red, 120), pad = 16)
-                c.addView(tv("Couldn't load configurations", 15f, Palette.text, 1))
-                c.addView(tv("Check your internet connection and try again.", 11.5f, Palette.muted, 0).apply { maxLines = 4; ellipsize = TextUtils.TruncateAt.END }, lp(MATCH, WRAP, 6))
-                c.addView(primaryButton("Retry") { loadServers() }, lp(MATCH, dpi(46), 12))
-                box.addView(c, lp(MATCH, WRAP))
+                box.addView(Kit.stateView(this, Kit.StateKind.ERROR, "Couldn't load configurations",
+                    "Check your internet connection and try again.", "Retry") { loadServers() }, lp(MATCH, WRAP))
             }
             ServersState.READY -> {
                 if (servers.isEmpty()) {
@@ -1161,7 +1160,7 @@ private fun savePanelSession(
                         { item -> servers.indexOf(item) })
                 ) else filtered
                 if (list.isEmpty()) {
-                    box.addView(tv("No matching server", 12.5f, Palette.muted, 0).apply { gravity = Gravity.CENTER }, lp(MATCH, WRAP, 20, 10))
+                    box.addView(Kit.stateView(this, Kit.StateKind.EMPTY, "No matching server", "Try another name or region."), lp(MATCH, WRAP, 10))
                     return
                 }
                 val cur = currentConfig().trim()
@@ -1465,11 +1464,10 @@ private fun savePanelSession(
         top.addView(profStatus!!, lp(WRAP, WRAP, 6))
         col.addView(top, lp(MATCH, WRAP))
 
-        val sub = GlassCard(this, 20f, pad = 14)
-        sub.addView(tv("SUBSCRIPTION", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
-        profPanel = infoRow(sub, "Panel user")
-        profExpiry = infoRow(sub, "Expires")
-        profUsage = infoRow(sub, "Data used")
+        val (sub, subBody) = Kit.card(this, "Subscription", Icon.PROFILE, subtitle = "Your account on the connected panel")
+        profPanel = infoRow(subBody, "Panel user")
+        profExpiry = infoRow(subBody, "Expires")
+        profUsage = infoRow(subBody, "Data used")
         col.addView(sub, lp(MATCH, WRAP, 18))
 
         val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -1477,11 +1475,7 @@ private fun savePanelSession(
         actions.addView(ghostButton("Log out") { confirmLogout() }, LinearLayout.LayoutParams(0, dpi(48), 1f).apply { leftMargin = dpi(6) })
         col.addView(actions, lp(MATCH, WRAP, 12))
         // Subscription panel management
-val panelCard = GlassCard(this, 20f, pad = 14)
-
-panelCard.addView(
-    tv("SUBSCRIPTION PANELS", 10f, Palette.cyan, 2)
-)
+val (panelCard, panelBody) = Kit.card(this, "Subscription panels", Icon.SERVERS, subtitle = "Xray and WireGuard accounts")
 
 fun addPanelStatus(name: String, username: String, connected: Boolean) {
     val row = LinearLayout(this).apply {
@@ -1509,16 +1503,9 @@ fun addPanelStatus(name: String, username: String, connected: Boolean) {
 
     row.addView(info, LinearLayout.LayoutParams(0, WRAP, 1f))
 
-    row.addView(
-        tv(
-            if (connected) "CONNECTED" else "OFFLINE",
-            9f,
-            if (connected) Palette.mint else Palette.muted,
-            2
-        )
-    )
+    row.addView(Kit.pill(this, if (connected) "CONNECTED" else "OFFLINE", if (connected) Palette.mint else Palette.muted))
 
-    panelCard.addView(row, lp(MATCH, WRAP))
+    panelBody.addView(row, lp(MATCH, WRAP))
 }
 
 addPanelStatus(
@@ -1534,7 +1521,7 @@ addPanelStatus(
 )
 
 if (pasarguardToken.isBlank()) {
-    panelCard.addView(
+    panelBody.addView(
         primaryButton("Add Xray Profile") {
             openPanelLogin("pasarguard")
         },
@@ -1543,7 +1530,7 @@ if (pasarguardToken.isBlank()) {
 }
 
 if (alipanelToken.isBlank()) {
-    panelCard.addView(
+    panelBody.addView(
         primaryButton("Add WireGuard Profile") {
             openPanelLogin("alipanel")
         },
@@ -1557,25 +1544,35 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         settingsAnchor = anchor
         col.addView(anchor, lp(WRAP, WRAP, 26, 8))
 
-        val g1 = GlassCard(this, 20f, pad = 4)
-        settingRow(g1, Icon.INFO, "Active engine", "Detected from the selected profile", engineLabelShort()) { }
-        settingRow(g1, Icon.GLOBE, "Connection mode", "VPN or local SOCKS5 / HTTP proxy", connectionModeSummary()) { showConnectionModeDialog() }
-        settingRow(g1, Icon.GLOBE, "SlipNet protocols & settings", "DNS tunnels, resolver pools, SSH chains, Slipstream, NaiveProxy and Tor", "Open") { showSlipNetDialog() }
-        settingRow(g1, Icon.SHIELD, "Split tunneling", "Choose apps included in or excluded from Xray", splitSummary()) { showSplitTunnelDialog() }
-        settingRow(g1, Icon.BOLT, "TLS server name", "Edit TLS / REALITY serverName on a local copy", null) { selectedItem()?.let { showSniDialog(it) } ?: toast("Select a server first.") }
-        settingRow(g1, Icon.SHIELD, "Patterniha SNI fragmentation", "Rootless TLS fragmentation • creates a local profile", "Configure") { selectedItem()?.let { showPatternihaDialog(it) } ?: toast("Select a TLS/REALITY server first.") }
-        settingRow(g1, Icon.GLOBE, "Website ping target", "HTTP response-time check for a URL you choose", "Change") { showPingUrlDialog() }
-        settingRow(g1, Icon.SHIELD, "MHRV CA certificate", "Download it, then install it from Android Security settings", "Export") { exportMhrvCa() }
-        settingRow(g1, Icon.COPY, "Connection logs", "Recent connection activity", "Open") { showConnectionLogs() }
-        settingRow(g1, Icon.COPY, "Copy diagnostics", "Safe device and connection summary", null) { copyDiagnostics() }
-        settingRow(g1, Icon.TRASH, "Clear saved config", "Remove the selected profile from this phone", null) { clearConfig() }
-        col.addView(g1, lp(MATCH, WRAP))
+        // General settings first; specialist tools live in the collapsible Advanced card.
+        val (gConn, gConnBody) = Kit.card(this, "Connection", Icon.POWER, subtitle = "Engine, mode and app routing")
+        settingRow(gConnBody, Icon.INFO, "Active engine", "Detected from the selected profile", engineLabelShort()) { }
+        settingRow(gConnBody, Icon.GLOBE, "Connection mode", "VPN or local SOCKS5 / HTTP proxy", connectionModeSummary()) { showConnectionModeDialog() }
+        settingRow(gConnBody, Icon.SHIELD, "Split tunneling", "Choose apps included in or excluded from Xray", splitSummary()) { showSplitTunnelDialog() }
+        col.addView(gConn, lp(MATCH, WRAP))
 
-        val g2 = GlassCard(this, 20f, pad = 4)
-        settingRow(g2, Icon.SHIELD, "Privacy", "چه چیزی روی گوشی ذخیره می‌شود", null) { showPrivacy() }
-        settingRow(g2, Icon.INFO, "App version", packageName, versionName()) { }
-        settingRow(g2, Icon.REFRESH, "App updates", "بررسی نسخه جدید در GitHub و نصب APK", "Check") { checkForUpdates() }
-        col.addView(g2, lp(MATCH, WRAP, 12))
+        val (gNet, gNetBody) = Kit.card(this, "Network & DNS", Icon.GLOBE, subtitle = "Tunnels, resolvers and latency checks")
+        settingRow(gNetBody, Icon.GLOBE, "SlipNet protocols & settings", "DNS tunnels, resolver pools, SSH chains, Slipstream, NaiveProxy and Tor", "Open") { showSlipNetDialog() }
+        settingRow(gNetBody, Icon.GLOBE, "Website ping target", "HTTP response-time check for a URL you choose", "Change") { showPingUrlDialog() }
+        col.addView(gNet, lp(MATCH, WRAP, 12))
+
+        val (gAdv, gAdvBody) = Kit.advancedCard(this, "TLS name, SNI fragmentation and certificates")
+        settingRow(gAdvBody, Icon.BOLT, "TLS server name", "Edit TLS / REALITY serverName on a local copy", null) { selectedItem()?.let { showSniDialog(it) } ?: toast("Select a server first.") }
+        settingRow(gAdvBody, Icon.SHIELD, "Patterniha SNI fragmentation", "Rootless TLS fragmentation • creates a local profile", "Configure") { selectedItem()?.let { showPatternihaDialog(it) } ?: toast("Select a TLS/REALITY server first.") }
+        settingRow(gAdvBody, Icon.SHIELD, "MHRV CA certificate", "Download it, then install it from Android Security settings", "Export") { exportMhrvCa() }
+        col.addView(gAdv, lp(MATCH, WRAP, 12))
+
+        val (gData, gDataBody) = Kit.card(this, "Data & diagnostics", Icon.FILE, subtitle = "Logs, diagnostics and saved config")
+        settingRow(gDataBody, Icon.COPY, "Connection logs", "Recent connection activity", "Open") { showConnectionLogs() }
+        settingRow(gDataBody, Icon.COPY, "Copy diagnostics", "Safe device and connection summary", null) { copyDiagnostics() }
+        Kit.settingRow(this, gDataBody, Icon.TRASH, "Clear saved config", "Remove the selected profile from this phone", null, Palette.red) { clearConfig() }
+        col.addView(gData, lp(MATCH, WRAP, 12))
+
+        val (gAbout, gAboutBody) = Kit.card(this, "About", Icon.INFO, subtitle = "Privacy, version and updates")
+        settingRow(gAboutBody, Icon.SHIELD, "Privacy", "چه چیزی روی گوشی ذخیره می‌شود", null) { showPrivacy() }
+        settingRow(gAboutBody, Icon.INFO, "App version", packageName, versionName()) { }
+        settingRow(gAboutBody, Icon.REFRESH, "App updates", "بررسی نسخه جدید در GitHub و نصب APK", "Check") { checkForUpdates() }
+        col.addView(gAbout, lp(MATCH, WRAP, 12))
         return sv
     }
 
@@ -1590,20 +1587,18 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         scroll.addView(body, FrameLayout.LayoutParams(MATCH, WRAP))
 
-        fun heading(title: String, subtitle: String = "") {
-            body.addView(tv(title.uppercase(Locale.US), 10f, Palette.cyan, 2).apply { letterSpacing = 0.13f }, lp(MATCH, WRAP, 14, 4))
-            if (subtitle.isNotBlank()) body.addView(tv(subtitle, 10.5f, Palette.muted, 0), lp(MATCH, WRAP, 0, 6))
+        var cur: LinearLayout = body
+        fun heading(title: String, subtitle: String = "", icon: Icon = Icon.GLOBE) {
+            val (c, b) = Kit.card(this, title, icon, subtitle = subtitle.ifBlank { null })
+            body.addView(c, lp(MATCH, WRAP, 12))
+            cur = b
         }
         fun field(label: String, key: String, hint: String, default: String = "", multiline: Boolean = false, secret: Boolean = false, numeric: Boolean = false): EditText {
-            body.addView(tv(label, 11.5f, Palette.text, 1), lp(MATCH, WRAP, 7, 3))
+            cur.addView(tv(label, 11.5f, Palette.muted, 1), lp(MATCH, WRAP, 10, 3))
             return EditText(this).apply {
                 setText(prefs.all[key]?.toString() ?: default)
                 this.hint = hint
-                textSize = 12.5f
-                setTextColor(Palette.text)
-                setHintTextColor(Palette.dim)
-                background = fieldBackground(false)
-                setPadding(dpi(12), dpi(9), dpi(12), dpi(9))
+                Kit.styleInput(this@MainActivity, this, multiline)
                 if (multiline) { minLines = 2; maxLines = 5; gravity = Gravity.TOP or Gravity.START }
                 else setSingleLine(true)
                 inputType = when {
@@ -1612,43 +1607,37 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
                     multiline -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                     else -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                 }
-                body.addView(this, lp(MATCH, if (multiline) dpi(84) else dpi(44), 0, 2))
+                cur.addView(this, lp(MATCH, if (multiline) dpi(84) else dpi(48), 0, 2))
             }
         }
-        fun switch(label: String, key: String, default: Boolean): Switch {
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, dpi(3), 0, dpi(3))
-            }
-            val sw = Switch(this).apply {
-                isChecked = prefs.getBoolean(key, default)
-                text = label
-                textSize = 12.5f
-                setTextColor(Palette.text)
-            }
-            row.addView(sw, LinearLayout.LayoutParams(0, WRAP, 1f))
-            body.addView(row, lp(MATCH, WRAP, 4, 2))
-            return sw
-        }
+        fun switch(label: String, key: String, default: Boolean, desc: String? = null): Switch =
+            Kit.switchRow(this, cur, label, desc, prefs.getBoolean(key, default))
         fun spinner(label: String, key: String, options: List<String>, default: String): Spinner {
-            body.addView(tv(label, 11.5f, Palette.text, 1), lp(MATCH, WRAP, 7, 3))
-            val sp = Spinner(this)
-            val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, options)
-            sp.adapter = adapter
+            cur.addView(tv(label, 11.5f, Palette.muted, 1), lp(MATCH, WRAP, 10, 3))
+            val sp = Kit.spinner(this, options)
             val current = prefs.getString(key, default) ?: default
             val idx = options.indexOfFirst { it.equals(current, true) }.takeIf { it >= 0 }
                 ?: options.indexOf(default).coerceAtLeast(0)
             sp.setSelection(idx)
-            body.addView(sp, lp(MATCH, dpi(48), 0, 2))
+            cur.addView(sp, lp(MATCH, dpi(48), 0, 2))
             return sp
         }
 
-        heading("SlipNet", "Global tunnel defaults applied by the SlipNet runtime. Per-profile protocol options are edited on each profile.")
+        // General: what most people touch.
+        heading("SlipNet", "Global tunnel defaults applied by the SlipNet runtime. Per-profile protocol options are edited on each profile.", Icon.GLOBE)
         val protocol = spinner("Preferred protocol", "slipnet_protocol", listOf("Auto detect", "DNSTT", "NoizDNS", "VayDNS", "Soar", "Slipstream", "SSH", "NaiveProxy", "VLESS", "DoH", "Tor"), "Auto detect")
-        val mtu = field("VPN MTU (512–1500)", "slipnet_mtu", "1280", "1280", numeric = true)
         val maxTunnels = field("Max parallel tunnels (1–64)", "slipnet_max_tunnels", "4", "4", numeric = true)
         val timeout = field("Connection timeout (seconds)", "slipnet_timeout", "20", "20", numeric = true)
+
+        heading("Leak protection", "Switches that keep traffic inside the tunnel.", Icon.SHIELD)
+        val disableQuic = switch("Disable QUIC fallback", "slipnet_disable_quic", true, "Stops apps from bypassing the tunnel over QUIC")
+        val blockIpv6 = switch("Block IPv6 to avoid leaks", "slipnet_block_ipv6", true, "Prevents IPv6 traffic from leaving outside the tunnel")
+
+        // Advanced: specialist tuning, collapsed by default.
+        val (advCard, advBody) = Kit.advancedCard(this, "MTU, pools, buffers, limits and DNS workers")
+        body.addView(advCard, lp(MATCH, WRAP, 12))
+        cur = advBody
+        val mtu = field("VPN MTU (512–1500)", "slipnet_mtu", "1280", "1280", numeric = true)
         val dnsTimeout = field("DNS timeout (milliseconds)", "slipnet_dns_timeout", "5000", "5000", numeric = true)
         val connectionPoolSize = field("Connection pool size (1–128)", "slipnet_connection_pool_size", "16", "16", numeric = true)
         val bufferSize = spinner("Network buffer size", "slipnet_buffer_size", listOf("32 KB", "64 KB", "128 KB", "256 KB", "512 KB"), "128 KB")
@@ -1663,11 +1652,9 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         val congestion = spinner("Congestion control", "slipnet_congestion", listOf("BBR", "DCUBIC"), "BBR")
         val uploadLimit = field("Upload limit (KB/s, 0 = unlimited)", "slipnet_upload_limit", "0", "0", numeric = true)
         val downloadLimit = field("Download limit (KB/s, 0 = unlimited)", "slipnet_download_limit", "0", "0", numeric = true)
-        val gso = switch("Enable UDP GSO where supported", "slipnet_gso", false)
-        val disableQuic = switch("Disable QUIC fallback", "slipnet_disable_quic", true)
-        val blockIpv6 = switch("Block IPv6 to avoid leaks", "slipnet_block_ipv6", true)
+        val gso = switch("Enable UDP GSO where supported", "slipnet_gso", false, "Faster UDP on supported devices")
 
-        body.addView(tv("DNS resolvers and protocol-specific options are configured per profile in Edit Profile.", 11f, Palette.muted, 0), lp(MATCH, WRAP, 16, 8))
+        body.addView(Kit.noteCard(this, "DNS resolvers and protocol-specific options are configured per profile in Edit Profile."), lp(MATCH, WRAP, 14, 8))
 
         root.addView(scroll, lp(MATCH, minOf(dpi(560), resources.displayMetrics.heightPixels * 3 / 4)))
         val dialog = dialogBuilder().setTitle("SlipNet settings")
@@ -1826,7 +1813,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
             selectAll()
         }
         val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(18), dpi(8), dpi(18), 0) }
-        box.addView(tv("This check measures the response time of the website from the phone's normal internet connection. It is separate from each server's endpoint ping.", 11f, Palette.muted, 0), lp(MATCH, WRAP, 0, 10))
+        box.addView(Kit.noteCard(this, "This check measures the response time of the website from the phone's normal internet connection. It is separate from each server's endpoint ping."), lp(MATCH, WRAP, 0, 10))
         box.addView(input, lp(MATCH, dpi(48), 6))
         val dialog = dialogBuilder().setTitle("WEBSITE PING TARGET").setView(box)
             .setNegativeButton("Cancel", null).setNeutralButton("Test now", null).setPositiveButton("Save", null).create()
@@ -1890,21 +1877,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
     }
 
     private fun settingRow(parent: LinearLayout, icon: Icon, title: String, subtitle: String, value: String?, onClick: () -> Unit) {
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dpi(10), dpi(12), dpi(10), dpi(12))
-            isClickable = true
-            setOnClickListener { onClick() }
-            pressable(0.985f)
-        }
-        row.addView(IconView(this, icon, Palette.ice), lp(dpi(24), dpi(24)))
-        val t = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(12), 0, dpi(8), 0) }
-        t.addView(tv(title, 14f, Palette.text, 1))
-        t.addView(tv(subtitle, 10.5f, Palette.muted, 0).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }, lp(MATCH, WRAP, 3))
-        row.addView(t, LinearLayout.LayoutParams(0, WRAP, 1f))
-        if (value != null) row.addView(tv(value, 12f, Palette.cyan, 1))
-        parent.addView(row, lp(MATCH, WRAP))
+        Kit.settingRow(this, parent, icon, title, subtitle, value, onClick = onClick)
     }
 
     private fun splitSummary(): String {
@@ -1923,14 +1896,10 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         val modes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         fun refreshModes() {
             modes.removeAllViews()
-            fun button(label: String, value: String): TextView = tv(label, 10.5f, if (mode == value) Palette.ice else Palette.muted, 2).apply {
-                gravity = Gravity.CENTER
-                background = GradientDrawable().apply { cornerRadius = dpi(12).toFloat(); setColor(if (mode == value) Palette.bg2 else Palette.bg1); setStroke(dpi(1), if (mode == value) Palette.cyan else Palette.stroke) }
-                setPadding(dpi(8), dpi(11), dpi(8), dpi(11))
-                setOnClickListener { mode = value; refreshModes() }
-            }
-            modes.addView(button("Only selected", "include"), LinearLayout.LayoutParams(0, WRAP, 1f).apply { rightMargin = dpi(5) })
-            modes.addView(button("Exclude selected", "exclude"), LinearLayout.LayoutParams(0, WRAP, 1f).apply { leftMargin = dpi(5) })
+            modes.addView(
+                Kit.segmented(this, listOf("include" to "Only selected", "exclude" to "Exclude selected"), mode) { mode = it; refreshModes() },
+                LinearLayout.LayoutParams(MATCH, WRAP)
+            )
         }
         refreshModes()
         root.addView(modes, lp(MATCH, WRAP, 10))
@@ -1952,7 +1921,15 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
             val visible = filtered.take(80)
             countLabel.text = if (filtered.size > visible.size) "Showing ${visible.size} of ${filtered.size} apps" else "${filtered.size} apps"
             visible.forEach { info ->
-                val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dpi(8), dpi(5), dpi(8), dpi(5)) }
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dpi(8), dpi(7), dpi(8), dpi(7))
+                    background = Palette.glass(this@MainActivity, 14f)
+                }
+                row.addView(tv(info.label.take(1).uppercase(Locale.US), 14f, Palette.cyan, 2).apply {
+                    gravity = Gravity.CENTER
+                    background = GradientDrawable().apply { cornerRadius = dp(12f); setColor(Palette.withAlpha(Palette.cyan, 40)) }
+                }, lp(dpi(36), dpi(36), 0, 0, 0, 4))
                 val labels = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(6), 0, dpi(4), 0) }
                 labels.addView(tv(info.label, 12.5f, Palette.text, 1))
                 labels.addView(tv(info.packageName, 8.5f, Palette.dim, 0))
@@ -1963,9 +1940,10 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
                     setOnCheckedChangeListener { _, checked -> if (checked) selected.add(info.packageName) else selected.remove(info.packageName) }
                 }
                 row.addView(check, lp(WRAP, WRAP))
-                list.addView(row, lp(MATCH, WRAP, 1))
+                row.setOnClickListener { check.toggle() }
+                list.addView(row, lp(MATCH, WRAP, 6))
             }
-            if (filtered.isEmpty()) list.addView(tv("No matching apps", 12f, Palette.muted, 0).apply { gravity = Gravity.CENTER }, lp(MATCH, dpi(48)))
+            if (filtered.isEmpty()) list.addView(Kit.stateView(this, Kit.StateKind.EMPTY, "No matching apps", "Try a different name."), lp(MATCH, WRAP, 6))
         }
         search.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
@@ -2043,8 +2021,17 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         val scroll = ScrollView(this).apply { isFillViewport = true; addView(body) }
         fun populate() {
             body.removeAllViews()
-            if (connectionLogs.isEmpty()) body.addView(tv("No connection activity yet.", 12f, Palette.muted, 0), lp(MATCH, WRAP, 12))
-            else connectionLogs.asReversed().forEach { line -> body.addView(tv(line, 11f, Palette.text, 0), lp(MATCH, WRAP, 7)) }
+            if (connectionLogs.isEmpty()) body.addView(Kit.stateView(this, Kit.StateKind.EMPTY, "No connection activity yet", "Connection events will appear here."), lp(MATCH, WRAP, 12))
+            else connectionLogs.asReversed().forEach { line ->
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    setPadding(dpi(10), dpi(8), dpi(10), dpi(8))
+                    background = Palette.glass(this@MainActivity, 12f)
+                }
+                row.addView(tv(line.take(8), 10.5f, Palette.cyan, 4), lp(WRAP, WRAP, 1, 0, 0, 10))
+                row.addView(tv(line.drop(8).trim(), 11.5f, Palette.text, 0), LinearLayout.LayoutParams(0, WRAP, 1f))
+                body.addView(row, lp(MATCH, WRAP, 6))
+            }
         }
         populate()
         dialogBuilder().setTitle("CONNECTION LOGS").setView(scroll)
@@ -2073,20 +2060,32 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
             currentProtocol == "http" -> 2
             else -> 1
         }
-        dialogBuilder().setTitle("CONNECTION MODE")
-            .setSingleChoiceItems(options, checked) { d, which ->
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(16), dpi(8), dpi(16), dpi(4)) }
+        box.addView(Kit.noteCard(this, "VPN routes the whole device. The proxy modes only expose a local address at 127.0.0.1:10880 for apps you configure."), lp(MATCH, WRAP, 4, 4))
+        var dlg: AlertDialog? = null
+        val items = listOf(
+            Triple(Icon.SHIELD, options[0], "Routes all apps through the tunnel"),
+            Triple(Icon.GLOBE, options[1], "Local proxy at 127.0.0.1:10880"),
+            Triple(Icon.GLOBE, options[2], "Local proxy at 127.0.0.1:10880")
+        )
+        items.forEachIndexed { which, (icon, title, desc) ->
+            box.addView(Kit.optionCard(this, icon, title, desc, which == checked) {
                 val mode = if (which == 0) "vpn" else "proxy"
                 val proto = if (which == 2) "http" else "socks"
                 prefs.edit().putString("connection_mode", mode).putString("proxy_protocol", proto).apply()
-                d.dismiss()
+                dlg?.dismiss()
                 if (state == OrbState.CONNECTED || state == OrbState.CONNECTING) {
                     toast("Mode saved. Disconnect and reconnect to apply.")
                 }
                 render()
-            }
+            }, lp(MATCH, WRAP, 8))
+        }
+        dialogBuilder().setTitle("CONNECTION MODE")
+            .setView(ScrollView(this).apply { addView(box) })
             .setNegativeButton("Cancel", null)
             .setNeutralButton("Copy address", null)
             .create().also { d ->
+                dlg = d
                 d.setOnShowListener {
                     d.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
                         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -2112,19 +2111,17 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         val settings = ProfileSettingsStore(this).get(item.raw)
         val origin = settings.origin
         val canShare = TirexNetShare.canShare(origin, item.local, item.panelId)
-        val options = mutableListOf("Edit profile", "Duplicate profile")
-        if (canShare) options.add("Share (TIREXNET)")
-        if (item.engine == ConfigEngine.XRAY) options.add("Change TLS serverName")
-        options.add("Remove profile")
-        dialogBuilder().setTitle(item.name).setItems(options.toTypedArray()) { _, which ->
-            when (options[which]) {
-                "Edit profile" -> editServerDialog(item)
-                "Duplicate profile" -> duplicateServerProfile(item)
-                "Share (TIREXNET)" -> shareTirexNetProfile(item)
-                "Change TLS serverName" -> showSniDialog(item)
-                "Remove profile" -> removeServerProfile(item)
-            }
-        }.show()
+        val sheet = Kit.Sheet(
+            this, item.name,
+            "${engineName(item.engine)} • Local profile",
+            flagBox(44, 14f, item.country, Palette.cyan)
+        )
+        sheet.action(Icon.EDIT, "Edit profile", "Change name, fields and DNS resolvers") { editServerDialog(item) }
+        sheet.action(Icon.COPY, "Duplicate profile", "Create an independent local copy") { duplicateServerProfile(item) }
+        if (canShare) sheet.action(Icon.GLOBE, "Share (TIREXNET)", "Send this profile to another TIREXNET user") { shareTirexNetProfile(item) }
+        if (item.engine == ConfigEngine.XRAY) sheet.action(Icon.SHIELD, "Change TLS serverName", "Set the SNI used for the TLS handshake") { showSniDialog(item) }
+        sheet.action(Icon.TRASH, "Remove profile", "Delete this profile from your device", danger = true) { removeServerProfile(item) }
+        sheet.show()
     }
 
     private fun shareTirexNetProfile(item: ServerItem) {
@@ -2155,43 +2152,35 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
     }
 
     private fun showShareSheet(title: String, uri: String) {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dpi(18), dpi(12), dpi(18), dpi(8))
-        }
-        root.addView(tv("Encrypted TIREXNET share", 12f, Palette.cyan, 0), lp(MATCH, WRAP, 0, 6))
-        root.addView(tv("Sensitive fields are encrypted. Casual readers cannot see host/port/credentials.", 11f, Palette.muted, 0), lp(MATCH, WRAP, 0, 10))
+        val sheet = Kit.Sheet(this, title, "Encrypted TIREXNET share")
+        sheet.content(Kit.noteCard(this, "Sensitive fields are encrypted. Casual readers cannot see host/port/credentials."))
         val preview = EditText(this).apply {
             setText(uri)
             textSize = 10f
             minLines = 3
-            maxLines = 5
+            maxLines = 4
             isFocusable = false
             isClickable = false
-            setTextColor(Palette.text)
+            setTextColor(Palette.muted)
             background = fieldBackground(false)
-            setPadding(dpi(10), dpi(8), dpi(10), dpi(8))
+            setPadding(dpi(12), dpi(10), dpi(12), dpi(10))
         }
-        root.addView(preview, lp(MATCH, WRAP, 0, 12))
-        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        row.addView(ghostButton("Copy") {
+        sheet.content(preview, 10)
+        sheet.action(Icon.COPY, "Copy", "Copy the encrypted share link") {
             val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             cm.setPrimaryClip(ClipData.newPlainText("tirexnet-share", uri))
             toast("Copied")
-        }, LinearLayout.LayoutParams(0, dpi(46), 1f).apply { rightMargin = dpi(6) })
-        row.addView(ghostButton("Android Share") {
+        }
+        sheet.action(Icon.GLOBE, "Android Share", "Send it with any installed app") {
             val intent = Intent(Intent.ACTION_SEND).apply {
                 type = "text/plain"
                 putExtra(Intent.EXTRA_TEXT, uri)
                 putExtra(Intent.EXTRA_SUBJECT, title)
             }
             startActivity(Intent.createChooser(intent, "Share profile"))
-        }, LinearLayout.LayoutParams(0, dpi(46), 1f).apply { rightMargin = dpi(6) })
-        row.addView(ghostButton("QR") {
-            showShareQrDialog(uri)
-        }, LinearLayout.LayoutParams(0, dpi(46), 1f))
-        root.addView(row, lp(MATCH, WRAP, 0, 4))
-        dialogBuilder().setTitle(title).setView(root).setNegativeButton("Close", null).show()
+        }
+        sheet.action(Icon.FILE, "QR", "Show it as a QR code through a QR app") { showShareQrDialog(uri) }
+        sheet.show()
     }
 
     private fun showShareQrDialog(uri: String) {
@@ -2230,91 +2219,33 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         }
         val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(16), dpi(8), dpi(16), dpi(4)) }
         val name = EditText(this).apply {
-            setSingleLine(true); hint = "Profile name"; setText(item.name); textSize = 13f
-            background = fieldBackground(false); setPadding(dpi(10), dpi(8), dpi(10), dpi(8))
-            setTextColor(Palette.text); setHintTextColor(Palette.dim)
+            setSingleLine(true); hint = "Profile name"; setText(item.name)
+            Kit.styleInput(this@MainActivity, this)
         }
         val profileSettings = ProfileSettingsStore(this).get(item.raw)
         val decoded = ManualProfileDecoder.decode(item.raw)
 
-        form.addView(tv("Profile name", 11f, Palette.muted, 0))
-        form.addView(name, lp(MATCH, dpi(46), 4))
+        val (nameCard, nameBody) = Kit.card(this, "Profile", Icon.PROFILE, subtitle = "How this server appears in your list")
+        nameBody.addView(tv("Profile name", 11.5f, Palette.muted, 1), lp(MATCH, WRAP, 8))
+        nameBody.addView(name, lp(MATCH, dpi(50), 6))
+        form.addView(nameCard, lp(MATCH, WRAP, 0))
 
         // Decoded structured fields (no raw URI shown)
-        val valueHolders = linkedMapOf<String, () -> String>()
-        if (decoded != null && decoded.values.isNotEmpty()) {
-            form.addView(tv("PROFILE FIELDS • ${decoded.protocol.label}", 11f, Palette.cyan, 1), lp(MATCH, WRAP, 14))
+        val decodedForm: Kit.FieldForm? = if (decoded != null && decoded.values.isNotEmpty()) {
             if (!decoded.editableWithoutDroppingUnknownFields) {
-                form.addView(tv(decoded.note.ifBlank { "Some unknown fields are preserved in the internal config and will not be dropped on save." }, 10.5f, Palette.muted, 0), lp(MATCH, WRAP, 4))
+                form.addView(Kit.noteCard(this, decoded.note.ifBlank { "Some unknown fields are preserved in the internal config and will not be dropped on save." }), lp(MATCH, WRAP, 12))
             }
-            val values = decoded.values.toMutableMap()
-            ManualProfile.fields(decoded.protocol).forEach { spec ->
-                if (spec.showWhen != null && !spec.showWhen.invoke(values)) return@forEach
-                if (spec.section.isNotBlank()) {
-                    form.addView(tv(spec.section.uppercase(Locale.US), 10f, Palette.cyan, 2).apply { letterSpacing = 0.08f }, lp(MATCH, WRAP, 12, 4))
-                }
-                form.addView(tv(spec.label + if (spec.required) " *" else "", 10.5f, Palette.muted, 0), lp(MATCH, WRAP, 8))
-                val current = values[spec.key].orEmpty().ifBlank { spec.default }
-                when (spec.kind) {
-                    FieldKind.CHOICE -> {
-                        val options = spec.choices.toMutableList()
-                        if (current.isNotBlank() && current !in options) options.add(0, current) // preserve non-standard value
-                        val sp = Spinner(this)
-                        sp.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, options)
-                        val idx = options.indexOf(current).coerceAtLeast(0)
-                        sp.setSelection(idx)
-                        form.addView(sp, lp(MATCH, dpi(48), 2))
-                        valueHolders[spec.key] = { sp.selectedItem?.toString().orEmpty() }
-                    }
-                    FieldKind.NUMBER -> {
-                        val et = EditText(this).apply {
-                            setText(current); hint = spec.hint; textSize = 12f; setSingleLine(true)
-                            inputType = InputType.TYPE_CLASS_NUMBER
-                            setTextColor(Palette.text); setHintTextColor(Palette.dim)
-                            background = fieldBackground(false); setPadding(dpi(10), dpi(8), dpi(10), dpi(8))
-                        }
-                        form.addView(et, lp(MATCH, dpi(46), 2))
-                        valueHolders[spec.key] = { et.text.toString().trim() }
-                    }
-                    FieldKind.SECRET -> {
-                        val et = EditText(this).apply {
-                            setText(current); hint = spec.hint; textSize = 12f; setSingleLine(true)
-                            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-                            setTextColor(Palette.text); setHintTextColor(Palette.dim)
-                            background = fieldBackground(false); setPadding(dpi(10), dpi(8), dpi(10), dpi(8))
-                        }
-                        form.addView(et, lp(MATCH, dpi(46), 2))
-                        valueHolders[spec.key] = { et.text.toString() }
-                    }
-                    FieldKind.MULTILINE -> {
-                        val et = EditText(this).apply {
-                            setText(current); hint = spec.hint; textSize = 12f; minLines = 2; maxLines = 5
-                            gravity = Gravity.TOP
-                            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-                            setTextColor(Palette.text); setHintTextColor(Palette.dim)
-                            background = fieldBackground(false); setPadding(dpi(10), dpi(8), dpi(10), dpi(8))
-                        }
-                        form.addView(et, lp(MATCH, dpi(88), 2))
-                        valueHolders[spec.key] = { et.text.toString() }
-                    }
-                    else -> {
-                        val et = EditText(this).apply {
-                            setText(current); hint = spec.hint; textSize = 12f; setSingleLine(true)
-                            setTextColor(Palette.text); setHintTextColor(Palette.dim)
-                            background = fieldBackground(false); setPadding(dpi(10), dpi(8), dpi(10), dpi(8))
-                        }
-                        form.addView(et, lp(MATCH, dpi(46), 2))
-                        valueHolders[spec.key] = { et.text.toString().trim() }
-                    }
-                }
+            Kit.FieldForm(this, decoded.protocol, decoded.values.toMutableMap(), fillDefaults = true).also {
+                form.addView(it.root, lp(MATCH, WRAP, 2))
             }
         } else {
-            form.addView(tv("This profile format has no structured decoder. Name and DNS can still be changed; the internal configuration is preserved.", 11f, Palette.muted, 0), lp(MATCH, WRAP, 12))
+            form.addView(Kit.noteCard(this, "This profile format has no structured decoder. Name and DNS can still be changed; the internal configuration is preserved."), lp(MATCH, WRAP, 12))
+            null
         }
 
         // Multi-select DNS resolvers
-        form.addView(tv("DNS RESOLVERS • THIS PROFILE ONLY", 11f, Palette.cyan, 1), lp(MATCH, WRAP, 16))
-        form.addView(tv("Scan, then select one or more resolvers. Long-press a result to test DNS-over-TLS.", 10f, Palette.muted, 0), lp(MATCH, WRAP, 4))
+        val (dnsCard, dnsBody) = Kit.card(this, "DNS resolvers", Icon.GLOBE, subtitle = "This profile only • scan, select, set primary. Long-press a result to test DNS-over-TLS.")
+        dnsBody.addView(dnsCard, lp(MATCH, WRAP, 14))
         val resolverSeed = EditText(this).apply {
             hint = "1.1.1.1:53\n8.8.8.8:53 or https://dns.google/dns-query"
             setText(profileSettings.dnsResolvers.joinToString("\n"))
@@ -2323,9 +2254,9 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
             setTextColor(Palette.text); setHintTextColor(Palette.dim); background = fieldBackground(false)
             setPadding(dpi(10), dpi(8), dpi(10), dpi(8))
         }
-        form.addView(resolverSeed, lp(MATCH, dpi(80), 6))
+        dnsBody.addView(resolverSeed, lp(MATCH, dpi(80), 6))
         val selectedCountTv = tv("Selected: 0", 11f, Palette.cyan, 1)
-        form.addView(selectedCountTv, lp(MATCH, WRAP, 4))
+        dnsBody.addView(selectedCountTv, lp(MATCH, WRAP, 4))
         val scanResults = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val selectedResolvers = linkedSetOf<String>() // preserve order
         // pre-select existing
@@ -2401,7 +2332,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
                     if (isFinishing || isDestroyed) return@runOnUiThread
                     scanResults.removeAllViews()
                     if (results.isEmpty()) {
-                        form.addView(tv("No results", 11f, Palette.muted, 0))
+                        dnsBody.addView(tv("No results", 11f, Palette.muted, 0))
                         return@runOnUiThread
                     }
                     results.forEach { r ->
@@ -2452,8 +2383,8 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
                 else "Applied ${list.size} DNS resolver(s). Primary: ${primary.ifBlank { "none" }}"
             )
         }, LinearLayout.LayoutParams(0, dpi(42), 1f))
-        form.addView(actionRow, lp(MATCH, WRAP, 6))
-        form.addView(scanResults, lp(MATCH, WRAP, 4))
+        dnsBody.addView(actionRow, lp(MATCH, WRAP, 6))
+        dnsBody.addView(scanResults, lp(MATCH, WRAP, 4))
 
         val dialog = dialogBuilder().setTitle("EDIT PROFILE")
             .setView(ScrollView(this).apply { isFillViewport = true; addView(form) })
@@ -2462,11 +2393,11 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val profileName = name.text.toString().trim().ifBlank { item.name }
                 var updatedRaw = item.raw
-                if (decoded != null && valueHolders.isNotEmpty() && decoded.editableWithoutDroppingUnknownFields) {
+                if (decoded != null && decodedForm != null && decoded.editableWithoutDroppingUnknownFields) {
                     val newValues = linkedMapOf<String, String>()
                     // keep any keys not shown
                     decoded.values.forEach { (k, v) -> newValues[k] = v }
-                    valueHolders.forEach { (k, getter) -> newValues[k] = getter() }
+                    decodedForm.collect().forEach { (k, v) -> newValues[k] = v }
                     newValues["name"] = profileName
                     when (val outcome = ManualProfile.build(decoded.protocol, newValues)) {
                         is ManualOutcome.Ok -> updatedRaw = outcome.raw
@@ -2593,66 +2524,15 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
                 .setPositiveButton("OK", null).show()
         }
         val values = decoded.values.toMutableMap()
-        val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(14), dpi(8), dpi(14), dpi(8)) }
-        val getters = linkedMapOf<String, () -> String>()
-        ManualProfile.fields(decoded.protocol).forEach { spec ->
-            if (spec.showWhen != null && !spec.showWhen.invoke(values)) return@forEach
-            form.addView(tv(spec.label + if (spec.required) " *" else "", 10.5f, Palette.muted, 0), lp(MATCH, WRAP, 8))
-            val current = values[spec.key].orEmpty().ifBlank { spec.default }
-            when (spec.kind) {
-                FieldKind.CHOICE -> {
-                    val options = spec.choices.toMutableList()
-                    if (current.isNotBlank() && current !in options) options.add(0, current)
-                    val sp = Spinner(this)
-                    sp.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, options)
-                    sp.setSelection(options.indexOf(current).coerceAtLeast(0))
-                    form.addView(sp, lp(MATCH, dpi(48), 2))
-                    getters[spec.key] = { sp.selectedItem?.toString().orEmpty() }
-                }
-                FieldKind.NUMBER -> {
-                    val et = EditText(this).apply {
-                        setText(current); hint = spec.hint; textSize = 12f; setSingleLine(true)
-                        inputType = InputType.TYPE_CLASS_NUMBER
-                        setTextColor(Palette.text); setHintTextColor(Palette.dim)
-                        background = fieldBackground(false); setPadding(dpi(10), dpi(8), dpi(10), dpi(8))
-                    }
-                    form.addView(et, lp(MATCH, dpi(46), 2))
-                    getters[spec.key] = { et.text.toString().trim() }
-                }
-                FieldKind.SECRET -> {
-                    val et = EditText(this).apply {
-                        setText(current); hint = spec.hint; textSize = 12f; setSingleLine(true)
-                        inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-                        setTextColor(Palette.text); setHintTextColor(Palette.dim)
-                        background = fieldBackground(false); setPadding(dpi(10), dpi(8), dpi(10), dpi(8))
-                    }
-                    form.addView(et, lp(MATCH, dpi(46), 2))
-                    getters[spec.key] = { et.text.toString() }
-                }
-                FieldKind.MULTILINE -> {
-                    val et = EditText(this).apply {
-                        setText(current); hint = spec.hint; textSize = 12f; minLines = 2; maxLines = 4
-                        gravity = Gravity.TOP
-                        inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-                        setTextColor(Palette.text); setHintTextColor(Palette.dim)
-                        background = fieldBackground(false); setPadding(dpi(10), dpi(8), dpi(10), dpi(8))
-                    }
-                    form.addView(et, lp(MATCH, dpi(88), 2))
-                    getters[spec.key] = { et.text.toString() }
-                }
-                else -> {
-                    val et = EditText(this).apply {
-                        setText(current); hint = spec.hint; textSize = 12f; setSingleLine(true)
-                        setTextColor(Palette.text); setHintTextColor(Palette.dim)
-                        background = fieldBackground(false); setPadding(dpi(10), dpi(8), dpi(10), dpi(8))
-                    }
-                    form.addView(et, lp(MATCH, dpi(46), 2))
-                    getters[spec.key] = { et.text.toString().trim() }
-                }
-            }
+        // Same renderer as Manual Config: grouped cards, General vs Advanced, chip selectors.
+        val ff = Kit.FieldForm(this, decoded.protocol, values, fillDefaults = true)
+        val scroll = ScrollView(this).apply {
+            clipToPadding = false
+            setPadding(dpi(14), dpi(4), dpi(14), dpi(10))
+            addView(ff.root)
         }
         dialogBuilder().setTitle("Edit fields • ${decoded.protocol.label}")
-            .setView(ScrollView(this).apply { addView(form) })
+            .setView(scroll)
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Apply") { _, _ ->
                 if (!decoded.editableWithoutDroppingUnknownFields) {
@@ -2660,7 +2540,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
                 }
                 val newValues = linkedMapOf<String, String>()
                 decoded.values.forEach { (k, v) -> newValues[k] = v }
-                getters.forEach { (k, g) -> newValues[k] = g() }
+                ff.collect().forEach { (k, v) -> newValues[k] = v }
                 when (val outcome = ManualProfile.build(decoded.protocol, newValues)) {
                     is ManualOutcome.Ok -> {
                         // Write reconstructed raw back into the hidden target (not shown in UI).
@@ -3123,6 +3003,9 @@ private fun buildLogin(): View {
         inputType = if (password) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         background = Palette.glass(this@MainActivity, 16f, Palette.stroke, Palette.fieldFill, Palette.fieldFill)
+        setOnFocusChangeListener { v, focus ->
+            v.background = Palette.glass(this@MainActivity, 16f, if (focus) Palette.strokeActive else Palette.stroke, Palette.fieldFill, Palette.fieldFill)
+        }
     }
 
     private fun primaryButton(label: String, onClick: () -> Unit): TextView = tv(label, 14f, Palette.onPrimary, 2).apply {
@@ -4824,89 +4707,32 @@ private fun request(
         val box = manualFieldsBox ?: return
         box.removeAllViews()
         manualFieldViews.clear()
-        var lastSection = ""
-        for (f in ManualProfile.fields(manualProtocol)) {
-            val cond = f.showWhen
-            if (cond != null && !cond(manualValues)) continue
-            if (f.section.isNotEmpty() && f.section != lastSection) {
-                lastSection = f.section
-                box.addView(tv(f.section.uppercase(), 8.5f, Palette.cyan, 1).apply { letterSpacing = 0.18f }, lp(MATCH, WRAP, 18))
-            }
-            box.addView(tv(f.label + if (f.required) " *" else "", 11f, Palette.muted, 1), lp(MATCH, WRAP, 12))
-            if (f.kind == FieldKind.CHOICE) {
-                val hs = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
-                val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-                hs.addView(r, FrameLayout.LayoutParams(WRAP, WRAP))
-                val current = manualValues[f.key].orEmpty()
-                for (c in f.choices) {
-                    r.addView(chip(if (c.isEmpty()) "none" else c, c == current) {
-                        manualValues[f.key] = c
-                        rebuildManualFields() // dependent fields (TLS, Reality, transport) appear/disappear
-                    }, lp(WRAP, WRAP, 0, 0, 0, 8))
-                }
-                box.addView(hs, lp(MATCH, WRAP, 6))
-            } else {
-                val et = EditText(this).apply {
-                    hint = f.hint
-                    textSize = 14f
-                    setTextColor(Palette.text)
-                    setHintTextColor(Palette.dim)
-                    setSingleLine(f.kind != FieldKind.MULTILINE)
-                    if (f.kind == FieldKind.MULTILINE) {
-                        minLines = 3
-                        maxLines = 6
-                        gravity = Gravity.TOP or Gravity.START
-                    }
-                    setPadding(dpi(14), dpi(if (f.kind == FieldKind.MULTILINE) 10 else 0), dpi(14), dpi(10))
-                    background = fieldBackground(false)
-                    inputType = when (f.kind) {
-                        FieldKind.NUMBER -> InputType.TYPE_CLASS_NUMBER
-                        FieldKind.SECRET -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-                        FieldKind.MULTILINE -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-                        else -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-                    }
-                    imeOptions = EditorInfo.IME_ACTION_NEXT
-                    textDirection = View.TEXT_DIRECTION_FIRST_STRONG // Persian and English both render correctly
-                    contentDescription = f.label
-                    setText(manualValues[f.key].orEmpty())
-                    addTextChangedListener(object : TextWatcher {
-                        override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
-                        override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
-                        override fun afterTextChanged(s: Editable?) { manualValues[f.key] = s?.toString().orEmpty() }
-                    })
-                }
-                manualFieldViews[f.key] = et
-                box.addView(et, lp(MATCH, dpi(if (f.kind == FieldKind.MULTILINE) 116 else 50), 6))
-            }
-        }
+        // Same renderer as the decoded editor: grouped cards, General vs Advanced, chip selectors.
+        val form = Kit.FieldForm(this, manualProtocol, manualValues)
+        manualForm = form
+        box.addView(form.root, lp(MATCH, WRAP))
+        manualFieldViews.putAll(form.inputs)
+        val notes = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         if (manualProtocol == ManualProtocol.DNS_CHANGER) {
-            box.addView(tv(
-                "Dedicated DNS mode • forwards classic DNS (UDP/53) to the selected resolvers. Other traffic stays on the normal network. Android allows only one active VPN at a time, so disconnect another VPN before using this profile.",
-                10.5f, Palette.cyan, 0
+            notes.addView(Kit.noteCard(this,
+                "Dedicated DNS mode • forwards classic DNS (UDP/53) to the selected resolvers. Other traffic stays on the normal network. Android allows only one active VPN at a time, so disconnect another VPN before using this profile."
             ), lp(MATCH, WRAP, 12))
         }
         if (manualProtocol.isSlipNet) {
-            box.addView(tv(
-                "Saved as an official SlipNet profile and run by the in-app SlipNet engine (DNSTT / VayDNS / Soar and optional SSH).",
-                10.5f, Palette.cyan, 0
+            notes.addView(Kit.noteCard(this,
+                "Saved as an official SlipNet profile and run by the in-app SlipNet engine (DNSTT / VayDNS / Soar and optional SSH)."
             ), lp(MATCH, WRAP, 12))
         } else if (manualProtocol == ManualProtocol.MASTERDNS) {
-            box.addView(tv(
-                "Runs the MasterDnsVPN client locally (SOCKS5 on 127.0.0.1) and routes the whole device through it. Domains, key and encryption method must match the server.",
-                10.5f, Palette.cyan, 0
+            notes.addView(Kit.noteCard(this,
+                "Runs the MasterDnsVPN client locally (SOCKS5 on 127.0.0.1) and routes the whole device through it. Domains, key and encryption method must match the server."
             ), lp(MATCH, WRAP, 12))
         }
+        box.addView(notes, lp(MATCH, WRAP))
         // Optional flag source for manual profiles (the only reliable country metadata we have for them).
-        box.addView(tv("Country code (optional)", 11f, Palette.muted, 1), lp(MATCH, WRAP, 12))
-        val cc = EditText(this).apply {
+        val (ccCard, ccBody) = Kit.card(this, "Flag", Icon.GLOBE, subtitle = "Optional country shown next to this server")
+        Kit.labeledInput(this, ccBody, "Country code (optional)") {
             hint = "e.g. DE, US, TR"
-            textSize = 14f
-            setTextColor(Palette.text)
-            setHintTextColor(Palette.dim)
-            setSingleLine(true)
             filters = arrayOf<android.text.InputFilter>(android.text.InputFilter.LengthFilter(2))
-            setPadding(dpi(14), 0, dpi(14), 0)
-            background = fieldBackground(false)
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             imeOptions = EditorInfo.IME_ACTION_DONE
             contentDescription = "Country code"
@@ -4917,16 +4743,17 @@ private fun request(
                 override fun afterTextChanged(s: Editable?) { manualCountry = s?.toString().orEmpty() }
             })
         }
-        box.addView(cc, lp(MATCH, dpi(50), 6))
+        box.addView(ccCard, lp(MATCH, WRAP, 14))
     }
 
     private fun saveManual() {
         val values = HashMap(manualValues)
-        for ((_, v) in manualFieldViews) v.background = fieldBackground(false)
+        manualForm?.clearErrors()
         when (val out = ManualProfile.build(manualProtocol, values)) {
             is ManualOutcome.Invalid -> {
                 manualError?.apply { text = out.message; visibility = View.VISIBLE }
-                manualFieldViews[out.key]?.let { it.background = fieldBackground(true); it.requestFocus() }
+                manualForm?.markError(out.key) // opens Advanced automatically if the bad field lives there
+                manualForm?.let { manualFieldViews.clear(); manualFieldViews.putAll(it.inputs) }
             }
             is ManualOutcome.Ok -> {
                 manualError?.visibility = View.GONE
@@ -4946,11 +4773,11 @@ private fun request(
     /** Dialogs follow the in-app theme instead of always using the system dark one. */
     private fun dialogBuilder(): AlertDialog.Builder = AlertDialog.Builder(
         this,
-        if (Palette.dark) android.R.style.Theme_Material_Dialog_Alert else android.R.style.Theme_Material_Light_Dialog_Alert
+        if (Palette.dark) com.tirexnet.app.R.style.TirexDialogDark else com.tirexnet.app.R.style.TirexDialogLight
     )
 
     private fun toast(message: String) {
-        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+        Kit.toast(this, message)
     }
 
     companion object {
