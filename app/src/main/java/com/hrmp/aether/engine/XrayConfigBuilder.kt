@@ -28,6 +28,10 @@ object XrayConfigBuilder {
                 val profile = EngineProfiles.decodeStormDns(raw) ?: throw IllegalArgumentException("StormDNS profile is invalid.")
                 return localSocksBridge(profile.port)
             }
+            ConfigEngine.COTTENDNS -> {
+                val profile = EngineProfiles.decodeCottenDns(raw) ?: throw IllegalArgumentException("CottenDNS profile is invalid.")
+                return localSocksBridge(profile.port)
+            }
             else -> Unit
         }
 
