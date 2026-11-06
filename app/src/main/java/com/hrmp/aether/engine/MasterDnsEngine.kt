@@ -30,7 +30,6 @@ object MasterDnsEngine {
             }
             val configFile = File(workDir, "client_config.toml")
             val resolversFile = File(workDir, "client_resolvers.txt")
-            val logFile = File(workDir, "client.log")
             val consoleFile = File(workDir, "engine-console.log")
             configFile.writeText(profile.clientConfig)
             resolversFile.writeText(profile.resolvers + "\n")
@@ -38,9 +37,8 @@ object MasterDnsEngine {
 
             val child = ProcessBuilder(
                 executable.absolutePath,
-                "-config", configFile.absolutePath,
-                "-resolvers", resolversFile.absolutePath,
-                "-log", logFile.absolutePath
+                "--config", configFile.absolutePath,
+                "--resolvers", resolversFile.absolutePath
             ).directory(workDir)
                 .redirectErrorStream(true)
                 .redirectOutput(consoleFile)
