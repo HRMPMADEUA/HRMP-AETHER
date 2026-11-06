@@ -38,22 +38,12 @@
             </intent-filter>
         </activity>
 
-        <!-- SlipNet is an internal screen of the same installed TIREXNET app. -->
+        <!-- Upstream SlipNet UI is private; TIREXNET owns all user-facing screens. -->
         <activity
             android:name="app.slipnet.presentation.MainActivity"
-            android:exported="true"
+            android:exported="false"
             android:theme="@style/Theme.SlipNet"
-            android:windowSoftInputMode="adjustResize">
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="slipnet" />
-                <data android:scheme="slipnet-enc" />
-                <data android:scheme="slipnet-bundle-enc" />
-                <data android:scheme="vless" />
-            </intent-filter>
-        </activity>
+            android:windowSoftInputMode="adjustResize" />
         <activity
             android:name="com.tirexnet.app.SlipNetConnectActivity"
             android:exported="false"
