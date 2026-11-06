@@ -75,6 +75,7 @@ import com.tirexnet.app.engine.TirexActions
 import com.tirexnet.app.engine.TirexNotifier
 import com.tirexnet.app.engine.TrafficMonitor
 import com.tirexnet.app.engine.StormDnsEngine
+import com.tirexnet.app.engine.CottenDnsEngine
 import com.tirexnet.app.engine.SniSpoofEngine
 import com.tirexnet.app.engine.WgTunnelEngine
 import com.tirexnet.app.engine.XrayVpnService
@@ -110,6 +111,14 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.security.MessageDigest
 import java.util.concurrent.Executors
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : Activity() {
 
@@ -135,6 +144,9 @@ class MainActivity : Activity() {
     private val packageExecutor = Executors.newSingleThreadExecutor()
     private val handler = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("tirexnet", MODE_PRIVATE) }
+    private val slipNetRuntime by lazy { TirexSlipNetRuntime(applicationContext) }
+    private val slipNetScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var slipNetObserver: Job? = null
 
     private val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
     private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
@@ -409,6 +421,7 @@ private fun savePanelSession(
             registerReceiver(receiver, filter)
         }
 
+        observeSlipNetConnection()
         reconcileState()
         render()
         applySystemBars() // after setContentView: the decor view exists now
@@ -441,6 +454,8 @@ private fun savePanelSession(
         handler.removeCallbacksAndMessages(null)
         io.shutdown()
         packageExecutor.shutdownNow()
+        slipNetObserver?.cancel()
+        slipNetScope.cancel()
         super.onDestroy()
     }
 
@@ -450,6 +465,41 @@ private fun savePanelSession(
             addOverlay != null -> closeAddServer()
             token.isNotBlank() && currentTab != 0 -> showTab(0)
             else -> super.onBackPressed()
+        }
+    }
+
+    private fun observeSlipNetConnection() {
+        slipNetObserver?.cancel()
+        slipNetObserver = slipNetScope.launch {
+            slipNetRuntime.connectionState.collect { connection ->
+                if (prefs.getString("active_engine", "") != "SLIPNET") {
+                    return@collect
+                }
+
+                when (connection) {
+                    is app.slipnet.domain.model.ConnectionState.Connected -> {
+                        applyStatus("Connected.", true)
+                    }
+
+                    is app.slipnet.domain.model.ConnectionState.Connecting -> {
+                        applyStatus("Starting SlipNet…", false)
+                    }
+
+                    is app.slipnet.domain.model.ConnectionState.Disconnecting -> {
+                        applyStatus("Disconnecting…", false)
+                    }
+
+                    is app.slipnet.domain.model.ConnectionState.Error -> {
+                        applyStatus("SlipNet error: ${connection.message}", false)
+                        prefs.edit().putString("active_engine", "").apply()
+                    }
+
+                    is app.slipnet.domain.model.ConnectionState.Disconnected -> {
+                        applyStatus("Disconnected.", false)
+                        prefs.edit().putString("active_engine", "").apply()
+                    }
+                }
+            }
         }
     }
 
@@ -538,7 +588,8 @@ private fun savePanelSession(
 
     /** The only source of truth for "connected" is an engine that confirmed the tunnel. */
     private fun reconcileState() {
-        val real = XrayVpnService.isActive || WgTunnelEngine.isActive || DnsChangerVpnService.isActive
+        val slipNetActive = runCatching { slipNetRuntime.isConnected() }.getOrDefault(false)
+        val real = XrayVpnService.isActive || WgTunnelEngine.isActive || DnsChangerVpnService.isActive || slipNetActive
         if (real && state != OrbState.CONNECTED) {
             val message = prefs.getString("connection_message", "Connected.") ?: "Connected."
             applyStatus(message.ifBlank { "Connected." }, true)
@@ -1578,7 +1629,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
             }
         }
 
-        heading("SlipNet", "All preferences below are saved in TIREXNET. Protocol execution still needs SlipNet's native engines to be embedded; this build will not hand off to a separate app or report a false connection.")
+        heading("SlipNet", "Settings are saved in TIREXNET and applied to SlipNet’s native tunnel service. Imported profiles retain their own protocol configuration.")
         val protocol = spinner("Preferred protocol", "slipnet_protocol", listOf("Auto detect", "DNSTT", "NoizDNS", "VayDNS", "Soar", "Slipstream", "SSH", "NaiveProxy", "VLESS", "DoH", "Tor"), "Auto detect")
         val mtu = field("VPN MTU (512–1500)", "slipnet_mtu", "1280", "1280", numeric = true)
         val maxTunnels = field("Max parallel tunnels (1–64)", "slipnet_max_tunnels", "4", "4", numeric = true)
@@ -1964,10 +2015,21 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
                     }
                 }
                 dialog.dismiss()
-                when {
-                    torProfileSaved -> toast("تنظیمات Tor در یک پروفایل محلی جداگانه ذخیره شد. موتور اتصال SlipNet هنوز داخل این APK نیست.")
-                    torEditUnavailable -> toast("تنظیمات عمومی ذخیره شد؛ لینک Tor رمزگذاری‌شده یا قدیمی قابل ویرایش مستقیم نیست.")
-                    else -> toast("SlipNet preferences saved. Native tunnel engines are not yet bundled in this APK.")
+                slipNetScope.launch {
+                    try {
+                        withContext(Dispatchers.IO) {
+                            slipNetRuntime.applySettings(prefs)
+                        }
+
+                        when {
+                            torProfileSaved -> toast("تنظیمات SlipNet اعمال شد و پروفایل Tor محلی ذخیره شد.")
+                            torEditUnavailable -> toast("تنظیمات SlipNet اعمال شد؛ لینک Tor رمزگذاری‌شده مستقیماً قابل ویرایش نیست.")
+                            else -> toast("SlipNet settings saved and applied to the native runtime.")
+                        }
+
+                    } catch (_: Throwable) {
+                        toast("تنظیمات ذخیره شدند، اما اعمال آن‌ها روی موتور SlipNet ناموفق بود.")
+                    }
                 }
             }
         }
@@ -1975,26 +2037,11 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         dialog.window?.setLayout((resources.displayMetrics.widthPixels * 0.94f).toInt(), WindowManager.LayoutParams.WRAP_CONTENT)
     }
 
-    private fun showSlipNetRuntimeNotice() {
-        val profile = selectedItem()?.takeIf { it.engine == ConfigEngine.SLIPNET }?.let { EngineProfiles.decodeSlipNet(it.raw) }
-        val proto = profile?.protocol?.ifBlank { "encrypted profile" } ?: "SlipNet"
-        val torDetails = profile?.takeIf { it.protocol == "snowflake" }?.let {
-            if (it.torBridgeLines.isBlank()) "This Tor profile uses the built-in Snowflake bridge preset."
-            else "Tor bridge configuration was decoded (${it.torBridgeLines.lineSequence().count { line -> line.isNotBlank() }} bridge line(s))."
-        }.orEmpty()
-        val specific = if (profile?.protocol == "snowflake") "Tor/Snowflake was imported and identified. $torDetails However, Tor's native runtime and pluggable-transport binaries are not bundled in this APK yet." else "The profile was imported and retained, but SlipNet's native DNS/QUIC/SSH/Tor runtime is not bundled in this APK yet."
-        dialogBuilder()
-            .setTitle("SlipNet runtime not included")
-            .setMessage("$specific\n\nDetected profile: $proto. Its preferences can be edited inside TIREXNET. The app will not open SlipNet separately or show a false Connected state.")
-            .setPositiveButton("SlipNet settings") { _, _ -> showSlipNetDialog() }
-            .setNegativeButton("Close", null)
-            .show()
-    }
-
     private fun startAuxiliaryProxyEngine(engine: ConfigEngine, raw: String) {
         val label = when (engine) {
             ConfigEngine.MHRV -> "MHRV"
             ConfigEngine.DNS_TUNNEL -> "StormDNS"
+            ConfigEngine.COTTENDNS -> "CottenDNS"
             ConfigEngine.SNI_SPOOF -> "Patterniha SNI"
             else -> "Tunnel"
         }
@@ -2003,6 +2050,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
             val error = when (engine) {
                 ConfigEngine.MHRV -> MhrvEngine.start(this, raw)
                 ConfigEngine.DNS_TUNNEL -> StormDnsEngine.start(this, raw)
+                ConfigEngine.COTTENDNS -> CottenDnsEngine.start(this, raw)
                 ConfigEngine.SNI_SPOOF -> SniSpoofEngine.start(this, raw)
                 else -> "Unsupported auxiliary engine."
             }
@@ -2046,6 +2094,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         when (engine) {
             ConfigEngine.MHRV -> MhrvEngine.stop()
             ConfigEngine.DNS_TUNNEL -> StormDnsEngine.stop()
+            ConfigEngine.COTTENDNS -> CottenDnsEngine.stop()
             ConfigEngine.SNI_SPOOF -> SniSpoofEngine.stop()
             else -> Unit
         }
@@ -2661,7 +2710,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         }
         val regionServers = servers.filter { regionFilter == "ALL" || it.country.equals(regionFilter, true) }
         val candidates = (if (prefs.getString("connection_mode", "vpn") == "proxy")
-            regionServers.filter { it.engine in setOf(ConfigEngine.XRAY, ConfigEngine.MHRV, ConfigEngine.DNS_TUNNEL, ConfigEngine.SNI_SPOOF) }
+            regionServers.filter { it.engine in setOf(ConfigEngine.XRAY, ConfigEngine.MHRV, ConfigEngine.DNS_TUNNEL, ConfigEngine.COTTENDNS, ConfigEngine.SNI_SPOOF) }
         else regionServers.filter { it.engine != ConfigEngine.SLIPNET && it.meta.host.isNotBlank() }).take(60)
         if (candidates.isEmpty()) {
             cancelSmartConnect(false)
@@ -2903,7 +2952,7 @@ private fun buildLogin(): View {
             OrbState.DISCONNECTED -> {
                 title = "Start your\nconnection"
                 desc = if (ConfigDetector.detect(currentConfig()) == ConfigEngine.SLIPNET)
-                    "SlipNet profile imported. Configure it inside TIREXNET; its native tunnel runtime is not packaged in this build yet."
+                    "SlipNet is ready. Connect directly from TIREXNET."
                 else "Choose ALL or a country, then slide to connect."
                 color = Palette.muted; chip = "OFFLINE"
             }
@@ -2968,6 +3017,7 @@ private fun buildLogin(): View {
             active -> OrbState.CONNECTED
             isError -> OrbState.FAILED
             isPermission -> OrbState.PERMISSION
+            lower.contains("disconnecting") -> OrbState.DISCONNECTING
             lower.contains("disconnected") -> OrbState.DISCONNECTED
             else -> OrbState.CONNECTING
         }
@@ -3017,13 +3067,13 @@ private fun buildLogin(): View {
             showTab(1)
             return
         }
-        if (engine == ConfigEngine.SLIPNET) {
-            showSlipNetRuntimeNotice()
-            return
-        }
         val proxyMode = prefs.getString("connection_mode", "vpn") == "proxy"
-        if (proxyMode && engine !in setOf(ConfigEngine.XRAY, ConfigEngine.MHRV, ConfigEngine.DNS_TUNNEL, ConfigEngine.SNI_SPOOF)) {
-            toast("Local proxy mode supports Xray, MHRV, StormDNS and Patterniha profiles only.")
+        if (
+            proxyMode &&
+            engine !in setOf(ConfigEngine.XRAY, ConfigEngine.MHRV, ConfigEngine.DNS_TUNNEL, ConfigEngine.COTTENDNS, ConfigEngine.SNI_SPOOF) &&
+            !(engine == ConfigEngine.SLIPNET && prefs.getBoolean("slipnet_proxy_only", false))
+        ) {
+            toast("Local proxy mode supports Xray, MHRV, StormDNS, CottenDNS, Patterniha SNI, or SlipNet proxy-only profiles.")
             return
         }
         pendingRaw = raw
@@ -3032,7 +3082,7 @@ private fun buildLogin(): View {
         prefs.edit().putString("active_engine", engine.name)
             .putString(TirexNotifier.KEY_PROFILE_NAME, selectedItem()?.name.orEmpty()).apply()
 
-        val permission = if (proxyMode) null else VpnService.prepare(this)
+        val permission = if (proxyMode && engine != ConfigEngine.SLIPNET) null else VpnService.prepare(this)
         if (permission != null) {
             applyStatus("VPN permission is required.", false)
             state = OrbState.PERMISSION
@@ -3042,6 +3092,158 @@ private fun buildLogin(): View {
             return
         }
         startSelectedEngine()
+    }
+
+    private fun startSlipNetRuntime(raw: String, bundlePassword: String? = null) {
+        val config = raw.trim()
+
+        if (config.isBlank()) {
+            toast("Select a SlipNet profile first.")
+            return
+        }
+
+        pendingRaw = config
+        pendingEngine = ConfigEngine.SLIPNET
+
+        prefs.edit()
+            .putString("active_engine", "SLIPNET")
+            .putString(TirexNotifier.KEY_PROFILE_NAME, selectedItem()?.name.orEmpty())
+            .apply()
+
+        applyStatus("Preparing SlipNet profile…", false)
+
+        slipNetScope.launch {
+            val result = try {
+                withContext(Dispatchers.IO) {
+                    slipNetRuntime.importAndSave(config, bundlePassword)
+                }
+            } catch (error: Throwable) {
+                TirexSlipNetImportResult.Failure(
+                    error.message ?: "SlipNet profile could not be imported."
+                )
+            }
+
+            when (result) {
+                is TirexSlipNetImportResult.NeedsPassword -> {
+                    requestSlipNetBundlePassword(config)
+                }
+
+                is TirexSlipNetImportResult.Failure -> {
+                    prefs.edit().putString("active_engine", "").apply()
+                    applyStatus("SlipNet error: ${result.message}", false)
+                    toast(result.message)
+                }
+
+                is TirexSlipNetImportResult.Ready -> {
+                    prefs.edit()
+                        .putString(TirexNotifier.KEY_PROFILE_NAME, result.profileName)
+                        .apply()
+
+                    if (slipNetRuntime.preparedProfileNeedsPassword()) {
+                        requestSlipNetProfilePassword()
+                    } else {
+                        connectPreparedSlipNet()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun requestSlipNetBundlePassword(raw: String) {
+        val input = EditText(this).apply {
+            hint = "Bundle password"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setSingleLine(true)
+            textSize = 13f
+            setPadding(dpi(12), dpi(9), dpi(12), dpi(9))
+            background = fieldBackground(false)
+        }
+
+        val dialog = dialogBuilder()
+            .setTitle("Unlock SlipNet bundle")
+            .setMessage("Enter the password used when this SlipNet bundle was exported.")
+            .setView(input)
+            .setNegativeButton("Cancel") { _, _ -> cancelSlipNetStart() }
+            .setPositiveButton("Continue", null)
+            .create()
+
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val password = input.text.toString()
+
+                if (password.isBlank()) {
+                    input.error = "Password required"
+                    return@setOnClickListener
+                }
+
+                dialog.dismiss()
+                startSlipNetRuntime(raw, password)
+            }
+        }
+
+        dialog.show()
+    }
+
+    private fun requestSlipNetProfilePassword() {
+        val input = EditText(this).apply {
+            hint = "Profile password"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setSingleLine(true)
+            textSize = 13f
+            setPadding(dpi(12), dpi(9), dpi(12), dpi(9))
+            background = fieldBackground(false)
+        }
+
+        val dialog = dialogBuilder()
+            .setTitle("Unlock SlipNet profile")
+            .setMessage("This profile is protected by its owner. Enter its profile password to connect.")
+            .setView(input)
+            .setNegativeButton("Cancel") { _, _ -> cancelSlipNetStart() }
+            .setPositiveButton("Unlock", null)
+            .create()
+
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val password = input.text.toString()
+
+                if (!slipNetRuntime.verifyPreparedProfilePassword(password)) {
+                    input.error = "Incorrect profile password"
+                    return@setOnClickListener
+                }
+
+                dialog.dismiss()
+                connectPreparedSlipNet()
+            }
+        }
+
+        dialog.show()
+    }
+
+    private fun connectPreparedSlipNet() {
+        slipNetScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    slipNetRuntime.applySettings(prefs)
+                }
+
+                prefs.edit().putString("active_engine", "SLIPNET").apply()
+                applyStatus("Starting SlipNet…", false)
+                slipNetRuntime.connectPrepared()
+
+            } catch (error: Throwable) {
+                prefs.edit().putString("active_engine", "").apply()
+                applyStatus(
+                    "SlipNet error: ${error.message ?: "connection failed"}",
+                    false
+                )
+                toast("SlipNet could not start. Check the profile and try again.")
+            }
+        }
+    }
+
+    private fun cancelSlipNetStart() {
+        prefs.edit().putString("active_engine", "").apply()
+        applyStatus("Disconnected.", false)
     }
 
     private fun startSelectedEngine() {
@@ -3067,8 +3269,8 @@ private fun buildLogin(): View {
                     runOnUiThread { applyStatus(message, active) }
                 }
             }
-            ConfigEngine.MHRV, ConfigEngine.DNS_TUNNEL, ConfigEngine.SNI_SPOOF -> startAuxiliaryProxyEngine(pendingEngine, pendingRaw)
-            ConfigEngine.SLIPNET -> showSlipNetRuntimeNotice()
+            ConfigEngine.MHRV, ConfigEngine.DNS_TUNNEL, ConfigEngine.COTTENDNS, ConfigEngine.SNI_SPOOF -> startAuxiliaryProxyEngine(pendingEngine, pendingRaw)
+            ConfigEngine.SLIPNET -> startSlipNetRuntime(pendingRaw)
             ConfigEngine.DNS_CHANGER -> {
                 applyStatus("Starting DNS Changer…", false)
                 val intent = Intent(this, DnsChangerVpnService::class.java)
@@ -3095,6 +3297,10 @@ private fun buildLogin(): View {
         appendConnectionLog("Disconnecting…")
         updateConnectionUi()
         var issued = false
+        if (engine == "SLIPNET" || slipNetRuntime.isConnectedOrConnecting()) {
+            issued = true
+            slipNetRuntime.disconnect()
+        }
         if (engine == "WIREGUARD" || engine == "AMNEZIAWG" || WgTunnelEngine.isActive) {
             issued = true
             WgTunnelEngine.stop { message, active -> runOnUiThread { applyStatus(message, active) } }
@@ -3107,7 +3313,7 @@ private fun buildLogin(): View {
             issued = true
             startService(Intent(this, DnsChangerVpnService::class.java).setAction(DnsChangerVpnService.ACTION_STOP))
         }
-        if (engine in setOf("XRAY", "MHRV", "DNS_TUNNEL", "SNI_SPOOF") || XrayVpnService.isActive) {
+        if (engine in setOf("XRAY", "MHRV", "DNS_TUNNEL", "COTTENDNS", "SNI_SPOOF") || XrayVpnService.isActive) {
             issued = true
             startService(Intent(this, XrayVpnService::class.java).setAction(XrayVpnService.ACTION_STOP))
         }
@@ -3117,6 +3323,7 @@ private fun buildLogin(): View {
             if (!XrayVpnService.isActive) {
                 MhrvEngine.stop()
                 StormDnsEngine.stop()
+                CottenDnsEngine.stop()
                 SniSpoofEngine.stop()
             }
         }, 900L)
@@ -3344,7 +3551,7 @@ private fun buildLogin(): View {
             val msg = when {
                 o.bundleFailures > 0 -> "رمز بسته SlipNet اشتباه است یا فایل bundle خراب شده است."
                 o.duplicates > 0 && o.invalid == 0 -> "این کانفیگ قبلاً در لیست هست."
-                else -> "کانفیگ پشتیبانی‌شده‌ای پیدا نشد. Xray / WireGuard / AmneziaWG / OpenVPN / MHRV / StormDNS / Patterniha / SlipNet لازم است."
+                else -> "کانفیگ پشتیبانی‌شده‌ای پیدا نشد. Xray / WireGuard / AmneziaWG / OpenVPN / MHRV / StormDNS / CottenDNS / Patterniha / SlipNet لازم است."
             }
             importFailed(msg)
             return
@@ -3381,9 +3588,10 @@ private fun buildLogin(): View {
         ConfigEngine.OPENVPN -> "OPENVPN"
         ConfigEngine.MHRV -> "MHRV"
         ConfigEngine.DNS_TUNNEL -> "STORMDNS"
+        ConfigEngine.COTTENDNS -> "COTTENDNS"
         ConfigEngine.DNS_CHANGER -> "DNS CHANGER"
         ConfigEngine.SNI_SPOOF -> "PATTERNIHA SNI"
-        ConfigEngine.SLIPNET -> "SLIPNET • RUNTIME REQUIRED"
+        ConfigEngine.SLIPNET -> "SLIPNET"
         else -> "NONE"
     }
 
@@ -4237,7 +4445,7 @@ private fun request(
         // --- 3. Raw editor
         val rawCard = GlassCard(this, 22f, pad = 16)
         rawCard.addView(tv("RAW CONFIG", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
-        rawCard.addView(tv("Paste Xray, WireGuard, OpenVPN, MHRV, StormDNS, Patterniha or SlipNet share links. SlipNet links can be imported here; runtime availability is shown in SlipNet settings.", 11.5f, Palette.muted, 0), lp(MATCH, WRAP, 6))
+        rawCard.addView(tv("Paste Xray, WireGuard, OpenVPN, MHRV, StormDNS, CottenDNS, Patterniha or SlipNet share links. SlipNet links can be imported here; runtime availability is shown in SlipNet settings.", 11.5f, Palette.muted, 0), lp(MATCH, WRAP, 6))
         val raw = EditText(this).apply {
             hint = "vless://…  |  { \"outbounds\": … }  |  [Interface] …"
             textSize = 12f
