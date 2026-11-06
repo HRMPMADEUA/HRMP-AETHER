@@ -112,8 +112,10 @@ jobs:
           grep -Fq 'data class MainSettingsCore' "$SETTINGS"
           grep -Fq 'main.autoConnectOnBoot' "$SETTINGS"
           grep -Fq 'slipnet-bundle-enc://' "$SLIPNET_MAIN"
-          grep -Fq 'openSlipNetRuntime(raw)' "$TIREX_MAIN"
-          grep -Fq 'slipNetConnectionManager.disconnect()' "$TIREX_MAIN"
+          grep -Fq 'startSlipNetRuntime(pendingRaw)' "$TIREX_MAIN"
+          grep -Fq 'slipNetRuntime.disconnect()' "$TIREX_MAIN"
+          grep -Fq 'slipNetRuntime.connectionState.collect' "$TIREX_MAIN"
+          test -s app/src/main/java/com/tirexnet/app/TirexSlipNetRuntime.kt
 
           if grep -Eq 'main\[[0-6]\] as ' "$SETTINGS"; then
             echo "::error::Unsafe Kotlin heterogeneous-array casts remain in SlipNet SettingsViewModel."
@@ -142,6 +144,9 @@ jobs:
               "app.slipnet.service.SlipNetVpnService",
               ".engine.DnsChangerVpnService",
           }
+          upstream_ui = next(x for x in app.findall("activity") if x.get(android + "name") == "app.slipnet.presentation.MainActivity")
+          assert upstream_ui.get(android + "exported") == "false", "Upstream SlipNet UI must not be exported"
+          assert not upstream_ui.findall("intent-filter"), "Upstream SlipNet UI must have no intent filters"
           missing = (required_activities - activities) | (required_services - services)
           assert not missing, "Manifest entries missing: " + ", ".join(sorted(missing))
           print("Manifest integration checks passed.")
@@ -513,7 +518,8 @@ jobs:
           }
 
           echo "Combined SlipNet + Xray AAR verified."
-                - name: Prepare TIREXNET release signing key
+
+      - name: Prepare TIREXNET release signing key
         env:
           TIREXNET_KEYSTORE_BASE64: ${{ secrets.TIREXNET_KEYSTORE_BASE64 }}
           TIREXNET_STORE_PASSWORD: ${{ secrets.TIREXNET_STORE_PASSWORD }}
@@ -691,6 +697,40 @@ jobs:
 
           test -s "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libstormdns.so"
 
+      - name: Checkout CottenDNS
+        uses: actions/checkout@v4
+        with:
+          repository: WhiteDNS/CottenDNS
+          # Release tag published in the CottenDNS README (MIT). Replace with a commit SHA after the first green build.
+          ref: v2026.10.21.140901-0a7a241
+          path: .native-src/cottendns
+
+      - name: Build CottenDNS Android ARM64 client
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p app/src/main/jniLibs/arm64-v8a app/src/main/assets/third_party
+          cd .native-src/cottendns
+
+          test -d cmd/client
+
+          CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
+            go build \
+              -trimpath \
+              -buildmode=pie \
+              -ldflags='-s -w' \
+              -o "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libcottendns.so" \
+              ./cmd/client
+
+          test -s "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libcottendns.so"
+
+          cp LICENSE "$GITHUB_WORKSPACE/app/src/main/assets/third_party/COTTENDNS-MIT.txt"
+          for f in SOAR_LICENSE.txt QUIC_GO_LICENSE.txt QPACK_LICENSE.txt THIRD_PARTY_NOTICES.md; do
+            if [ -f "$f" ]; then cp "$f" "$GITHUB_WORKSPACE/app/src/main/assets/third_party/COTTENDNS-$f"; fi
+          done
+          test -s "$GITHUB_WORKSPACE/app/src/main/assets/third_party/COTTENDNS-MIT.txt"
+
       - name: Checkout SNISPF
         uses: actions/checkout@v4
         with:
@@ -714,7 +754,8 @@ jobs:
               ./cmd/snispf
 
           test -s "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libsnispf.so"
-                - name: Setup Gradle
+
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.6.1'
