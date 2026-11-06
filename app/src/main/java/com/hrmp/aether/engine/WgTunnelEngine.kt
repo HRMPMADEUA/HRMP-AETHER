@@ -50,7 +50,10 @@ object WgTunnelEngine {
 
                 try {
                     val app = context.applicationContext
-                    val parsed = buildConfig(raw, amnezia)
+                    val profileDns = ProfileSettingsStore(app).get(raw)
+                    val selectedDns = (listOf(profileDns.selectedResolver) + profileDns.dnsResolvers).mapNotNull(::wireGuardDnsIp).distinct()
+                    val configuredRaw = if (selectedDns.isEmpty()) raw else applyProfileDns(raw, selectedDns)
+                    val parsed = buildConfig(configuredRaw, amnezia)
 
                     if (backend == null) {
                         val networkMonitor = AndroidNetworkMonitor(app)
@@ -183,6 +186,23 @@ object WgTunnelEngine {
                 }
             }
         }
+    }
+
+    private fun wireGuardDnsIp(value: String): String? {
+        val clean = value.trim()
+        val host = if (clean.startsWith("[")) clean.substringAfter("[").substringBefore("]")
+            else if (clean.count { it == ':' } == 1 && clean.substringAfter(":").toIntOrNull() != null) clean.substringBefore(":") else clean
+        val ipv4 = Regex("^\\d{1,3}(\\.\\d{1,3}){3}$").matches(host) && host.split('.').all { it.toIntOrNull() in 0..255 }
+        val ipv6 = host.contains(':') && Regex("^[0-9a-fA-F:]+$").matches(host)
+        return host.takeIf { ipv4 || ipv6 }
+    }
+
+    private fun applyProfileDns(raw: String, dns: List<String>): String {
+        val line = "DNS = ${dns.joinToString(", ")}"
+        val pattern = Regex("(?im)^\\s*DNS\\s*=.*$")
+        if (pattern.containsMatchIn(raw)) return pattern.replace(raw, line, 1)
+        val header = Regex("(?im)^\\s*\\[Interface]\\s*$")
+        return if (header.containsMatchIn(raw)) header.replace(raw, "[Interface]\n$line", 1) else raw
     }
 
     private fun buildConfig(

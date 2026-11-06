@@ -63,6 +63,10 @@ import com.tirexnet.app.engine.FieldKind
 import com.tirexnet.app.engine.ManualOutcome
 import com.tirexnet.app.engine.ManualProfile
 import com.tirexnet.app.engine.ManualProtocol
+import com.tirexnet.app.engine.ManualProfileDecoder
+import com.tirexnet.app.engine.DnsResolverScanner
+import com.tirexnet.app.engine.ProfileSettingsStore
+import com.tirexnet.app.engine.MasterDnsProfiles
 import com.tirexnet.app.engine.MhrvEngine
 import com.tirexnet.app.engine.MhrvCertificate
 import com.tirexnet.app.engine.OpenVpnEngine
@@ -2433,10 +2437,11 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
             toast("Subscription profiles are read-only. Add a local copy to customize it.")
             return
         }
-        val options = if (item.engine == ConfigEngine.XRAY) arrayOf("Edit profile", "Change TLS serverName", "Remove profile") else arrayOf("Edit profile", "Remove profile")
+        val options = if (item.engine == ConfigEngine.XRAY) arrayOf("Edit profile", "Duplicate profile", "Change TLS serverName", "Remove profile") else arrayOf("Edit profile", "Duplicate profile", "Remove profile")
         dialogBuilder().setTitle(item.name).setItems(options) { _, which ->
             when (options[which]) {
                 "Edit profile" -> editServerDialog(item)
+                "Duplicate profile" -> duplicateServerProfile(item)
                 "Change TLS serverName" -> showSniDialog(item)
                 "Remove profile" -> removeServerProfile(item)
             }
@@ -2451,11 +2456,51 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(16), dpi(8), dpi(16), dpi(4)) }
         val name = EditText(this).apply { setSingleLine(true); hint = "Profile name"; setText(item.name); textSize = 13f; background = fieldBackground(false); setPadding(dpi(10), dpi(8), dpi(10), dpi(8)) }
         val raw = EditText(this).apply { hint = "Paste or edit the profile"; setText(item.raw); textSize = 10.5f; minLines = 5; maxLines = 9; gravity = Gravity.TOP; inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE; background = fieldBackground(false); setPadding(dpi(10), dpi(8), dpi(10), dpi(8)) }
+        val profileSettings = ProfileSettingsStore(this).get(item.raw)
+        val resolverInput = EditText(this).apply {
+            hint = "1.1.1.1:53\n8.8.8.8:53 or https://dns.google/dns-query"
+            setText(profileSettings.dnsResolvers.joinToString("\n"))
+            textSize = 12f; minLines = 2; maxLines = 5; gravity = Gravity.TOP
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setTextColor(Palette.text); setHintTextColor(Palette.dim); background = fieldBackground(false)
+            setPadding(dpi(10), dpi(8), dpi(10), dpi(8))
+        }
+        var selectedResolver = profileSettings.selectedResolver
+        val scanResults = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         form.addView(tv("Profile name", 11f, Palette.muted, 0))
         form.addView(name, lp(MATCH, dpi(46), 4))
         form.addView(tv("Configuration", 11f, Palette.muted, 0), lp(MATCH, WRAP, 10))
         form.addView(raw, lp(MATCH, dpi(180), 4))
-        val dialog = dialogBuilder().setTitle("EDIT PROFILE").setView(form).setNegativeButton("Cancel", null).setPositiveButton("Save", null).create()
+        form.addView(ghostButton("Decode supported fields") { showDecodedProfileEditor(raw) }, lp(MATCH, dpi(42), 6))
+        form.addView(tv("DNS RESOLVERS • THIS PROFILE ONLY", 11f, Palette.cyan, 1), lp(MATCH, WRAP, 14))
+        form.addView(tv("One IP or IP:port per line; an HTTPS DNS-query URL is also accepted. Scan checks DNS reachability, not the VPN tunnel. Long-press a result for DoT.", 10f, Palette.muted, 0), lp(MATCH, WRAP, 4))
+        form.addView(resolverInput, lp(MATCH, dpi(88), 6))
+        form.addView(ghostButton("Scan DNS resolvers") {
+            val candidates = resolverInput.text.toString().lines().map { it.trim() }.filter { it.isNotEmpty() }
+            if (candidates.isEmpty()) { toast("Enter at least one DNS resolver."); return@ghostButton }
+            scanResults.removeAllViews()
+            scanResults.addView(tv("Scanning active network…", 10.5f, Palette.cyan, 0), lp(MATCH, WRAP, 6))
+            DnsResolverScanner.scan(this, candidates) { results ->
+                scanResults.removeAllViews()
+                if (results.isEmpty()) scanResults.addView(tv("No valid resolver address was tested.", 10f, Palette.red, 0), lp(MATCH, WRAP, 6))
+                results.forEach { result ->
+                    val label = "${if (result.dnsReachable) "●" else "○"} ${result.resolver}  |  ${result.latencyMs?.let { "${it}ms" } ?: "—"}  |  loss ${result.packetLossPercent}%\n${result.detail} • EDNS ${if (result.ednsSupported) "yes" else "no"} • NXDOMAIN hijack ${when (result.nxdomainHijackSuspected) { true -> "suspected"; false -> "not detected"; else -> "unknown" }}"
+                    val row = tv(label, 10f, if (result.dnsReachable) Palette.cyan else Palette.muted, 0).apply {
+                        setPadding(dpi(8), dpi(8), dpi(8), dpi(8)); background = Palette.glass(this@MainActivity, 10f)
+                        setOnClickListener { selectedResolver = result.resolver; toast("Selected ${result.resolver}") }
+                        setOnLongClickListener {
+                            val host = if (result.resolver.startsWith("[")) result.resolver.substringAfter("[").substringBefore("]") else result.resolver.substringBeforeLast(":")
+                            text = "$label\nTesting DNS-over-TLS on port 853…"
+                            DnsResolverScanner.testDot(this@MainActivity, host) { ok -> text = "$label\nDNS-over-TLS: ${if (ok) "reachable" else "not verified"}" }
+                            true
+                        }
+                    }
+                    scanResults.addView(row, lp(MATCH, WRAP, 5))
+                }
+            }
+        }, lp(MATCH, dpi(44), 6))
+        form.addView(scanResults, lp(MATCH, WRAP, 4))
+        val dialog = dialogBuilder().setTitle("EDIT PROFILE").setView(ScrollView(this).apply { isFillViewport = true; addView(form) }).setNegativeButton("Cancel", null).setPositiveButton("Save", null).create()
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val updatedRaw = raw.text.toString().trim()
@@ -2467,11 +2512,102 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
                 val locals = loadLocalProfiles().filterNot { it.raw.trim() == item.raw.trim() }.toMutableList()
                 locals.add(updated)
                 if (!persistLocalProfiles(locals)) { toast("Could not save this profile."); return@setOnClickListener }
+                val settingsStore = ProfileSettingsStore(this)
+                settingsStore.migrate(item.raw, updatedRaw)
+                val resolverList = resolverInput.text.toString().lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.distinct().toList()
+                settingsStore.save(updatedRaw, resolverList, selectedResolver, profileSettings.customSettings)
                 servers = mergeSavedAndRemote(servers.filterNot { it.local })
                 serversState = ServersState.READY
                 if (currentConfig().trim() == item.raw.trim()) setConfig(updatedRaw) else rebuildServerList(-1)
                 dialog.dismiss()
                 toast("Profile saved.")
+            }
+        }
+        dialog.show()
+    }
+
+    private fun duplicateServerProfile(item: ServerItem) {
+        val newName = (item.name + " (copy)").take(80)
+        val copiedRaw = runCatching {
+            when (item.engine) {
+                ConfigEngine.XRAY -> when {
+                    item.raw.startsWith("vmess://", true) -> {
+                        val payload = item.raw.substringAfter("vmess://").substringBefore('#')
+                        val bytes = android.util.Base64.decode(payload, android.util.Base64.DEFAULT or android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP)
+                        val obj = JSONObject(String(bytes, Charsets.UTF_8)).put("ps", newName)
+                        "vmess://" + android.util.Base64.encodeToString(obj.toString().toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+                    }
+                    item.raw.startsWith("vless://", true) || item.raw.startsWith("trojan://", true) || item.raw.startsWith("ss://", true) ->
+                        Uri.parse(item.raw).buildUpon().fragment(newName).build().toString()
+                    item.raw.trimStart().startsWith("{") -> JSONObject(item.raw).put("remarks", newName).toString()
+                    else -> null
+                }
+                ConfigEngine.WIREGUARD, ConfigEngine.AMNEZIAWG -> {
+                    val clean = item.raw.replace(Regex("(?im)^\\s*#\\s*Name\\s*=.*(?:\\r?\\n)?"), "")
+                    "# Name = $newName\\n$clean"
+                }
+                ConfigEngine.MHRV -> EngineProfiles.decodeMhrv(item.raw)?.let { EngineProfiles.encodeMhrv(newName, JSONObject(it.configJson)) }
+                ConfigEngine.DNS_TUNNEL -> EngineProfiles.decodeStormDns(item.raw)?.let { EngineProfiles.encodeStormDns(newName, it.clientConfig, it.resolvers) }
+                ConfigEngine.MASTERDNS -> MasterDnsProfiles.decode(item.raw)?.let { p ->
+                    val obj = JSONObject(item.raw.substringAfter("://").let { String(android.util.Base64.decode(it, android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING), Charsets.UTF_8) }).put("name", newName)
+                    "masterdns://" + android.util.Base64.encodeToString(obj.toString().toByteArray(Charsets.UTF_8), android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING)
+                }
+                ConfigEngine.COTTENDNS -> EngineProfiles.decodeCottenDns(item.raw)?.let { EngineProfiles.encodeCottenDns(newName, it.clientConfig, it.resolvers) }
+                ConfigEngine.DNS_CHANGER -> DnsChangerProfiles.decode(item.raw)?.let { DnsChangerProfiles.encode(newName, it.ipv4Primary, it.ipv4Secondary, it.ipv6Primary, it.ipv6Secondary) }
+                ConfigEngine.SNI_SPOOF -> EngineProfiles.decodeSniSpoof(item.raw)?.let { EngineProfiles.encodeSniSpoof(newName, it.baseProfile, it.connectIp, it.connectPort, it.fakeSni, it.listenPort) }
+                else -> null
+            }
+        }.getOrNull()
+        if (copiedRaw.isNullOrBlank() || ConfigDetector.detect(copiedRaw) == ConfigEngine.UNKNOWN) { toast("This profile format cannot be safely duplicated yet."); return }
+        val locals = loadLocalProfiles()
+        if (locals.any { it.raw.trim() == copiedRaw.trim() }) { toast("A copy of this profile already exists."); return }
+        val meta = ProfileParser.parse(copiedRaw)
+        val duplicate = ServerItem(newName, copiedRaw, meta.engine, meta, true, item.country)
+        if (!persistLocalProfiles(listOf(duplicate) + locals)) { toast("Could not save the duplicated profile."); return }
+        ProfileSettingsStore(this).duplicate(item.raw, copiedRaw)
+        servers = mergeSavedAndRemote(servers.filterNot { it.local }); serversState = ServersState.READY
+        rebuildServerList(-1); toast("Profile duplicated.")
+    }
+
+    private fun showDecodedProfileEditor(rawTarget: EditText) {
+        val decoded = ManualProfileDecoder.decode(rawTarget.text.toString())
+        if (decoded == null) { toast("This format has no safe field decoder. Use the raw configuration editor."); return }
+        if (!decoded.editableWithoutDroppingUnknownFields) {
+            dialogBuilder().setTitle("Raw-only profile").setMessage(decoded.note.ifBlank { "Unknown fields are present. Raw editing preserves them more safely." }).setPositiveButton("OK", null).show()
+            return
+        }
+        val values = decoded.values.toMutableMap()
+        val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(14), dpi(8), dpi(14), dpi(8)) }
+        val editors = linkedMapOf<String, EditText>()
+        ManualProfile.fields(decoded.protocol).forEach { spec ->
+            if (spec.showWhen != null && !spec.showWhen.invoke(values)) return@forEach
+            form.addView(tv(spec.label + if (spec.required) " *" else "", 10.5f, Palette.muted, 0), lp(MATCH, WRAP, 8))
+            val editor = EditText(this).apply {
+                hint = spec.hint; setText(values[spec.key].orEmpty()); textSize = 12f
+                setTextColor(Palette.text); setHintTextColor(Palette.dim)
+                setSingleLine(spec.kind != FieldKind.MULTILINE)
+                if (spec.kind == FieldKind.MULTILINE) { minLines = 2; maxLines = 4; gravity = Gravity.TOP }
+                inputType = when (spec.kind) {
+                    FieldKind.NUMBER -> InputType.TYPE_CLASS_NUMBER
+                    FieldKind.SECRET -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                    FieldKind.MULTILINE -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                    else -> InputType.TYPE_CLASS_TEXT
+                }
+                background = fieldBackground(false); setPadding(dpi(10), dpi(8), dpi(10), dpi(8))
+            }
+            editors[spec.key] = editor
+            form.addView(editor, lp(MATCH, if (spec.kind == FieldKind.MULTILINE) dpi(84) else dpi(44), 3))
+        }
+        val scroller = ScrollView(this).apply { isFillViewport = true; addView(form) }
+        val dialog = dialogBuilder().setTitle("EDIT ${decoded.protocol.label.uppercase(Locale.US)} FIELDS").setView(scroller)
+            .setNegativeButton("Cancel", null).setPositiveButton("Apply", null).create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                editors.forEach { (key, edit) -> values[key] = edit.text.toString() }
+                when (val built = ManualProfile.build(decoded.protocol, values)) {
+                    is ManualOutcome.Invalid -> { editors[built.key]?.error = built.message; toast(built.message) }
+                    is ManualOutcome.Ok -> { rawTarget.setText(built.raw); dialog.dismiss(); toast("Decoded fields applied. Review and save the profile.") }
+                }
             }
         }
         dialog.show()
@@ -3562,6 +3698,8 @@ private fun buildLogin(): View {
             importFailed(msg)
             return
         }
+        val profileSettingsStore = ProfileSettingsStore(this)
+        o.added.forEach { profileSettingsStore.get(it.raw) }
         servers = mergeSavedAndRemote(servers.filterNot { it.local })
         serversState = ServersState.READY
         serversError = ""

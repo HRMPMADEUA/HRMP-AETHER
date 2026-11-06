@@ -19,6 +19,10 @@ object MasterDnsEngine {
 
         val profile = MasterDnsProfiles.decode(rawProfile)
             ?: return "MasterDNS profile is invalid. Check its tunnel domains, encryption key and resolvers."
+        val profileSettings = ProfileSettingsStore(context).get(rawProfile)
+        val customResolvers = (listOf(profileSettings.selectedResolver) + profileSettings.dnsResolvers)
+            .map { it.trim() }.filter { it.isNotEmpty() && EngineProfiles.isResolverEndpoint(it) }.distinct()
+        val effectiveResolvers = if (customResolvers.isNotEmpty()) customResolvers.joinToString("\n") else profile.resolvers
 
         return try {
             val executable = File(context.applicationInfo.nativeLibraryDir, "libmasterdnsvpn.so")
@@ -32,7 +36,7 @@ object MasterDnsEngine {
             val resolversFile = File(workDir, "client_resolvers.txt")
             val consoleFile = File(workDir, "engine-console.log")
             configFile.writeText(profile.clientConfig)
-            resolversFile.writeText(profile.resolvers + "\n")
+            resolversFile.writeText(effectiveResolvers + "\n")
             activePort = profile.listenPort
 
             val child = ProcessBuilder(

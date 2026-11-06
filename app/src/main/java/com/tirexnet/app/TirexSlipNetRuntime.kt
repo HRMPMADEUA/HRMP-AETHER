@@ -20,6 +20,7 @@ import app.slipnet.domain.model.SshAuthType
 import app.slipnet.domain.repository.ProfileRepository
 import app.slipnet.service.VpnConnectionManager
 import app.slipnet.util.LockPasswordUtil
+import com.tirexnet.app.engine.ProfileSettingsStore
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.flow.first
 import java.util.Locale
@@ -66,8 +67,12 @@ class TirexSlipNetRuntime(context: Context) {
                 val stored = profiles.getAllProfiles().first().toMutableList()
                 var firstSaved: ServerProfile? = null
                 var importedCount = 0
+                val profileSettings = ProfileSettingsStore(appContext).get(raw)
+                val selectedResolvers = (listOf(profileSettings.selectedResolver) + profileSettings.dnsResolvers).map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("https://", true) && !it.startsWith("http://", true) }.distinct()
+                val perProfileResolvers = if (selectedResolvers.isNotEmpty()) parseResolverList(selectedResolvers.joinToString("\n")) else emptyList()
                 for (original in parsed.profiles) {
-                    val incoming = applyProfileDefaults(original, localPrefs)
+                    val baseProfile = applyProfileDefaults(original, localPrefs)
+                    val incoming = if (perProfileResolvers.isNotEmpty()) baseProfile.copy(resolvers = perProfileResolvers) else baseProfile
                     val existing = stored.firstOrNull { saved ->
                         incoming.copy(
                             id = saved.id,

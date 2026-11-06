@@ -118,7 +118,9 @@ class XrayVpnService : VpnService() {
         val prefs = getSharedPreferences("tirexnet", MODE_PRIVATE)
         val proxyMode = prefs.getString("connection_mode", "vpn") == "proxy"
         val proxyProtocol = prefs.getString("proxy_protocol", "socks") ?: "socks"
-        val json = if (proxyMode) XrayConfigBuilder.buildProxy(raw, proxyProtocol) else XrayConfigBuilder.build(raw)
+        val profileDns = ProfileSettingsStore(this).get(raw)
+        val resolverList = (listOf(profileDns.selectedResolver) + profileDns.dnsResolvers).map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        val json = if (proxyMode) XrayConfigBuilder.buildProxy(raw, proxyProtocol, resolverList) else XrayConfigBuilder.build(raw, resolverList)
 
         var pfd: ParcelFileDescriptor? = null
         if (!proxyMode) {

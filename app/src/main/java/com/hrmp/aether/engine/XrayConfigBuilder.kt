@@ -12,7 +12,7 @@ import java.nio.charset.StandardCharsets
  */
 object XrayConfigBuilder {
 
-    fun build(input: String): String {
+    fun build(input: String, customDnsResolvers: List<String> = emptyList()): String {
         val raw = input.trim()
 
         require(raw.isNotEmpty()) {
@@ -42,9 +42,10 @@ object XrayConfigBuilder {
         if (ConfigDetector.detect(raw) == ConfigEngine.SNI_SPOOF) {
             val profile = EngineProfiles.decodeSniSpoof(raw)
                 ?: throw IllegalArgumentException("SNI profile is invalid.")
-            return EngineProfiles.createRootlessSniProfile(
+            val built = EngineProfiles.createRootlessSniProfile(
                 profile.baseProfile, profile.name, profile.connectIp, profile.connectPort, profile.fakeSni, profile.listenPort
             ) ?: throw IllegalArgumentException("Could not create the rootless SNI configuration.")
+            return applyDnsResolvers(JSONObject(built), customDnsResolvers).toString()
         }
 
         if (raw.startsWith("{")) {
@@ -63,7 +64,7 @@ object XrayConfigBuilder {
                 )
             }
 
-            return json.toString()
+            return applyDnsResolvers(json, customDnsResolvers).toString()
         }
 
         val lower = raw.lowercase()
@@ -79,47 +80,39 @@ object XrayConfigBuilder {
             )
         }
 
-        return JSONObject()
-            .put(
-                "log",
-                JSONObject().put("loglevel", "warning")
-            )
-            .put(
-                "inbounds",
-                JSONArray().put(tunInbound())
-            )
-            .put(
-                "outbounds",
-                JSONArray()
-                    .put(outbound)
-                    .put(
-                        JSONObject()
-                            .put("tag", "direct")
-                            .put("protocol", "freedom")
-                    )
-                    .put(
-                        JSONObject()
-                            .put("tag", "block")
-                            .put("protocol", "blackhole")
-                    )
-            )
-            .put(
-                "routing",
-                JSONObject()
-                    .put("domainStrategy", "AsIs")
-                    .put("rules", JSONArray())
-            )
-            .put(
-                "dns",
-                JSONObject()
-                    .put(
-                        "servers",
-                        JSONArray()
-                            .put("1.1.1.1")
-                            .put("8.8.8.8")
-                    )
-            )
-            .toString()
+        val generated = JSONObject()
+            .put("log", JSONObject().put("loglevel", "warning"))
+            .put("inbounds", JSONArray().put(tunInbound()))
+            .put("outbounds", JSONArray().put(outbound)
+                .put(JSONObject().put("tag", "direct").put("protocol", "freedom"))
+                .put(JSONObject().put("tag", "block").put("protocol", "blackhole")))
+            .put("routing", JSONObject().put("domainStrategy", "AsIs").put("rules", JSONArray()))
+            .put("dns", JSONObject().put("servers", JSONArray().put("1.1.1.1").put("8.8.8.8")))
+        return applyDnsResolvers(generated, customDnsResolvers).toString()
+    }
+
+    private fun applyDnsResolvers(config: JSONObject, values: List<String>): JSONObject {
+        val clean = values.mapNotNull(::dnsServerEntry).distinctBy { it.toString() }
+        if (clean.isEmpty()) return config
+        val dns = config.optJSONObject("dns") ?: JSONObject().also { config.put("dns", it) }
+        dns.put("servers", JSONArray().apply { clean.forEach { put(it) } })
+        return config
+    }
+
+    private fun dnsServerEntry(value: String): Any? {
+        val clean = value.trim().removePrefix("udp://").removePrefix("tcp://")
+        if (clean.isBlank()) return null
+        if (clean.startsWith("https://", true)) return clean
+        val host: String
+        val port: Int
+        if (clean.startsWith("[")) {
+            val end = clean.indexOf(']'); if (end <= 1) return null
+            host = clean.substring(1, end); port = clean.substring(end + 1).removePrefix(":").toIntOrNull() ?: 53
+        } else if (clean.count { it == ':' } == 1) {
+            host = clean.substringBefore(':'); port = clean.substringAfter(':').toIntOrNull() ?: 53
+        } else { host = clean; port = 53 }
+        if (host.isBlank() || port !in 1..65535) return null
+        return if (port == 53) host else JSONObject().put("address", host).put("port", port)
     }
 
     /** Redirects only the primary tunnel outbound to the local Patterniha TCP forwarder.
@@ -156,8 +149,8 @@ object XrayConfigBuilder {
     }
 
     /** Build an Xray profile with one loopback-only SOCKS5 or HTTP inbound, without a TUN. */
-    fun buildProxy(input: String, proxyProtocol: String): String {
-        val config = JSONObject(build(input))
+    fun buildProxy(input: String, proxyProtocol: String, customDnsResolvers: List<String> = emptyList()): String {
+        val config = JSONObject(build(input, customDnsResolvers))
         val protocol = if (proxyProtocol.equals("http", true)) "http" else "socks"
         val settings = if (protocol == "socks") {
             JSONObject().put("auth", "noauth").put("udp", true).put("userLevel", 8)

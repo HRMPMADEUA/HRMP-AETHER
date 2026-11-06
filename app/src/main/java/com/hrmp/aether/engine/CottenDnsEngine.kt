@@ -19,6 +19,10 @@ object CottenDnsEngine {
         val current = process
         if (current != null && current.isAlive) return null
         val profile = EngineProfiles.decodeCottenDns(rawProfile) ?: return "CottenDNS profile is invalid. Check the domain, encryption key and DNS resolvers."
+        val profileSettings = ProfileSettingsStore(context).get(rawProfile)
+        val customResolvers = (listOf(profileSettings.selectedResolver) + profileSettings.dnsResolvers)
+            .map { it.trim() }.filter { it.isNotEmpty() && EngineProfiles.isResolverEndpoint(it) }.distinct()
+        val effectiveResolvers = if (customResolvers.isNotEmpty()) customResolvers.joinToString("\n") else profile.resolvers
         return try {
             val executable = File(context.applicationInfo.nativeLibraryDir, "libcottendns.so")
             if (!executable.isFile) return "CottenDNS engine is missing from this APK."
@@ -28,7 +32,7 @@ object CottenDnsEngine {
             val resolversFile = File(dir, "client_resolvers.txt")
             val logFile = File(dir, "client.log")
             configFile.writeText(profile.clientConfig)
-            resolversFile.writeText(profile.resolvers + "\n")
+            resolversFile.writeText(effectiveResolvers + "\n")
             activePort = profile.port
             val p = ProcessBuilder(
                 executable.absolutePath,
