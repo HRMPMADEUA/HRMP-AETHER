@@ -5,10 +5,21 @@ import org.json.JSONObject
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 
-enum class ManualProtocol(val label: String) {
-    VLESS("VLESS"), VMESS("VMess"), TROJAN("Trojan"), SHADOWSOCKS("Shadowsocks"),
-    WIREGUARD("WireGuard"), AMNEZIAWG("AmneziaWG"),
-    MHRV("MHRV"), STORMDNS("DNS Tunnel"), COTTENDNS("CottenDNS"), DNS_CHANGER("DNS Changer")
+enum class ManualProtocol(val label: String, val group: String) {
+    VLESS("VLESS", "Xray"), VMESS("VMess", "Xray"), TROJAN("Trojan", "Xray"), SHADOWSOCKS("Shadowsocks", "Xray"),
+    WIREGUARD("WireGuard", "VPN"), AMNEZIAWG("AmneziaWG", "VPN"),
+    SLIPNET_DNSTT("DNSTT", "SlipNet"), SLIPNET_DNSTT_SSH("DNSTT + SSH", "SlipNet"),
+    SLIPNET_VAYDNS("VayDNS", "SlipNet"), SLIPNET_VAYDNS_SSH("VayDNS + SSH", "SlipNet"),
+    SLIPNET_SOAR("Soar", "SlipNet"), SLIPNET_SOAR_SSH("Soar + SSH", "SlipNet"),
+    MASTERDNS("MasterDNS", "DNS Tunnel"), STORMDNS("StormDNS", "DNS Tunnel"), COTTENDNS("CottenDNS", "DNS Tunnel"),
+    MHRV("MHRV", "Other"), DNS_CHANGER("DNS Changer", "Other");
+
+    val isSlipNet: Boolean get() = group == "SlipNet"
+
+    companion object {
+        /** Groups in display order. */
+        val groups: List<String> get() = values().map { it.group }.distinct()
+    }
 }
 
 enum class FieldKind { TEXT, NUMBER, SECRET, CHOICE, MULTILINE }
@@ -22,7 +33,9 @@ data class FieldSpec(
     val choices: List<String> = emptyList(),
     val default: String = "",
     /** Only shown when this predicate over the current values is true (e.g. reality-only fields). */
-    val showWhen: ((Map<String, String>) -> Boolean)? = null
+    val showWhen: ((Map<String, String>) -> Boolean)? = null,
+    /** Optional heading shown above the first field of a section. */
+    val section: String = ""
 )
 
 sealed class ManualOutcome {
@@ -74,6 +87,22 @@ object ManualProfile {
                 FieldSpec("method", "Encryption method", FieldKind.CHOICE, required = true,
                     choices = listOf("aes-256-gcm", "aes-128-gcm", "chacha20-ietf-poly1305", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305"), default = "aes-256-gcm"),
                 FieldSpec("password", "Password", FieldKind.SECRET, required = true))
+            ManualProtocol.SLIPNET_DNSTT, ManualProtocol.SLIPNET_DNSTT_SSH,
+            ManualProtocol.SLIPNET_VAYDNS, ManualProtocol.SLIPNET_VAYDNS_SSH,
+            ManualProtocol.SLIPNET_SOAR, ManualProtocol.SLIPNET_SOAR_SSH ->
+                SlipNetManualProfile.fields(p, name).map { it.copy(section = slipNetSection(it.key)) }
+                    .sortedBy { SLIPNET_SECTION_ORDER.indexOf(it.section).let { i -> if (i < 0) 99 else i } }
+            ManualProtocol.MASTERDNS -> listOf(
+                name.copy(section = "Profile"),
+                FieldSpec("domains", "Tunnel domains", FieldKind.MULTILINE, required = true, hint = "One domain per line; must match the MasterDNS server", section = "Server"),
+                FieldSpec("encryption", "Data encryption", FieldKind.CHOICE, choices = listOf("0", "1", "2", "3", "4", "5"), default = "1"),
+                FieldSpec("encryptionKey", "Shared encryption key", FieldKind.SECRET, required = true, showWhen = { it["encryption"] != "0" }),
+                FieldSpec("resolvers", "DNS resolvers", FieldKind.MULTILINE, required = true, hint = "One IP, IP:port or CIDR per line", default = "1.1.1.1:53\n8.8.8.8:53", section = "DNS"),
+                FieldSpec("listenPort", "Local SOCKS5 port", FieldKind.NUMBER, required = true, hint = "18000", default = "18000", section = "Performance"),
+                FieldSpec("workers", "Workers", FieldKind.NUMBER, hint = "1-32", default = "4"),
+                FieldSpec("mtu", "MTU", FieldKind.NUMBER, hint = "576-9000", default = "1280"),
+                FieldSpec("logLevel", "Log level", FieldKind.CHOICE, choices = listOf("ERROR", "WARN", "INFO", "DEBUG"), default = "WARN")
+            )
             ManualProtocol.MHRV -> listOf(
                 name,
                 FieldSpec("mode", "MHRV mode", FieldKind.CHOICE, choices = listOf("apps_script", "direct"), default = "apps_script"),
@@ -133,6 +162,8 @@ object ManualProfile {
             if (f.required && value.isEmpty()) return ManualOutcome.Invalid(f.key, "${f.label} is required.")
         }
         val name = v["name"].orEmpty()
+        if (p.isSlipNet) return buildSlipNet(p, v, name)
+        if (p == ManualProtocol.MASTERDNS) return buildMasterDns(v, name)
         if (p == ManualProtocol.MHRV) return buildMhrv(v, name)
         if (p == ManualProtocol.STORMDNS) return buildStormDns(v, name)
         if (p == ManualProtocol.COTTENDNS) return buildCottenDns(v, name)
@@ -198,8 +229,62 @@ object ManualProfile {
                 ManualOutcome.Ok("ss://$b64@${hostForUri(address)}:$port#${enc(name)}", name)
             }
             ManualProtocol.WIREGUARD, ManualProtocol.AMNEZIAWG -> buildWireGuard(p, v, address, port, name)
-            ManualProtocol.MHRV, ManualProtocol.STORMDNS, ManualProtocol.COTTENDNS, ManualProtocol.DNS_CHANGER -> ManualOutcome.Invalid("name", "Profile settings are incomplete.")
+            else -> ManualOutcome.Invalid("name", "Profile settings are incomplete.")
         }
+    }
+
+    private val SLIPNET_SECTION_ORDER = listOf(
+        "Profile", "Server key", "DNS", "Resolver discovery", "Tunnel tuning", "SSH account", "SSH transport"
+    )
+
+    /** Section headings for the SlipNet form, keyed by field. */
+    private fun slipNetSection(key: String): String = when {
+        key == "name" || key == "domain" -> "Profile"
+        key == "publicKey" || key.startsWith("dnstt") -> "Server key"
+        key.startsWith("soar") -> "Resolver discovery"
+        key == "resolvers" || key == "dnsTransport" || key == "resolverMode" || key == "dnsPayloadSize" || key == "vaydnsRecordType" || key == "vaydnsMaxQname" -> "DNS"
+        key.startsWith("vaydns") || key == "keepAlive" || key == "tcpListenPort" -> "Tunnel tuning"
+        key == "sshTls" || key == "sshTlsSni" || key.startsWith("sshHttpProxy") || key.startsWith("sshWs") || key == "sshWebSocket" || key == "sshPayload" -> "SSH transport"
+        key.startsWith("ssh") -> "SSH account"
+        else -> ""
+    }
+
+    /** Builds an official SlipNet v30 profile and proves the in-app importer accepts it. */
+    private fun buildSlipNet(p: ManualProtocol, v: Map<String, String>, name: String): ManualOutcome {
+        val out = SlipNetManualProfile.build(p, v, name)
+        if (out is ManualOutcome.Ok && EngineProfiles.decodeSlipNet(out.raw) == null) {
+            return ManualOutcome.Invalid("domain", "The generated SlipNet profile was rejected by the importer. Check the fields and try again.")
+        }
+        return out
+    }
+
+    private fun buildMasterDns(v: Map<String, String>, name: String): ManualOutcome {
+        val domains = v["domains"].orEmpty().split(',', '\n', ';').map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        if (domains.isEmpty() || domains.any { !isValidHost(it) || it.contains(':') || it.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}$")) }) {
+            return ManualOutcome.Invalid("domains", "Enter tunnel domain names supplied by your MasterDNS server, not resolver IP addresses.")
+        }
+        val method = v["encryption"]?.toIntOrNull() ?: 1
+        if (method !in 0..5) return ManualOutcome.Invalid("encryption", "Choose an encryption method from 0 to 5.")
+        val key = v["encryptionKey"].orEmpty()
+        if (method != 0 && (key.isBlank() || key.contains('\n') || key.length > 1024)) {
+            return ManualOutcome.Invalid("encryptionKey", "Enter the shared encryption key from the MasterDNS server.")
+        }
+        val resolvers = v["resolvers"].orEmpty().split('\n', ',', ';').map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.distinct()
+        if (resolvers.isEmpty()) return ManualOutcome.Invalid("resolvers", "Add at least one DNS resolver.")
+        val port = v["listenPort"]?.toIntOrNull() ?: 18000
+        if (port !in 1024..65535) return ManualOutcome.Invalid("listenPort", "Local SOCKS5 port must be between 1024 and 65535.")
+        val workers = v["workers"].orEmpty().ifBlank { "4" }.toIntOrNull()
+        if (workers == null || workers !in 1..32) return ManualOutcome.Invalid("workers", "Workers must be between 1 and 32.")
+        val mtu = v["mtu"].orEmpty().ifBlank { "1280" }.toIntOrNull()
+        if (mtu == null || mtu !in 576..9000) return ManualOutcome.Invalid("mtu", "MTU must be between 576 and 9000.")
+        val log = v["logLevel"].orEmpty().ifBlank { "WARN" }.uppercase()
+        val profileName = name.ifBlank { "MasterDNS" }
+        val raw = MasterDnsProfiles.encode(profileName, domains.joinToString("\n"), method, key, resolvers.joinToString("\n"), port, workers, mtu, log)
+        // The same decoder the engine uses must accept the result, otherwise report the likely culprit.
+        if (MasterDnsProfiles.decode(raw) == null) {
+            return ManualOutcome.Invalid("resolvers", "Resolvers must be IPv4/IPv6 addresses (optionally :port or /CIDR), not host names.")
+        }
+        return ManualOutcome.Ok(raw, profileName)
     }
 
     private fun buildMhrv(v: Map<String, String>, name: String): ManualOutcome {
