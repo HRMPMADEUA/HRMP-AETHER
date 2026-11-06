@@ -239,6 +239,50 @@ object EngineProfiles {
     }
 
 
+    fun encodeCottenDns(name: String, clientConfig: String, resolvers: String): String =
+        pack("cottendns://", JSONObject()
+            .put("name", name.take(80))
+            .put("client_config", clientConfig)
+            .put("resolvers", resolvers))
+
+    private val cottenTransports = setOf("auto", "udp", "tcp", "dot", "doh", "doh3", "doq")
+    private val cottenModes = setOf("legacy", "cottenmax")
+
+    fun decodeCottenDns(raw: String): CottenDnsProfile? {
+        val wrapper = unpack(raw, "cottendns://") ?: return null
+        var config = wrapper.optString("client_config", "").trim()
+        val resolvers = wrapper.optString("resolvers", "").trim()
+        if (config.isBlank() || resolvers.isBlank()) return null
+        if (!config.contains(Regex("(?im)^\\s*DOMAINS\\s*="))) return null
+        if (!config.contains(Regex("(?im)^\\s*ENCRYPTION_KEY\\s*="))) return null
+        if (!config.contains(Regex("(?im)^\\s*DATA_ENCRYPTION_METHOD\\s*="))) return null
+        // Validate the options that change runtime behaviour; unknown values are rejected, never passed on.
+        val transport = Regex("(?im)^\\s*RESOLVER_TRANSPORT\\s*=\\s*\"([^\"]*)\"").find(config)?.groupValues?.get(1)?.lowercase()
+        if (transport != null && transport !in cottenTransports) return null
+        val mode = Regex("(?im)^\\s*TUNNEL_MODE\\s*=\\s*\"([^\"]*)\"").find(config)?.groupValues?.get(1)?.lowercase()
+        if (mode != null && mode !in cottenModes) return null
+        // DoH3/DoQ are CottenMax-only resolver transports.
+        if ((transport == "doh3" || transport == "doq") && mode != "cottenmax") return null
+        val port = Regex("(?im)^\\s*LISTEN_PORT\\s*=\\s*(\\d+)").find(config)?.groupValues?.get(1)?.toIntOrNull() ?: 18000
+        if (port !in 1024..65535) return null
+        // The local SOCKS5 listener is never exposed to the LAN and the scan always runs on start.
+        config = replaceTomlString(config, "LISTEN_IP", "127.0.0.1")
+        config = replaceTomlString(config, "PROTOCOL_TYPE", "SOCKS5")
+        config = replaceTomlString(config, "STARTUP_MODE", "resolvers")
+        val resolverLines = resolvers.lineSequence().map { it.trim() }
+            .filter { it.isNotEmpty() && !it.startsWith("#") }.toList()
+        if (resolverLines.isEmpty() || resolverLines.size > 100) return null
+        if (resolverLines.any { !isResolverEndpoint(it) }) return null
+        return CottenDnsProfile(
+            name = wrapper.optString("name", "CottenDNS").ifBlank { "CottenDNS" }.take(80),
+            clientConfig = config,
+            resolvers = resolverLines.joinToString("\n"),
+            host = resolverHost(resolverLines.first()),
+            port = port,
+            mode = mode ?: "legacy"
+        )
+    }
+
     fun encodeSniSpoof(name: String, baseProfile: String, connectIp: String, connectPort: Int, fakeSni: String, listenPort: Int = 40443): String =
         pack("snispoof://", JSONObject()
             .put("name", name.take(80))
@@ -403,6 +447,7 @@ object EngineProfiles {
 }
 
 data class MhrvProfile(val name: String, val configJson: String, val host: String, val socksPort: Int)
+data class CottenDnsProfile(val name: String, val clientConfig: String, val resolvers: String, val host: String, val port: Int, val mode: String)
 data class StormDnsProfile(val name: String, val clientConfig: String, val resolvers: String, val host: String, val port: Int)
 data class SniSpoofProfile(val name: String, val baseProfile: String, val connectIp: String, val connectPort: Int, val fakeSni: String, val listenPort: Int)
 
