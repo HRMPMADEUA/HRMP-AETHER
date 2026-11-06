@@ -2469,9 +2469,30 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         val scanResults = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         form.addView(tv("Profile name", 11f, Palette.muted, 0))
         form.addView(name, lp(MATCH, dpi(46), 4))
-        form.addView(tv("Configuration", 11f, Palette.muted, 0), lp(MATCH, WRAP, 10))
-        form.addView(raw, lp(MATCH, dpi(180), 4))
-        form.addView(ghostButton("Decode supported fields") { showDecodedProfileEditor(raw) }, lp(MATCH, dpi(42), 6))
+        val isTorSlipNet = EngineProfiles.decodeSlipNet(item.raw)?.protocol == "snowflake"
+        form.addView(
+            primaryButton(if (isTorSlipNet) "Tor & bridge settings" else "Edit decoded fields") { showDecodedProfileEditor(raw) },
+            lp(MATCH, dpi(46), 12)
+        )
+        // Raw configuration stays in the view tree (Save and Decode keep reading it) but is collapsed by default.
+        val rawBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
+        rawBox.addView(tv("Raw configuration — edit only if you know the format.", 10.5f, Palette.muted, 0), lp(MATCH, WRAP, 6))
+        rawBox.addView(raw, lp(MATCH, dpi(180), 4))
+        val advancedToggle = tv("ADVANCED  ›  raw configuration", 10.5f, Palette.cyan, 1).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dpi(14), 0, dpi(14), 0)
+            background = Palette.glass(this@MainActivity, 14f)
+            isClickable = true
+            contentDescription = "Advanced raw configuration"
+            pressable(0.97f)
+        }
+        advancedToggle.setOnClickListener {
+            val show = rawBox.visibility != View.VISIBLE
+            rawBox.visibility = if (show) View.VISIBLE else View.GONE
+            advancedToggle.text = if (show) "ADVANCED  ⌄  raw configuration" else "ADVANCED  ›  raw configuration"
+        }
+        form.addView(advancedToggle, lp(MATCH, dpi(42), 10))
+        form.addView(rawBox, lp(MATCH, WRAP, 4))
         form.addView(tv("DNS RESOLVERS • THIS PROFILE ONLY", 11f, Palette.cyan, 1), lp(MATCH, WRAP, 14))
         form.addView(tv("One IP or IP:port per line; an HTTPS DNS-query URL is also accepted. Scan checks DNS reachability, not the VPN tunnel. Long-press a result for DoT.", 10f, Palette.muted, 0), lp(MATCH, WRAP, 4))
         form.addView(resolverInput, lp(MATCH, dpi(88), 6))
@@ -2502,6 +2523,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         form.addView(scanResults, lp(MATCH, WRAP, 4))
         val dialog = dialogBuilder().setTitle("EDIT PROFILE").setView(ScrollView(this).apply { isFillViewport = true; addView(form) }).setNegativeButton("Cancel", null).setPositiveButton("Save", null).create()
         dialog.setOnShowListener {
+            styleEditorDialog(dialog)
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val updatedRaw = raw.text.toString().trim()
                 val engine = ConfigDetector.detect(updatedRaw)
@@ -2569,39 +2591,202 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         rebuildServerList(-1); toast("Profile duplicated.")
     }
 
+    /** Rounded dark-neon window for the profile editors; buttons follow the TIREXNET accent. */
+    private fun styleEditorDialog(d: AlertDialog) {
+        d.window?.setBackgroundDrawable(
+            GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(Palette.bg1, Palette.bg0)).apply {
+                cornerRadius = dp(26f)
+                setStroke(dpi(1), Palette.strokeActive)
+            }
+        )
+        listOf(AlertDialog.BUTTON_POSITIVE, AlertDialog.BUTTON_NEGATIVE, AlertDialog.BUTTON_NEUTRAL).forEach { b ->
+            d.getButton(b)?.setTextColor(if (b == AlertDialog.BUTTON_POSITIVE) Palette.cyan else Palette.muted)
+        }
+    }
+
+    /** Chip selector for fixed-choice fields. A current value outside [choices] is kept as an extra chip so it is never lost. */
+    private fun choiceChipRow(choices: List<String>, current: String, onPick: (String) -> Unit): View {
+        val scroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        scroll.addView(row, FrameLayout.LayoutParams(WRAP, WRAP))
+        val all = if (current.isNotEmpty() && current !in choices) listOf(current) + choices else choices
+        for (c in all) {
+            row.addView(chip(if (c.isEmpty()) "none" else c, c == current) { onPick(c) }, lp(WRAP, WRAP, 0, 0, 0, 8))
+        }
+        return scroll
+    }
+
+    private val torBridgeModes = listOf("Built-in Snowflake", "Direct", "Snowflake AMP", "Obfs4", "Meek Azure", "WebTunnel", "Smart", "Custom")
+
+    private fun inferTorMode(bridges: String): String = when (bridges.trim()) {
+        "" -> "Built-in Snowflake"
+        "DIRECT" -> "Direct"
+        "SNOWFLAKE_AMP" -> "Snowflake AMP"
+        "SMART" -> "Smart"
+        else -> when {
+            bridges.lineSequence().any { it.trim().startsWith("obfs4 ", true) } -> "Obfs4"
+            bridges.lineSequence().any { it.trim().startsWith("meek_lite ", true) } -> "Meek Azure"
+            bridges.lineSequence().any { it.trim().startsWith("webtunnel ", true) } -> "WebTunnel"
+            else -> "Custom"
+        }
+    }
+
+    /** null = the chosen preset needs a bridge line that is missing or does not match the preset. */
+    private fun torBridgeValue(mode: String, text: String): String? {
+        fun has(prefix: String) = text.lineSequence().any { it.trim().startsWith(prefix, true) }
+        return when (mode) {
+            "Built-in Snowflake" -> ""
+            "Direct" -> "DIRECT"
+            "Snowflake AMP" -> "SNOWFLAKE_AMP"
+            "Smart" -> "SMART"
+            "Obfs4" -> text.takeIf { has("obfs4 ") }
+            "Meek Azure" -> text.takeIf { has("meek_lite ") }
+            "WebTunnel" -> text.takeIf { has("webtunnel ") }
+            else -> text.takeIf { it.isNotBlank() }
+        }
+    }
+
+    /**
+     * Tor/Snowflake SlipNet editor. Only the bridge field of the share URI is rewritten
+     * (through EngineProfiles.updateSlipNetTorBridges); every other field stays byte-for-byte as it was.
+     */
+    private fun showTorProfileEditor(rawTarget: EditText) {
+        val raw = rawTarget.text.toString().trim()
+        val profile = EngineProfiles.decodeSlipNet(raw)
+        // Encrypted, bundle and pre-v12 links cannot be rewritten safely, so their raw data is left untouched.
+        if (profile == null || profile.protocol != "snowflake" || profile.encrypted || profile.bundle ||
+            EngineProfiles.updateSlipNetTorBridges(raw, profile.torBridgeLines) == null
+        ) {
+            dialogBuilder().setTitle("Tor settings unavailable")
+                .setMessage("This Tor profile is encrypted or uses a format that cannot be rewritten safely. The raw configuration is left unchanged.")
+                .setPositiveButton("OK", null).show()
+            return
+        }
+        var mode = inferTorMode(profile.torBridgeLines)
+        val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(14), dpi(8), dpi(14), dpi(8)) }
+        val bridgeInput = EditText(this).apply {
+            hint = "obfs4 …\nwebtunnel …\nmeek_lite …"
+            setText(if (profile.torBridgeLines in setOf("DIRECT", "SNOWFLAKE_AMP", "SMART")) "" else profile.torBridgeLines)
+            textSize = 12f; minLines = 4; maxLines = 8; gravity = Gravity.TOP or Gravity.START
+            setTextColor(Palette.text); setHintTextColor(Palette.dim)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            background = fieldBackground(false)
+            setPadding(dpi(14), dpi(10), dpi(14), dpi(10))
+        }
+        val card = GlassCard(this, 18f, pad = 12)
+        form.addView(card, lp(MATCH, WRAP))
+        fun rebuild() {
+            card.removeAllViews()
+            card.addView(tv("TOR BRIDGES", 8.5f, Palette.cyan, 1).apply { letterSpacing = 0.18f })
+            card.addView(tv("Bridge mode", 11f, Palette.muted, 1), lp(MATCH, WRAP, 12))
+            card.addView(choiceChipRow(torBridgeModes, mode) { mode = it; rebuild() }, lp(MATCH, WRAP, 6))
+            if (mode == "Obfs4" || mode == "Meek Azure" || mode == "WebTunnel" || mode == "Custom") {
+                card.addView(tv("Bridge lines — one per line", 11f, Palette.muted, 1), lp(MATCH, WRAP, 12))
+                (bridgeInput.parent as? ViewGroup)?.removeView(bridgeInput)
+                card.addView(bridgeInput, lp(MATCH, dpi(116), 6))
+                card.addView(ghostButton("Paste from clipboard") {
+                    val clip = runCatching { (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip }.getOrNull()
+                    val pasted = runCatching {
+                        if (clip != null && clip.itemCount > 0) clip.getItemAt(0).coerceToText(this@MainActivity).toString().trim() else ""
+                    }.getOrDefault("")
+                    if (pasted.isBlank()) toast("Clipboard has no Tor bridge lines.") else bridgeInput.setText(pasted)
+                }, lp(MATCH, dpi(42), 8))
+            } else {
+                card.addView(tv(
+                    when (mode) {
+                        "Built-in Snowflake" -> "Uses SlipNet's built-in Snowflake bridges."
+                        "Direct" -> "Connects to Tor without a bridge."
+                        "Snowflake AMP" -> "Snowflake rendezvous through AMP cache."
+                        else -> "Automatic bridge selection."
+                    }, 10.5f, Palette.muted, 0
+                ), lp(MATCH, WRAP, 10))
+            }
+        }
+        rebuild()
+        val dialog = dialogBuilder().setTitle("TOR & BRIDGE SETTINGS")
+            .setView(ScrollView(this).apply { isFillViewport = true; addView(form) })
+            .setNegativeButton("Cancel", null).setPositiveButton("Apply", null).create()
+        dialog.setOnShowListener {
+            styleEditorDialog(dialog)
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val value = torBridgeValue(mode, bridgeInput.text.toString().trim())
+                if (value == null) {
+                    bridgeInput.error = "Paste a valid bridge line for this mode"
+                    toast("برای Obfs4، Meek، WebTunnel یا Custom باید bridge line معتبر وارد کنی.")
+                    return@setOnClickListener
+                }
+                val updated = EngineProfiles.updateSlipNetTorBridges(raw, value)
+                if (updated == null) { toast("این پروفایل Tor قابل ویرایش امن نیست؛ اطلاعات خام تغییر نکرد."); return@setOnClickListener }
+                rawTarget.setText(updated)
+                dialog.dismiss()
+                toast("Tor settings applied. Review and save the profile.")
+            }
+        }
+        dialog.show()
+    }
+
     private fun showDecodedProfileEditor(rawTarget: EditText) {
+        // Tor/Snowflake SlipNet profiles have their own editor (bridge settings live here, not in the generic form).
+        if (EngineProfiles.decodeSlipNet(rawTarget.text.toString())?.protocol == "snowflake") { showTorProfileEditor(rawTarget); return }
         val decoded = ManualProfileDecoder.decode(rawTarget.text.toString())
-        if (decoded == null) { toast("This format has no safe field decoder. Use the raw configuration editor."); return }
+        if (decoded == null) { toast("This format has no safe field decoder. Use Advanced › raw configuration."); return }
         if (!decoded.editableWithoutDroppingUnknownFields) {
             dialogBuilder().setTitle("Raw-only profile").setMessage(decoded.note.ifBlank { "Unknown fields are present. Raw editing preserves them more safely." }).setPositiveButton("OK", null).show()
             return
         }
         val values = decoded.values.toMutableMap()
+        val specs = ManualProfile.fields(decoded.protocol)
         val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(14), dpi(8), dpi(14), dpi(8)) }
         val editors = linkedMapOf<String, EditText>()
-        ManualProfile.fields(decoded.protocol).forEach { spec ->
-            if (spec.showWhen != null && !spec.showWhen.invoke(values)) return@forEach
-            form.addView(tv(spec.label + if (spec.required) " *" else "", 10.5f, Palette.muted, 0), lp(MATCH, WRAP, 8))
-            val editor = EditText(this).apply {
-                hint = spec.hint; setText(values[spec.key].orEmpty()); textSize = 12f
-                setTextColor(Palette.text); setHintTextColor(Palette.dim)
-                setSingleLine(spec.kind != FieldKind.MULTILINE)
-                if (spec.kind == FieldKind.MULTILINE) { minLines = 2; maxLines = 4; gravity = Gravity.TOP }
-                inputType = when (spec.kind) {
-                    FieldKind.NUMBER -> InputType.TYPE_CLASS_NUMBER
-                    FieldKind.SECRET -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-                    FieldKind.MULTILINE -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-                    else -> InputType.TYPE_CLASS_TEXT
+
+        // Fixed-value fields are chips and write straight into `values`; typed fields are synced from their EditText.
+        // Rebuilding re-evaluates showWhen, so dependent fields appear/disappear and hidden values stay preserved.
+        fun rebuild() {
+            editors.forEach { (key, edit) -> values[key] = edit.text.toString() }
+            form.removeAllViews(); editors.clear()
+            var card: LinearLayout? = null
+            var lastSection = "\u0000"
+            for (spec in specs) {
+                val cond = spec.showWhen
+                if (cond != null && !cond(values)) continue
+                if (card == null || (spec.section.isNotEmpty() && spec.section != lastSection)) {
+                    if (spec.section.isNotEmpty()) lastSection = spec.section
+                    card = GlassCard(this, 18f, pad = 12)
+                    form.addView(card, lp(MATCH, WRAP, 10))
+                    if (spec.section.isNotEmpty()) card.addView(tv(spec.section.uppercase(), 8.5f, Palette.cyan, 1).apply { letterSpacing = 0.18f })
                 }
-                background = fieldBackground(false); setPadding(dpi(10), dpi(8), dpi(10), dpi(8))
+                val target = card!!
+                target.addView(tv(spec.label + if (spec.required) " *" else "", 10.5f, Palette.muted, 1), lp(MATCH, WRAP, 10))
+                if (spec.kind == FieldKind.CHOICE) {
+                    target.addView(choiceChipRow(spec.choices, values[spec.key].orEmpty()) { picked ->
+                        values[spec.key] = picked
+                        rebuild()
+                    }, lp(MATCH, WRAP, 6))
+                } else {
+                    val editor = EditText(this).apply {
+                        hint = spec.hint; setText(values[spec.key].orEmpty()); textSize = 13f
+                        setTextColor(Palette.text); setHintTextColor(Palette.dim)
+                        setSingleLine(spec.kind != FieldKind.MULTILINE)
+                        if (spec.kind == FieldKind.MULTILINE) { minLines = 2; maxLines = 4; gravity = Gravity.TOP }
+                        inputType = when (spec.kind) {
+                            FieldKind.NUMBER -> InputType.TYPE_CLASS_NUMBER
+                            FieldKind.SECRET -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                            FieldKind.MULTILINE -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                            else -> InputType.TYPE_CLASS_TEXT
+                        }
+                        background = fieldBackground(false); setPadding(dpi(12), dpi(8), dpi(12), dpi(8))
+                    }
+                    editors[spec.key] = editor
+                    target.addView(editor, lp(MATCH, if (spec.kind == FieldKind.MULTILINE) dpi(88) else dpi(46), 6))
+                }
             }
-            editors[spec.key] = editor
-            form.addView(editor, lp(MATCH, if (spec.kind == FieldKind.MULTILINE) dpi(84) else dpi(44), 3))
         }
+        rebuild()
         val scroller = ScrollView(this).apply { isFillViewport = true; addView(form) }
         val dialog = dialogBuilder().setTitle("EDIT ${decoded.protocol.label.uppercase(Locale.US)} FIELDS").setView(scroller)
             .setNegativeButton("Cancel", null).setPositiveButton("Apply", null).create()
         dialog.setOnShowListener {
+            styleEditorDialog(dialog)
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 editors.forEach { (key, edit) -> values[key] = edit.text.toString() }
                 when (val built = ManualProfile.build(decoded.protocol, values)) {
