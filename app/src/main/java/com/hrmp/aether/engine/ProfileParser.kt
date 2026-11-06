@@ -50,6 +50,12 @@ object ProfileParser {
                     host = profile?.host.orEmpty()
                     port = 53
                 }
+                engine == ConfigEngine.MASTERDNS -> {
+                    val profile = MasterDnsProfiles.decode(raw)
+                    name = profile?.name.orEmpty().ifBlank { "MasterDNS" }
+                    host = profile?.host.orEmpty()
+                    port = 53
+                }
                 engine == ConfigEngine.DNS_CHANGER -> {
                     name = DnsChangerProfiles.decode(raw)?.name.orEmpty().ifBlank { "DNS Profile" }
                     host = ""
