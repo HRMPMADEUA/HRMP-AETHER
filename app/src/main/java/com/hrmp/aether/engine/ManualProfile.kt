@@ -8,7 +8,7 @@ import java.nio.charset.StandardCharsets
 enum class ManualProtocol(val label: String) {
     VLESS("VLESS"), VMESS("VMess"), TROJAN("Trojan"), SHADOWSOCKS("Shadowsocks"),
     WIREGUARD("WireGuard"), AMNEZIAWG("AmneziaWG"),
-    MHRV("MHRV"), STORMDNS("DNS Tunnel"), DNS_CHANGER("DNS Changer")
+    MHRV("MHRV"), STORMDNS("DNS Tunnel"), COTTENDNS("CottenDNS"), DNS_CHANGER("DNS Changer")
 }
 
 enum class FieldKind { TEXT, NUMBER, SECRET, CHOICE, MULTILINE }
@@ -91,6 +91,17 @@ object ManualProfile {
                 FieldSpec("resolvers", "DNS resolvers", FieldKind.MULTILINE, required = true, hint = "One IP or IP:port per line", default = "1.1.1.1:53\n8.8.8.8:53"),
                 FieldSpec("listenPort", "Local SOCKS5 port", FieldKind.NUMBER, required = true, hint = "18000", default = "18000")
             )
+            ManualProtocol.COTTENDNS -> listOf(
+                name,
+                FieldSpec("domains", "Tunnel domains", FieldKind.MULTILINE, required = true, hint = "One domain per line; must match the CottenDNS server"),
+                FieldSpec("encryption", "Data encryption (legacy mode)", FieldKind.CHOICE, choices = listOf("0", "1", "2", "3", "4", "5"), default = "3"),
+                FieldSpec("encryptionKey", "Shared encryption key", FieldKind.SECRET, required = true),
+                FieldSpec("resolvers", "DNS resolvers", FieldKind.MULTILINE, required = true, hint = "One IP or IP:port per line", default = "1.1.1.1:53\n8.8.8.8:53"),
+                FieldSpec("tunnelMode", "Tunnel mode", FieldKind.CHOICE, choices = listOf("legacy", "cottenmax"), default = "legacy"),
+                FieldSpec("resolverTransport", "Resolver transport", FieldKind.CHOICE, choices = listOf("auto", "udp", "tcp", "dot", "doh", "doh3", "doq"), default = "auto"),
+                FieldSpec("preset", "Config preset", FieldKind.CHOICE, choices = listOf("speed", "survival", "tcp-survival", "low-bandwidth"), default = "speed"),
+                FieldSpec("listenPort", "Local SOCKS5 port", FieldKind.NUMBER, required = true, hint = "18000", default = "18000")
+            )
             ManualProtocol.DNS_CHANGER -> listOf(
                 name,
                 FieldSpec("ipv4Primary", "IPv4 Primary", hint = "1.1.1.1", default = "1.1.1.1"),
@@ -124,6 +135,7 @@ object ManualProfile {
         val name = v["name"].orEmpty()
         if (p == ManualProtocol.MHRV) return buildMhrv(v, name)
         if (p == ManualProtocol.STORMDNS) return buildStormDns(v, name)
+        if (p == ManualProtocol.COTTENDNS) return buildCottenDns(v, name)
         if (p == ManualProtocol.DNS_CHANGER) {
             val ipv4Primary = v["ipv4Primary"].orEmpty()
             val ipv4Secondary = v["ipv4Secondary"].orEmpty()
@@ -186,7 +198,7 @@ object ManualProfile {
                 ManualOutcome.Ok("ss://$b64@${hostForUri(address)}:$port#${enc(name)}", name)
             }
             ManualProtocol.WIREGUARD, ManualProtocol.AMNEZIAWG -> buildWireGuard(p, v, address, port, name)
-            ManualProtocol.MHRV, ManualProtocol.STORMDNS, ManualProtocol.DNS_CHANGER -> ManualOutcome.Invalid("name", "Profile settings are incomplete.")
+            ManualProtocol.MHRV, ManualProtocol.STORMDNS, ManualProtocol.COTTENDNS, ManualProtocol.DNS_CHANGER -> ManualOutcome.Invalid("name", "Profile settings are incomplete.")
         }
     }
 
@@ -222,6 +234,42 @@ object ManualProfile {
         if (snis.isNotEmpty()) config.put("sni_hosts", org.json.JSONArray().apply { snis.forEach { put(it) } })
         val profileName = name.ifBlank { "MHRV" }
         return ManualOutcome.Ok(EngineProfiles.encodeMhrv(profileName, config), profileName)
+    }
+
+    private fun buildCottenDns(v: Map<String, String>, name: String): ManualOutcome {
+        val domains = v["domains"].orEmpty().split(',', '\n', ';').map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        if (domains.isEmpty() || domains.any { !isValidHost(it) || it.contains(':') || it.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}$")) }) return ManualOutcome.Invalid("domains", "Enter tunnel domain names supplied by your CottenDNS server, not resolver IP addresses.")
+        val key = v["encryptionKey"].orEmpty()
+        if (key.isBlank() || key.contains('\n') || key.length > 512) return ManualOutcome.Invalid("encryptionKey", "Enter the shared encryption key from the CottenDNS server.")
+        val encryption = v["encryption"]?.toIntOrNull() ?: 3
+        if (encryption !in 0..5) return ManualOutcome.Invalid("encryption", "Choose an encryption method from 0 to 5.")
+        val resolvers = v["resolvers"].orEmpty().lineSequence().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.toList()
+        if (resolvers.isEmpty() || resolvers.any { !EngineProfiles.isResolverEndpoint(it) }) return ManualOutcome.Invalid("resolvers", "Enter valid IPv4 or IPv6 DNS resolver addresses, optionally followed by :port.")
+        val mode = v["tunnelMode"].orEmpty().ifBlank { "legacy" }
+        if (mode !in setOf("legacy", "cottenmax")) return ManualOutcome.Invalid("tunnelMode", "Choose Legacy or CottenMax.")
+        val transport = v["resolverTransport"].orEmpty().ifBlank { "auto" }
+        if (transport !in setOf("auto", "udp", "tcp", "dot", "doh", "doh3", "doq")) return ManualOutcome.Invalid("resolverTransport", "Choose a supported resolver transport.")
+        if ((transport == "doh3" || transport == "doq") && mode != "cottenmax") return ManualOutcome.Invalid("resolverTransport", "HTTP/3 and DoQ resolver transports need CottenMax mode.")
+        val preset = v["preset"].orEmpty().ifBlank { "speed" }
+        if (preset !in setOf("speed", "survival", "tcp-survival", "low-bandwidth")) return ManualOutcome.Invalid("preset", "Choose a supported preset.")
+        val listenPort = v["listenPort"]?.toIntOrNull() ?: 18000
+        if (listenPort !in 1024..65535) return ManualOutcome.Invalid("listenPort", "Local SOCKS5 port must be between 1024 and 65535.")
+        fun tomlString(value: String) = value.replace("\\", "\\\\").replace("\"", "\\\"")
+        val domainArray = domains.joinToString(", ") { "\"${tomlString(it)}\"" }
+        val config = """
+DOMAINS = [$domainArray]
+DATA_ENCRYPTION_METHOD = $encryption
+ENCRYPTION_KEY = "${tomlString(key)}"
+PROTOCOL_TYPE = "SOCKS5"
+LISTEN_IP = "127.0.0.1"
+LISTEN_PORT = $listenPort
+STARTUP_MODE = "resolvers"
+CONFIG_PRESET = "$preset"
+RESOLVER_TRANSPORT = "$transport"
+TUNNEL_MODE = "$mode"
+""".trim()
+        val profileName = name.ifBlank { "CottenDNS" }
+        return ManualOutcome.Ok(EngineProfiles.encodeCottenDns(profileName, config, resolvers.joinToString("\n")), profileName)
     }
 
     private fun buildStormDns(v: Map<String, String>, name: String): ManualOutcome {
