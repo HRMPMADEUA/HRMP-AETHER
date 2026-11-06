@@ -1,6 +1,6 @@
 package com.tirexnet.app.engine
 
-enum class ConfigEngine { XRAY, WIREGUARD, AMNEZIAWG, OPENVPN, MHRV, DNS_TUNNEL, COTTENDNS, DNS_CHANGER, SNI_SPOOF, SLIPNET, UNKNOWN }
+enum class ConfigEngine { XRAY, WIREGUARD, AMNEZIAWG, OPENVPN, MHRV, DNS_TUNNEL, COTTENDNS, MASTERDNS, DNS_CHANGER, SNI_SPOOF, SLIPNET, UNKNOWN }
 
 object ConfigDetector {
     fun detect(raw: String): ConfigEngine {
@@ -14,6 +14,7 @@ object ConfigDetector {
         if (lower.startsWith("snispoof://")) return if (EngineProfiles.decodeSniSpoof(s) != null) ConfigEngine.SNI_SPOOF else ConfigEngine.UNKNOWN
         if (lower.startsWith("mhrv-rs://")) return if (EngineProfiles.decodeMhrv(s) != null) ConfigEngine.MHRV else ConfigEngine.UNKNOWN
         if (lower.startsWith("cottendns://")) return if (EngineProfiles.decodeCottenDns(s) != null) ConfigEngine.COTTENDNS else ConfigEngine.UNKNOWN
+        if (lower.startsWith("masterdns://")) return if (MasterDnsProfiles.decode(s) != null) ConfigEngine.MASTERDNS else ConfigEngine.UNKNOWN
         if (lower.startsWith("stormdns://")) return if (EngineProfiles.decodeStormDns(s) != null) ConfigEngine.DNS_TUNNEL else ConfigEngine.UNKNOWN
         if (lower.startsWith("vless://") || lower.startsWith("vmess://") ||
             lower.startsWith("trojan://") || lower.startsWith("ss://") ||
