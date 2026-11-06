@@ -231,6 +231,7 @@ class XrayVpnService : VpnService() {
         MhrvEngine.stop()
         StormDnsEngine.stop()
         CottenDnsEngine.stop()
+        MasterDnsEngine.stop()
     }
 
     private fun stopTunnel() {
