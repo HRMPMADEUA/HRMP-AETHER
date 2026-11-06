@@ -268,154 +268,94 @@ class TirexApplication : Application() {
 }
 KOTLIN
 
-# Patch the native SlipNet launcher to accept password-protected bundle deep links.
+# Keep encrypted-bundle support in the unused upstream UI implementation.
 python3 - "$APP/src/main/java/app/slipnet/presentation/MainActivity.kt" <<'PYSN'
 from pathlib import Path
 import sys
 
 path = Path(sys.argv[1])
 source = path.read_text(encoding="utf-8")
-old_uri = 'uri.startsWith("slipnet://") || uri.startsWith("slipnet-enc://") || uri.startsWith("vless://")'
-new_uri = 'uri.startsWith("slipnet://") || uri.startsWith("slipnet-enc://") || uri.startsWith("slipnet-bundle-enc://") || uri.startsWith("vless://")'
-if new_uri not in source:
-    count = source.count(old_uri)
+
+old = 'uri.startsWith("slipnet://") || uri.startsWith("slipnet-enc://") || uri.startsWith("vless://")'
+new = 'uri.startsWith("slipnet://") || uri.startsWith("slipnet-enc://") || uri.startsWith("slipnet-bundle-enc://") || uri.startsWith("vless://")'
+
+if new not in source:
+    count = source.count(old)
     if count != 1:
-        raise SystemExit(f"Expected one SlipNet deep-link URI anchor; found {count}.")
-    source = source.replace(old_uri, new_uri, 1)
+        raise SystemExit(f"Expected one SlipNet URI anchor; found {count}.")
+    source = source.replace(old, new, 1)
+
 if "slipnet-bundle-enc://" not in source:
-    raise SystemExit("Encrypted SlipNet bundle scheme was not added to deep-link handling.")
+    raise SystemExit("Encrypted SlipNet bundle scheme is missing.")
+
 path.write_text(source, encoding="utf-8")
 PYSN
 
-# Patch TIREXNET so SlipNet profiles/settings launch the included native runtime.
-python3 - "$APP/src/main/java/com/hrmp/aether/MainActivity.kt" <<'PYT'
+
+# Notifications return to TIREXNET's main screen.
+python3 - "$APP/src/main/java/app/slipnet/service/NotificationHelper.kt" <<'PYNOTIFY'
 from pathlib import Path
-import re, sys
-p = Path(sys.argv[1])
-s = p.read_text()
+import sys
 
-def once(old, new, label):
-    global s
-    n = s.count(old)
-    if n != 1:
-        raise SystemExit(f"Expected exactly one {label} anchor; found {n}. No safe patch applied.")
-    s = s.replace(old, new, 1)
+path = Path(sys.argv[1])
+source = path.read_text(encoding="utf-8")
 
-# MainActivity is a legacy android.app.Activity. Use a Hilt application
-# entry point instead of @AndroidEntryPoint field injection, preserving the host.
-once('    private val prefs by lazy { getSharedPreferences("tirexnet", MODE_PRIVATE) }',
-     '    private val prefs by lazy { getSharedPreferences("tirexnet", MODE_PRIVATE) }\n\n'
-     '    private val slipNetConnectionManager: app.slipnet.service.VpnConnectionManager by lazy {\n'
-     '        dagger.hilt.android.EntryPointAccessors.fromApplication(\n'
-     '            applicationContext, com.tirexnet.app.TirexSlipNetEntryPoint::class.java\n'
-     '        ).slipNetConnectionManager()\n'
-     '    }',
-     'SlipNet manager application entry point')
+old = "import app.slipnet.presentation.MainActivity"
+new = "import com.tirexnet.app.MainActivity"
 
-app_root = p.parents[6]
-entry_point = app_root / 'src/main/java/com/tirexnet/app/TirexSlipNetEntryPoint.kt'
-entry_point.parent.mkdir(parents=True, exist_ok=True)
-entry_point.write_text("""package com.tirexnet.app
+if new not in source:
+    count = source.count(old)
+    if count != 1:
+        raise SystemExit(f"Expected one notification Activity import; found {count}.")
+    source = source.replace(old, new, 1)
 
+path.write_text(source, encoding="utf-8")
+PYNOTIFY
+
+
+# Widget VPN permission requests return to TIREXNET.
+python3 - "$APP/src/main/java/app/slipnet/widget/VpnWidgetToggleReceiver.kt" <<'PYWIDGET'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text(encoding="utf-8")
+
+old = "import app.slipnet.presentation.MainActivity"
+new = "import com.tirexnet.app.MainActivity"
+
+if new not in source:
+    count = source.count(old)
+    if count != 1:
+        raise SystemExit(f"Expected one widget Activity import; found {count}.")
+    source = source.replace(old, new, 1)
+
+path.write_text(source, encoding="utf-8")
+PYWIDGET
+
+
+# Hilt bridge: access native SlipNet services without launching its UI.
+cat > "$APP/src/main/java/com/tirexnet/app/TirexSlipNetEntryPoint.kt" <<'KOTLIN'
+package com.tirexnet.app
+
+import app.slipnet.data.export.ConfigImporter
+import app.slipnet.data.local.datastore.PreferencesDataStore
+import app.slipnet.domain.repository.ProfileRepository
 import app.slipnet.service.VpnConnectionManager
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 
-/** Accesses SlipNet's singleton service manager from TIREXNET's legacy Activity. */
 @EntryPoint
 @InstallIn(SingletonComponent::class)
 interface TirexSlipNetEntryPoint {
     fun slipNetConnectionManager(): VpnConnectionManager
+    fun slipNetConfigImporter(): ConfigImporter
+    fun slipNetProfileRepository(): ProfileRepository
+    fun slipNetPreferences(): PreferencesDataStore
 }
-""", encoding='utf-8')
+KOTLIN
 
-once('settingRow(g1, Icon.GLOBE, "SlipNet protocols & settings", "DNS tunnels, resolver pools, SSH chains, Slipstream, NaiveProxy and Tor", "Open") { showSlipNetDialog() }',
-     'settingRow(g1, Icon.GLOBE, "SlipNet • Advanced Settings", "Soar, DNS pools, SSH, Slipstream, NaiveProxy, DoH and Tor", "Open") { openSlipNetSettings() }\n        settingRow(g1, Icon.GLOBE, "SlipNet • Profiles, chains & scanner", "Manage profiles, chains, DNS resolver tests and diagnostics", "Manage") { openSlipNetWorkspace() }\n        settingRow(g1, Icon.GLOBE, "SlipNet license & source", "AGPL-3.0 • source code and no-warranty notice", "View") { startActivity(Intent(this, SlipNetLicenseActivity::class.java)) }',
-     'SlipNet settings shortcut and license notice')
-once('''        if (engine == ConfigEngine.SLIPNET) {
-            showSlipNetRuntimeNotice()
-            return
-        }''',
-     '''        if (engine == ConfigEngine.SLIPNET) {
-            openSlipNetRuntime(raw)
-            return
-        }''', 'SlipNet connect routing')
-once('            ConfigEngine.SLIPNET -> showSlipNetRuntimeNotice()',
-     '            ConfigEngine.SLIPNET -> openSlipNetRuntime(pendingRaw)',
-     'SlipNet engine dispatch')
-once('''                desc = if (ConfigDetector.detect(currentConfig()) == ConfigEngine.SLIPNET)
-                    "SlipNet profile imported. Configure it inside TIREXNET; its native tunnel runtime is not packaged in this build yet."
-                else "Choose ALL or a country, then slide to connect."''',
-     '''                desc = if (ConfigDetector.detect(currentConfig()) == ConfigEngine.SLIPNET)
-                    "SlipNet profile detected. Open its full native tunnel screen to configure and connect."
-                else "Choose ALL or a country, then slide to connect."''',
-     'SlipNet home status text')
-once('        ConfigEngine.SLIPNET -> "SLIPNET • RUNTIME REQUIRED"',
-     '        ConfigEngine.SLIPNET -> "SLIPNET"', 'SlipNet engine label')
+test -s "$APP/src/main/java/com/tirexnet/app/TirexSlipNetRuntime.kt"
 
-# Include SlipNet in region selection just like other engines.
-s = s.replace('it.engine !in setOf(ConfigEngine.SLIPNET, ConfigEngine.DNS_CHANGER)',
-              'it.engine != ConfigEngine.DNS_CHANGER')
-
-# Include the real SlipNet VPN manager in the connection truth source.
-once('''        val real = XrayVpnService.isActive || WgTunnelEngine.isActive || DnsChangerVpnService.isActive''',
-     '''        val slipNetConnected = runCatching {
-            slipNetConnectionManager.connectionState.value is app.slipnet.domain.model.ConnectionState.Connected
-        }.getOrDefault(false)
-        val real = XrayVpnService.isActive || WgTunnelEngine.isActive || DnsChangerVpnService.isActive || slipNetConnected''',
-     'SlipNet connection reconciliation')
-
-# Stop the SlipNet foreground VPN service when the user disconnects from TIREXNET.
-once('''        var issued = false
-        if (engine == "WIREGUARD"''',
-     '''        var issued = false
-        if (engine == "SLIPNET" || runCatching {
-                val st = slipNetConnectionManager.connectionState.value
-                st is app.slipnet.domain.model.ConnectionState.Connected ||
-                    st is app.slipnet.domain.model.ConnectionState.Connecting
-            }.getOrDefault(false)) {
-            issued = true
-            slipNetConnectionManager.disconnect()
-        }
-        if (engine == "WIREGUARD"''', 'SlipNet disconnect integration')
-
-# Replace the old "runtime not included" dialog with in-app activity launchers.
-start = s.find('    private fun showSlipNetRuntimeNotice() {')
-end = s.find('    private fun startAuxiliaryProxyEngine(', start)
-if start < 0 or end < 0:
-    raise SystemExit('Could not locate SlipNet runtime notice boundaries.')
-replacement = '''    private fun showSlipNetRuntimeNotice() {
-        openSlipNetRuntime(currentConfig())
-    }
-
-    private fun openSlipNetRuntime(raw: String) {
-        val value = raw.trim()
-        if (value.isBlank()) {
-            toast("Select a SlipNet profile first.")
-            showTab(1)
-            return
-        }
-        startActivity(Intent(this, SlipNetConnectActivity::class.java)
-            .putExtra(SlipNetConnectActivity.EXTRA_CONFIG, value)
-            .putExtra(SlipNetConnectActivity.EXTRA_PROFILE_NAME, selectedItem()?.name.orEmpty()))
-    }
-
-    private fun openSlipNetSettings() {
-        startActivity(Intent(this, SlipNetSettingsActivity::class.java))
-    }
-
-    private fun openSlipNetWorkspace() {
-        startActivity(Intent(this, SlipNetConnectActivity::class.java))
-    }
-
-    private fun showSlipNetLicenseNotice() {
-        startActivity(Intent(this, SlipNetLicenseActivity::class.java))
-    }
-
-'''
-s = s[:start] + replacement + s[end:]
-p.write_text(s)
-PYT
-
-echo "SlipNet source integration staged successfully."
+echo "SlipNet runtime integrated behind the TIREXNET UI."
