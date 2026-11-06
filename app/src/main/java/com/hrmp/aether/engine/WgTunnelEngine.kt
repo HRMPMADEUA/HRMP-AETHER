@@ -200,9 +200,9 @@ object WgTunnelEngine {
     private fun applyProfileDns(raw: String, dns: List<String>): String {
         val line = "DNS = ${dns.joinToString(", ")}"
         val pattern = Regex("(?im)^\\s*DNS\\s*=.*$")
-        if (pattern.containsMatchIn(raw)) return pattern.replace(raw, line, 1)
+        if (pattern.containsMatchIn(raw)) return pattern.replaceFirst(raw, line)
         val header = Regex("(?im)^\\s*\\[Interface]\\s*$")
-        return if (header.containsMatchIn(raw)) header.replace(raw, "[Interface]\n$line", 1) else raw
+        return if (header.containsMatchIn(raw)) header.replaceFirst(raw, "[Interface]\n$line") else raw
     }
 
     private fun buildConfig(
