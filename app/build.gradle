@@ -38,16 +38,14 @@ android {
         release {
             def keystorePath = System.getenv('TIREXNET_KEYSTORE_PATH')
 
-            if (keystorePath == null || keystorePath.trim().isEmpty()) {
-                throw new GradleException(
-                    'TIREXNET release keystore path is missing.'
-                )
+            // Only configure the release key when it is supplied (GitHub Secrets in CI).
+            // Without it, assembleDebug still works and release stays unsigned.
+            if (keystorePath != null && !keystorePath.trim().isEmpty()) {
+                storeFile file(keystorePath)
+                storePassword System.getenv('TIREXNET_STORE_PASSWORD')
+                keyAlias System.getenv('TIREXNET_KEY_ALIAS')
+                keyPassword System.getenv('TIREXNET_KEY_PASSWORD')
             }
-
-            storeFile file(keystorePath)
-            storePassword System.getenv('TIREXNET_STORE_PASSWORD')
-            keyAlias System.getenv('TIREXNET_KEY_ALIAS')
-            keyPassword System.getenv('TIREXNET_KEY_PASSWORD')
         }
     }
 
@@ -56,7 +54,9 @@ android {
         }
 
         release {
-            signingConfig signingConfigs.release
+            if (System.getenv('TIREXNET_KEYSTORE_PATH')?.trim()) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
         }
     }
