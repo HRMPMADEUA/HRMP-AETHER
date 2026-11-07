@@ -15,7 +15,8 @@ class ProfileSettingsStore(context: Context) {
         val schemaVersion: Int = SCHEMA_VERSION,
         val dnsResolvers: List<String> = emptyList(),
         val selectedResolver: String = "",
-        val customSettings: Map<String, String> = emptyMap()
+        val customSettings: Map<String, String> = emptyMap(),
+        val origin: TirexNetShare.ProfileOrigin = TirexNetShare.ProfileOrigin.UNKNOWN
     )
 
     @Synchronized
@@ -27,18 +28,49 @@ class ProfileSettingsStore(context: Context) {
         json.optJSONObject("customSettings")?.let { obj ->
             obj.keys().forEach { key -> custom[key] = obj.optString(key, "") }
         }
-        return Settings(id, json.optInt("schemaVersion", 1).coerceAtLeast(1), resolvers,
-            json.optString("selectedResolver", ""), custom)
+        val origin = runCatching {
+            TirexNetShare.ProfileOrigin.valueOf(json.optString("origin", "UNKNOWN"))
+        }.getOrDefault(TirexNetShare.ProfileOrigin.UNKNOWN)
+        return Settings(
+            id,
+            json.optInt("schemaVersion", 1).coerceAtLeast(1),
+            resolvers,
+            json.optString("selectedResolver", ""),
+            custom,
+            origin
+        )
     }
 
     @Synchronized
-    fun save(raw: String, dnsResolvers: List<String>, selectedResolver: String = "", customSettings: Map<String, String> = emptyMap()) {
+    fun save(
+        raw: String,
+        dnsResolvers: List<String>,
+        selectedResolver: String = "",
+        customSettings: Map<String, String> = emptyMap(),
+        origin: TirexNetShare.ProfileOrigin? = null
+    ) {
         val old = get(raw)
+        val resolvedOrigin = origin ?: old.origin
         val json = JSONObject().put("schemaVersion", SCHEMA_VERSION)
             .put("dnsResolvers", JSONArray(dnsResolvers.map { it.trim() }.filter { it.isNotEmpty() }.distinct()))
             .put("selectedResolver", selectedResolver.trim())
-            .put("customSettings", JSONObject(customSettings))
+            .put("customSettings", JSONObject(customSettings.ifEmpty { old.customSettings }))
+            .put("origin", resolvedOrigin.name)
         prefs.edit().putString("profile:${old.profileId}", json.toString()).apply()
+    }
+
+    @Synchronized
+    fun setOrigin(raw: String, origin: TirexNetShare.ProfileOrigin) {
+        val s = get(raw)
+        save(raw, s.dnsResolvers, s.selectedResolver, s.customSettings, origin)
+    }
+
+    @Synchronized
+    fun setDnsResolvers(raw: String, resolvers: List<String>, selected: String = "") {
+        val s = get(raw)
+        val clean = resolvers.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        val sel = selected.ifBlank { clean.firstOrNull().orEmpty() }
+        save(raw, clean, sel, s.customSettings, s.origin)
     }
 
     /** Preserve settings when a user edits the raw profile and its content hash changes. */
@@ -57,13 +89,14 @@ class ProfileSettingsStore(context: Context) {
     }
 
     @Synchronized
-    fun duplicate(sourceRaw: String, newRaw: String) {
+    fun duplicate(sourceRaw: String, newRaw: String, newOrigin: TirexNetShare.ProfileOrigin = TirexNetShare.ProfileOrigin.LOCAL_DUPLICATE) {
         val source = get(sourceRaw)
         val newId = idFor(newRaw)
         val copy = JSONObject().put("schemaVersion", SCHEMA_VERSION)
             .put("dnsResolvers", JSONArray(source.dnsResolvers))
             .put("selectedResolver", source.selectedResolver)
             .put("customSettings", JSONObject(source.customSettings))
+            .put("origin", newOrigin.name)
         prefs.edit().putString("profile:$newId", copy.toString()).apply()
     }
 
@@ -83,5 +116,5 @@ class ProfileSettingsStore(context: Context) {
         for (i in 0 until length()) optString(i).takeIf { it.isNotBlank() }?.let(::add)
     }
 
-    companion object { const val SCHEMA_VERSION = 2 }
+    companion object { const val SCHEMA_VERSION = 3 }
 }
