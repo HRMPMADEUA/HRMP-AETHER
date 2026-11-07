@@ -79,12 +79,81 @@ class TirexSlipNetRuntime(context: Context) {
         else -> false
     }
 
+    /**
+     * Sequential import:
+     * 1) official SlipNet native decoder;
+     * 2) compatibility Base64/AES-GCM decoder;
+     * 3) official importer again, now with normalized/plain URI.
+     *
+     * The official importer still enforces device binding and profile parsing.
+     */
+    private suspend fun parseWithFallback(
+        raw: String,
+        bundlePassword: String?
+    ): ImportResult {
+        val deviceId = manager.getDeviceId()
+
+        val first = try {
+            importer.parseAndImport(
+                input = raw.trim(),
+                localDeviceId = deviceId,
+                bundlePassword = bundlePassword
+            )
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (error: Exception) {
+            ImportResult.Error(error.message ?: "Official SlipNet decoder failed.")
+        }
+
+        val normalized = try {
+            SlipNetDecodeFallback.normalizeInput(raw)
+        } catch (_: Exception) {
+            null
+        } ?: return first
+
+        if (normalized == raw.trim()) return first
+
+        val second = try {
+            importer.parseAndImport(
+                input = normalized,
+                localDeviceId = deviceId,
+                bundlePassword = bundlePassword
+            )
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (error: Exception) {
+            ImportResult.Error(error.message ?: "Fallback SlipNet decoder failed.")
+        }
+
+        val secondIsBetter = second is ImportResult.Success &&
+            (
+                first !is ImportResult.Success ||
+                second.profiles.size > first.profiles.size ||
+                (
+                    second.profiles.size == first.profiles.size &&
+                    second.warnings.size < first.warnings.size
+                )
+            )
+
+        if (secondIsBetter) return second
+        if (first is ImportResult.Success) return first
+        if (second is ImportResult.Success) return second
+        if (second is ImportResult.NeedsPassword) return second
+        if (first is ImportResult.NeedsPassword) return first
+
+        val messages = listOfNotNull(
+            (first as? ImportResult.Error)?.message,
+            (second as? ImportResult.Error)?.message
+        ).distinct()
+
+        return ImportResult.Error(
+            messages.joinToString("\n").take(1200)
+                .ifBlank { "No SlipNet decoding strategy succeeded." }
+        )
+    }
+
     suspend fun importAndSave(raw: String, bundlePassword: String? = null): TirexSlipNetImportResult {
-        return when (val parsed = importer.parseAndImport(
-            input = raw.trim(),
-            localDeviceId = manager.getDeviceId(),
-            bundlePassword = bundlePassword
-        )) {
+        return when (val parsed = parseWithFallback(raw, bundlePassword)) {
             ImportResult.NeedsPassword -> TirexSlipNetImportResult.NeedsPassword
             is ImportResult.Error -> TirexSlipNetImportResult.Failure(parsed.message)
             is ImportResult.Success -> {
@@ -134,11 +203,7 @@ class TirexSlipNetRuntime(context: Context) {
      * slipnet-bundle-enc:// is a different, password-based format and is passed through unchanged.
      */
     suspend fun inspect(raw: String, bundlePassword: String? = null): TirexSlipNetInspectResult =
-        when (val parsed = importer.parseAndImport(
-            input = raw.trim(),
-            localDeviceId = manager.getDeviceId(),
-            bundlePassword = bundlePassword
-        )) {
+        when (val parsed = parseWithFallback(raw, bundlePassword)) {
             ImportResult.NeedsPassword -> TirexSlipNetInspectResult.NeedsPassword
             is ImportResult.Error -> TirexSlipNetInspectResult.Failure(parsed.message)
             is ImportResult.Success ->
