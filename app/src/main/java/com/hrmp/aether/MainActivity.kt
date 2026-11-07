@@ -66,6 +66,7 @@ import com.tirexnet.app.engine.ManualProtocol
 import com.tirexnet.app.engine.ManualProfileDecoder
 import com.tirexnet.app.engine.DnsResolverScanner
 import com.tirexnet.app.engine.ProfileSettingsStore
+import com.tirexnet.app.engine.TirexNetShare
 import com.tirexnet.app.engine.MasterDnsProfiles
 import com.tirexnet.app.engine.MhrvEngine
 import com.tirexnet.app.engine.MhrvCertificate
@@ -90,6 +91,7 @@ import com.tirexnet.app.ui.ConnectOrb
 import com.tirexnet.app.ui.EmptyArt
 import com.tirexnet.app.ui.FlagBadge
 import com.tirexnet.app.ui.GlassCard
+import com.tirexnet.app.ui.Kit
 import com.tirexnet.app.ui.GlassNavBar
 import com.tirexnet.app.ui.Icon
 import com.tirexnet.app.ui.IconView
@@ -313,6 +315,7 @@ private fun savePanelSession(
     private var manualCountry = ""
     private val manualValues = HashMap<String, String>()
     private val manualFieldViews = HashMap<String, EditText>()
+    private var manualForm: Kit.FieldForm? = null
 
     // ---- views (rebuilt by render())
     private var tabViews: List<View> = emptyList()
@@ -436,6 +439,32 @@ private fun savePanelSession(
             handler.postDelayed({ if (state == OrbState.DISCONNECTED) connect() }, 600L)
         }
         if (token.isNotBlank()) loadAccount()
+        handleIncomingIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingIntent(intent)
+    }
+
+    /**
+     * tirexnet://share/v1/<payload> opened from a browser, chat app or QR scanner.
+     * The link goes through exactly the same pipeline as Paste / File import
+     * (decode -> validate -> de-duplicate -> save -> select), so there is a single import path.
+     */
+    private fun handleIncomingIntent(i: Intent?) {
+        if (i == null || crashScreenShown) return
+        val data = i.data ?: return
+        if (i.action != Intent.ACTION_VIEW || !"tirexnet".equals(data.scheme, ignoreCase = true)) return
+        val text = i.dataString.orEmpty().trim()
+        i.data = null // consume it: re-creation or a later onNewIntent must not import twice
+        if (!TirexNetShare.isTirexNetShare(text)) {
+            toast("لینک tirexnet:// نامعتبر است.")
+            return
+        }
+        toast("Importing…")
+        importText(text)
     }
 
     override fun onResume() {
@@ -1133,11 +1162,8 @@ private fun savePanelSession(
                 for (i in 0 until 3) box.addView(SkeletonView(this), lp(MATCH, dpi(76), if (i == 0) 0 else 10))
             }
             ServersState.ERROR -> {
-                val c = GlassCard(this, 20f, Palette.withAlpha(Palette.red, 120), pad = 16)
-                c.addView(tv("Couldn't load configurations", 15f, Palette.text, 1))
-                c.addView(tv("Check your internet connection and try again.", 11.5f, Palette.muted, 0).apply { maxLines = 4; ellipsize = TextUtils.TruncateAt.END }, lp(MATCH, WRAP, 6))
-                c.addView(primaryButton("Retry") { loadServers() }, lp(MATCH, dpi(46), 12))
-                box.addView(c, lp(MATCH, WRAP))
+                box.addView(Kit.stateView(this, Kit.StateKind.ERROR, "Couldn't load configurations",
+                    "Check your internet connection and try again.", "Retry") { loadServers() }, lp(MATCH, WRAP))
             }
             ServersState.READY -> {
                 if (servers.isEmpty()) {
@@ -1160,7 +1186,7 @@ private fun savePanelSession(
                         { item -> servers.indexOf(item) })
                 ) else filtered
                 if (list.isEmpty()) {
-                    box.addView(tv("No matching server", 12.5f, Palette.muted, 0).apply { gravity = Gravity.CENTER }, lp(MATCH, WRAP, 20, 10))
+                    box.addView(Kit.stateView(this, Kit.StateKind.EMPTY, "No matching server", "Try another name or region."), lp(MATCH, WRAP, 10))
                     return
                 }
                 val cur = currentConfig().trim()
@@ -1464,11 +1490,10 @@ private fun savePanelSession(
         top.addView(profStatus!!, lp(WRAP, WRAP, 6))
         col.addView(top, lp(MATCH, WRAP))
 
-        val sub = GlassCard(this, 20f, pad = 14)
-        sub.addView(tv("SUBSCRIPTION", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
-        profPanel = infoRow(sub, "Panel user")
-        profExpiry = infoRow(sub, "Expires")
-        profUsage = infoRow(sub, "Data used")
+        val (sub, subBody) = Kit.card(this, "Subscription", Icon.PROFILE, subtitle = "Your account on the connected panel")
+        profPanel = infoRow(subBody, "Panel user")
+        profExpiry = infoRow(subBody, "Expires")
+        profUsage = infoRow(subBody, "Data used")
         col.addView(sub, lp(MATCH, WRAP, 18))
 
         val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -1476,11 +1501,7 @@ private fun savePanelSession(
         actions.addView(ghostButton("Log out") { confirmLogout() }, LinearLayout.LayoutParams(0, dpi(48), 1f).apply { leftMargin = dpi(6) })
         col.addView(actions, lp(MATCH, WRAP, 12))
         // Subscription panel management
-val panelCard = GlassCard(this, 20f, pad = 14)
-
-panelCard.addView(
-    tv("SUBSCRIPTION PANELS", 10f, Palette.cyan, 2)
-)
+val (panelCard, panelBody) = Kit.card(this, "Subscription panels", Icon.SERVERS, subtitle = "Xray and WireGuard accounts")
 
 fun addPanelStatus(name: String, username: String, connected: Boolean) {
     val row = LinearLayout(this).apply {
@@ -1508,16 +1529,9 @@ fun addPanelStatus(name: String, username: String, connected: Boolean) {
 
     row.addView(info, LinearLayout.LayoutParams(0, WRAP, 1f))
 
-    row.addView(
-        tv(
-            if (connected) "CONNECTED" else "OFFLINE",
-            9f,
-            if (connected) Palette.mint else Palette.muted,
-            2
-        )
-    )
+    row.addView(Kit.pill(this, if (connected) "CONNECTED" else "OFFLINE", if (connected) Palette.mint else Palette.muted))
 
-    panelCard.addView(row, lp(MATCH, WRAP))
+    panelBody.addView(row, lp(MATCH, WRAP))
 }
 
 addPanelStatus(
@@ -1533,7 +1547,7 @@ addPanelStatus(
 )
 
 if (pasarguardToken.isBlank()) {
-    panelCard.addView(
+    panelBody.addView(
         primaryButton("Add Xray Profile") {
             openPanelLogin("pasarguard")
         },
@@ -1542,7 +1556,7 @@ if (pasarguardToken.isBlank()) {
 }
 
 if (alipanelToken.isBlank()) {
-    panelCard.addView(
+    panelBody.addView(
         primaryButton("Add WireGuard Profile") {
             openPanelLogin("alipanel")
         },
@@ -1556,30 +1570,41 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         settingsAnchor = anchor
         col.addView(anchor, lp(WRAP, WRAP, 26, 8))
 
-        val g1 = GlassCard(this, 20f, pad = 4)
-        settingRow(g1, Icon.INFO, "Active engine", "Detected from the selected profile", engineLabelShort()) { }
-        settingRow(g1, Icon.GLOBE, "Connection mode", "VPN or local SOCKS5 / HTTP proxy", connectionModeSummary()) { showConnectionModeDialog() }
-        settingRow(g1, Icon.GLOBE, "SlipNet protocols & settings", "DNS tunnels, resolver pools, SSH chains, Slipstream, NaiveProxy and Tor", "Open") { showSlipNetDialog() }
-        settingRow(g1, Icon.SHIELD, "Split tunneling", "Choose apps included in or excluded from Xray", splitSummary()) { showSplitTunnelDialog() }
-        settingRow(g1, Icon.BOLT, "TLS server name", "Edit TLS / REALITY serverName on a local copy", null) { selectedItem()?.let { showSniDialog(it) } ?: toast("Select a server first.") }
-        settingRow(g1, Icon.SHIELD, "Patterniha SNI fragmentation", "Rootless TLS fragmentation • creates a local profile", "Configure") { selectedItem()?.let { showPatternihaDialog(it) } ?: toast("Select a TLS/REALITY server first.") }
-        settingRow(g1, Icon.GLOBE, "Website ping target", "HTTP response-time check for a URL you choose", "Change") { showPingUrlDialog() }
-        settingRow(g1, Icon.SHIELD, "MHRV CA certificate", "Download it, then install it from Android Security settings", "Export") { exportMhrvCa() }
-        settingRow(g1, Icon.COPY, "Connection logs", "Recent connection activity", "Open") { showConnectionLogs() }
-        settingRow(g1, Icon.COPY, "Copy diagnostics", "Safe device and connection summary", null) { copyDiagnostics() }
-        settingRow(g1, Icon.TRASH, "Clear saved config", "Remove the selected profile from this phone", null) { clearConfig() }
-        col.addView(g1, lp(MATCH, WRAP))
+        // General settings first; specialist tools live in the collapsible Advanced card.
+        val (gConn, gConnBody) = Kit.card(this, "Connection", Icon.POWER, subtitle = "Engine, mode and app routing")
+        settingRow(gConnBody, Icon.INFO, "Active engine", "Detected from the selected profile", engineLabelShort()) { }
+        settingRow(gConnBody, Icon.GLOBE, "Connection mode", "VPN or local SOCKS5 / HTTP proxy", connectionModeSummary()) { showConnectionModeDialog() }
+        settingRow(gConnBody, Icon.SHIELD, "Split tunneling", "Choose apps included in or excluded from Xray", splitSummary()) { showSplitTunnelDialog() }
+        col.addView(gConn, lp(MATCH, WRAP))
 
-        val g2 = GlassCard(this, 20f, pad = 4)
-        settingRow(g2, Icon.SHIELD, "Privacy", "چه چیزی روی گوشی ذخیره می‌شود", null) { showPrivacy() }
-        settingRow(g2, Icon.INFO, "App version", packageName, versionName()) { }
-        settingRow(g2, Icon.REFRESH, "App updates", "بررسی نسخه جدید در GitHub و نصب APK", "Check") { checkForUpdates() }
-        col.addView(g2, lp(MATCH, WRAP, 12))
+        val (gNet, gNetBody) = Kit.card(this, "Network & DNS", Icon.GLOBE, subtitle = "Tunnels, resolvers and latency checks")
+        settingRow(gNetBody, Icon.GLOBE, "SlipNet protocols & settings", "DNS tunnels, resolver pools, SSH chains, Slipstream, NaiveProxy and Tor", "Open") { showSlipNetDialog() }
+        settingRow(gNetBody, Icon.GLOBE, "Website ping target", "HTTP response-time check for a URL you choose", "Change") { showPingUrlDialog() }
+        col.addView(gNet, lp(MATCH, WRAP, 12))
+
+        val (gAdv, gAdvBody) = Kit.advancedCard(this, "TLS name, SNI fragmentation and certificates")
+        settingRow(gAdvBody, Icon.BOLT, "TLS server name", "Edit TLS / REALITY serverName on a local copy", null) { selectedItem()?.let { showSniDialog(it) } ?: toast("Select a server first.") }
+        settingRow(gAdvBody, Icon.SHIELD, "Patterniha SNI fragmentation", "Rootless TLS fragmentation • creates a local profile", "Configure") { selectedItem()?.let { showPatternihaDialog(it) } ?: toast("Select a TLS/REALITY server first.") }
+        settingRow(gAdvBody, Icon.SHIELD, "MHRV CA certificate", "Download it, then install it from Android Security settings", "Export") { exportMhrvCa() }
+        col.addView(gAdv, lp(MATCH, WRAP, 12))
+
+        val (gData, gDataBody) = Kit.card(this, "Data & diagnostics", Icon.FILE, subtitle = "Logs, diagnostics and saved config")
+        settingRow(gDataBody, Icon.COPY, "Connection logs", "Recent connection activity", "Open") { showConnectionLogs() }
+        settingRow(gDataBody, Icon.COPY, "Copy diagnostics", "Safe device and connection summary", null) { copyDiagnostics() }
+        Kit.settingRow(this, gDataBody, Icon.TRASH, "Clear saved config", "Remove the selected profile from this phone", null, Palette.red) { clearConfig() }
+        col.addView(gData, lp(MATCH, WRAP, 12))
+
+        val (gAbout, gAboutBody) = Kit.card(this, "About", Icon.INFO, subtitle = "Privacy, version and updates")
+        settingRow(gAboutBody, Icon.SHIELD, "Privacy", "چه چیزی روی گوشی ذخیره می‌شود", null) { showPrivacy() }
+        settingRow(gAboutBody, Icon.INFO, "App version", packageName, versionName()) { }
+        settingRow(gAboutBody, Icon.REFRESH, "App updates", "بررسی نسخه جدید در GitHub و نصب APK", "Check") { checkForUpdates() }
+        col.addView(gAbout, lp(MATCH, WRAP, 12))
         return sv
     }
 
     private fun showSlipNetDialog() {
-        val selected = selectedItem()?.takeIf { it.engine == ConfigEngine.SLIPNET }
+        // Global SlipNet tunnel settings only. Protocol/profile-specific options live in Edit Profile.
+        // Sections that previously lived after "DNS & resolvers" were removed from this dialog.
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dpi(16), dpi(10), dpi(16), dpi(8))
@@ -1588,20 +1613,18 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         scroll.addView(body, FrameLayout.LayoutParams(MATCH, WRAP))
 
-        fun heading(title: String, subtitle: String = "") {
-            body.addView(tv(title.uppercase(Locale.US), 10f, Palette.cyan, 2).apply { letterSpacing = 0.13f }, lp(MATCH, WRAP, 14, 4))
-            if (subtitle.isNotBlank()) body.addView(tv(subtitle, 10.5f, Palette.muted, 0), lp(MATCH, WRAP, 0, 6))
+        var cur: LinearLayout = body
+        fun heading(title: String, subtitle: String = "", icon: Icon = Icon.GLOBE) {
+            val (c, b) = Kit.card(this, title, icon, subtitle = subtitle.ifBlank { null })
+            body.addView(c, lp(MATCH, WRAP, 12))
+            cur = b
         }
         fun field(label: String, key: String, hint: String, default: String = "", multiline: Boolean = false, secret: Boolean = false, numeric: Boolean = false): EditText {
-            body.addView(tv(label, 11.5f, Palette.text, 1), lp(MATCH, WRAP, 7, 3))
+            cur.addView(tv(label, 11.5f, Palette.muted, 1), lp(MATCH, WRAP, 10, 3))
             return EditText(this).apply {
                 setText(prefs.all[key]?.toString() ?: default)
                 this.hint = hint
-                textSize = 12.5f
-                setTextColor(Palette.text)
-                setHintTextColor(Palette.dim)
-                background = fieldBackground(false)
-                setPadding(dpi(12), dpi(9), dpi(12), dpi(9))
+                Kit.styleInput(this@MainActivity, this, multiline)
                 if (multiline) { minLines = 2; maxLines = 5; gravity = Gravity.TOP or Gravity.START }
                 else setSingleLine(true)
                 inputType = when {
@@ -1610,36 +1633,37 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
                     multiline -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                     else -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                 }
-                body.addView(this, lp(MATCH, if (multiline) dpi(84) else dpi(44), 0, 2))
+                cur.addView(this, lp(MATCH, if (multiline) dpi(84) else dpi(48), 0, 2))
             }
         }
-        fun switch(label: String, key: String, default: Boolean): Switch {
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, dpi(3), 0, dpi(3))
-            }
-            row.addView(tv(label, 11.5f, Palette.text, 1), LinearLayout.LayoutParams(0, WRAP, 1f))
-            val control = Switch(this).apply { showText = false; isChecked = prefs.getBoolean(key, default) }
-            row.addView(control)
-            body.addView(row, lp(MATCH, WRAP, 3))
-            return control
-        }
-        fun spinner(label: String, key: String, entries: List<String>, default: String): Spinner {
-            body.addView(tv(label, 11.5f, Palette.text, 1), lp(MATCH, WRAP, 7, 2))
-            return Spinner(this).apply {
-                adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, entries)
-                val saved = prefs.getString(key, default) ?: default
-                setSelection(entries.indexOf(saved).coerceAtLeast(0))
-                body.addView(this, lp(MATCH, dpi(44), 0, 2))
-            }
+        fun switch(label: String, key: String, default: Boolean, desc: String? = null): Switch =
+            Kit.switchRow(this, cur, label, desc, prefs.getBoolean(key, default))
+        fun spinner(label: String, key: String, options: List<String>, default: String): Spinner {
+            cur.addView(tv(label, 11.5f, Palette.muted, 1), lp(MATCH, WRAP, 10, 3))
+            val sp = Kit.spinner(this, options)
+            val current = prefs.getString(key, default) ?: default
+            val idx = options.indexOfFirst { it.equals(current, true) }.takeIf { it >= 0 }
+                ?: options.indexOf(default).coerceAtLeast(0)
+            sp.setSelection(idx)
+            cur.addView(sp, lp(MATCH, dpi(48), 0, 2))
+            return sp
         }
 
-        heading("SlipNet", "Settings are saved in TIREXNET and applied to SlipNet’s native tunnel service. Imported profiles retain their own protocol configuration.")
+        // General: what most people touch.
+        heading("SlipNet", "Global tunnel defaults applied by the SlipNet runtime. Per-profile protocol options are edited on each profile.", Icon.GLOBE)
         val protocol = spinner("Preferred protocol", "slipnet_protocol", listOf("Auto detect", "DNSTT", "NoizDNS", "VayDNS", "Soar", "Slipstream", "SSH", "NaiveProxy", "VLESS", "DoH", "Tor"), "Auto detect")
-        val mtu = field("VPN MTU (512–1500)", "slipnet_mtu", "1280", "1280", numeric = true)
         val maxTunnels = field("Max parallel tunnels (1–64)", "slipnet_max_tunnels", "4", "4", numeric = true)
         val timeout = field("Connection timeout (seconds)", "slipnet_timeout", "20", "20", numeric = true)
+
+        heading("Leak protection", "Switches that keep traffic inside the tunnel.", Icon.SHIELD)
+        val disableQuic = switch("Disable QUIC fallback", "slipnet_disable_quic", true, "Stops apps from bypassing the tunnel over QUIC")
+        val blockIpv6 = switch("Block IPv6 to avoid leaks", "slipnet_block_ipv6", true, "Prevents IPv6 traffic from leaving outside the tunnel")
+
+        // Advanced: specialist tuning, collapsed by default.
+        val (advCard, advBody) = Kit.advancedCard(this, "MTU, pools, buffers, limits and DNS workers")
+        body.addView(advCard, lp(MATCH, WRAP, 12))
+        cur = advBody
+        val mtu = field("VPN MTU (512–1500)", "slipnet_mtu", "1280", "1280", numeric = true)
         val dnsTimeout = field("DNS timeout (milliseconds)", "slipnet_dns_timeout", "5000", "5000", numeric = true)
         val connectionPoolSize = field("Connection pool size (1–128)", "slipnet_connection_pool_size", "16", "16", numeric = true)
         val bufferSize = spinner("Network buffer size", "slipnet_buffer_size", listOf("32 KB", "64 KB", "128 KB", "256 KB", "512 KB"), "128 KB")
@@ -1654,389 +1678,50 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         val congestion = spinner("Congestion control", "slipnet_congestion", listOf("BBR", "DCUBIC"), "BBR")
         val uploadLimit = field("Upload limit (KB/s, 0 = unlimited)", "slipnet_upload_limit", "0", "0", numeric = true)
         val downloadLimit = field("Download limit (KB/s, 0 = unlimited)", "slipnet_download_limit", "0", "0", numeric = true)
-        val gso = switch("Enable UDP GSO where supported", "slipnet_gso", false)
-        val disableQuic = switch("Disable QUIC fallback", "slipnet_disable_quic", true)
-        val blockIpv6 = switch("Block IPv6 to avoid leaks", "slipnet_block_ipv6", true)
+        val gso = switch("Enable UDP GSO where supported", "slipnet_gso", false, "Faster UDP on supported devices")
 
-        heading("DNS & resolvers", "Used by DNSTT, NoizDNS, VayDNS and Soar profiles.")
-        val resolvers = field("Resolver pool (one IP:port per line)", "slipnet_resolvers", "1.1.1.1:53\n8.8.8.8:53", "1.1.1.1:53\n8.8.8.8:53", multiline = true)
-        val dnsTransport = spinner("DNS transport", "slipnet_dns_transport", listOf("UDP", "TCP", "DoT", "DoH"), "UDP")
-        val resolverMode = spinner("Resolver strategy", "slipnet_resolver_mode", listOf("Fast (round-robin)", "Reliable (fan-out)"), "Fast (round-robin)")
-        val dohUrl = field("DoH URL", "slipnet_doh_url", "https://dns.google/dns-query")
-        val autoResolver = switch("Automatically select working resolvers", "slipnet_auto_resolver", true)
-        val globalResolverEnabled = switch("Override profile resolvers globally", "slipnet_global_resolver_enabled", false)
-        val globalResolverList = field("Global resolver list (host:port, one per line)", "slipnet_global_resolver_list", "1.1.1.1:53\n8.8.8.8:53", "", multiline = true)
-        val dnsPoolEnabled = switch("Enable DNS pool", "slipnet_dns_pool_enabled", false)
-        val dnsPoolText = field("DNS pool entries (one per line)", "slipnet_dns_pool_text", "resolver.example:53", "", multiline = true)
-        val dnsPoolFullVerification = switch("Fully verify DNS pool entries", "slipnet_dns_pool_full_verification", false)
-        val resolverSpread = field("Round-robin spread count (1–5)", "slipnet_resolver_spread", "3", "3", numeric = true)
-        val autoTune = switch("Auto-tune DNS payload and query rate", "slipnet_dns_auto_tune", false)
-        val dnsPayload = field("DNS payload / KCP MTU (0 = auto)", "slipnet_dns_payload", "0", "0", numeric = true)
-        val qname = field("VayDNS maximum QNAME length", "slipnet_vay_qname", "101", "101", numeric = true)
-        val rps = field("VayDNS query rate limit (0 = unlimited)", "slipnet_vay_rps", "0", "0", numeric = true)
-        val vayCompat = switch("VayDNS DNSTT wire-format compatibility", "slipnet_vay_compat", false)
-        val vayRecordType = spinner("VayDNS DNS record type", "slipnet_vay_record_type", listOf("txt", "cname", "a", "aaaa", "mx", "ns", "srv", "null", "caa"), "txt")
-        val vayIdleTimeout = field("VayDNS idle timeout (seconds, 0 = default)", "slipnet_vay_idle", "0", "0", numeric = true)
-        val vayKeepalive = field("VayDNS keep-alive (seconds, 0 = default)", "slipnet_vay_keepalive", "0", "0", numeric = true)
-        val vayUdpTimeout = field("VayDNS UDP response timeout (ms, 0 = default)", "slipnet_vay_udp_timeout", "0", "0", numeric = true)
-        val vayMaxLabels = field("VayDNS maximum data labels (0 = unlimited)", "slipnet_vay_max_labels", "0", "0", numeric = true)
-        val vayClientId = field("VayDNS Client ID size (bytes, 0 = default)", "slipnet_vay_client_id", "0", "0", numeric = true)
-        val noizStealth = switch("NoizDNS stealth mode", "slipnet_noiz_stealth", false)
-        val soarDiscovery = switch("Soar resolver discovery", "slipnet_soar_discovery", false)
-        val soarCountry = field("Soar resolver country (ISO code; blank = global)", "slipnet_soar_country", "IR", "")
-        val soarTcpMode = spinner("Soar TCP/53 mode", "slipnet_soar_tcp_mode", listOf("auto", "on", "only", "off"), "auto")
+        body.addView(Kit.noteCard(this, "DNS resolvers and protocol-specific options are configured per profile in Edit Profile."), lp(MATCH, WRAP, 14, 8))
 
-        heading("SSH chain", "SSH authentication, ciphers and channel limits.")
-        val sshChain = switch("Enable SSH chaining when profile supports it", "slipnet_ssh_chain", false)
-        val sshHost = field("SSH host", "slipnet_ssh_host", "ssh.example.com")
-        val sshPort = field("SSH port", "slipnet_ssh_port", "22", "22", numeric = true)
-        val sshUser = field("SSH username", "slipnet_ssh_username", "username")
-        val sshPassword = field("SSH password", "slipnet_ssh_password", "Password", secret = true)
-        val sshKey = field("SSH private key (optional)", "slipnet_ssh_private_key", "-----BEGIN OPENSSH PRIVATE KEY-----", multiline = true)
-        val sshKeyPassphrase = field("SSH private-key passphrase (optional)", "slipnet_ssh_key_passphrase", "Private-key passphrase", secret = true)
-        val sshAuthType = spinner("SSH authentication method", "slipnet_ssh_auth_type", listOf("Auto", "Password", "Private key", "Password + private key"), "Auto")
-        val sshChannels = field("SSH max channels", "slipnet_ssh_channels", "16", "16", numeric = true)
-        val sshChannelsCustom = switch("Use a custom SSH channel limit (off = automatic)", "slipnet_ssh_channels_custom", false)
-        val sshCipher = spinner("SSH cipher", "slipnet_ssh_cipher", listOf("Auto", "AES-128-GCM", "ChaCha20-Poly1305", "AES-128-CTR (Legacy)"), "Auto")
-        val sshCompression = switch("SSH compression", "slipnet_ssh_compression", false)
-        val preventDnsFallback = switch("Prevent DNS fallback outside the tunnel", "slipnet_prevent_dns_fallback", true)
-        val sshTlsSni = field("SSH-over-TLS SNI", "slipnet_ssh_tls_sni", "front.example.com")
-        val sshHttpProxyHost = field("SSH HTTP CONNECT proxy host", "slipnet_ssh_http_proxy_host", "proxy.example.com")
-        val sshHttpProxyPort = field("SSH HTTP CONNECT proxy port", "slipnet_ssh_http_proxy_port", "8080", "8080", numeric = true)
-        val sshHttpProxyCustomHost = field("SSH HTTP CONNECT Host header", "slipnet_ssh_http_proxy_custom_host", "")
-        val sshWsPath = field("SSH WebSocket path", "slipnet_ssh_ws_path", "/")
-        val sshWsHost = field("SSH WebSocket Host header", "slipnet_ssh_ws_host", "")
-        val sshWsUseTls = switch("Use TLS for SSH WebSocket (wss://)", "slipnet_ssh_ws_tls", true)
-        val sshPayload = field("SSH pre-handshake payload", "slipnet_ssh_payload", "", multiline = true)
-
-        heading("App & local proxy", "SlipNet-style app behavior and local proxy preferences.")
-        val autoConnectBoot = switch("Auto-connect on boot", "slipnet_auto_connect_boot", false)
-        val proxyOnly = switch("Proxy-only mode", "slipnet_proxy_only", false)
-        val killSwitch = switch("Kill switch", "slipnet_kill_switch", false)
-        val notificationTraffic = switch("Show traffic in notification", "slipnet_notification_traffic", true)
-        val proxyListenHost = field("Local proxy listen address", "slipnet_proxy_host", "127.0.0.1", "127.0.0.1")
-        val proxyListenPort = field("Local SOCKS port", "slipnet_proxy_port", "1080", "1080", numeric = true)
-        val proxyAuth = switch("Enable local proxy authentication", "slipnet_proxy_auth", false)
-        val proxyUsername = field("Local proxy username", "slipnet_proxy_user", "")
-        val proxyPassword = field("Local proxy password", "slipnet_proxy_pass", "", secret = true)
-        val httpProxyEnabled = switch("Enable local HTTP proxy", "slipnet_http_proxy_enabled", false)
-        val httpProxyPort = field("Local HTTP proxy port", "slipnet_http_proxy_port", "8080", "8080", numeric = true)
-        val sleepTimer = field("Auto-disconnect timer (minutes, 0 = off)", "slipnet_sleep_timer", "0", "0", numeric = true)
-        val remoteDnsMode = spinner("Remote DNS mode", "slipnet_remote_dns_mode", listOf("Default", "Custom"), "Default")
-        val remoteDnsPrimary = field("Custom remote DNS", "slipnet_remote_dns_primary", "1.1.1.1")
-        val remoteDnsFallback = field("Fallback remote DNS", "slipnet_remote_dns_fallback", "8.8.8.8")
-        val domainRouting = switch("Enable domain routing", "slipnet_domain_routing_enabled", false)
-        val domainRoutingMode = spinner("Domain routing mode", "slipnet_domain_routing_mode", listOf("Bypass listed domains", "Tunnel only listed domains"), "Bypass listed domains")
-        val routedDomains = field("Domains (one hostname per line)", "slipnet_domain_routing_domains", "example.com", multiline = true)
-        val geoBypass = switch("Enable geo-bypass", "slipnet_geo_bypass_enabled", false)
-        val geoCountry = field("Geo-bypass country (ISO code)", "slipnet_geo_bypass_country", "IR", "IR")
-
-        heading("Advanced protocol tuning", "Advanced per-device defaults; profile-specific values still take priority.")
-        val vlessSni = field("VLESS default SNI", "slipnet_vless_sni", "")
-        val sniFragmentEnabled = switch("Enable TLS SNI fragmentation", "slipnet_vless_sni_fragment", true)
-        val sniFragmentStrategy = spinner("TLS fragmentation strategy", "slipnet_vless_sni_strategy", listOf("micro", "multi", "sni_split", "fake", "disorder"), "micro")
-        val sniFragmentDelay = field("TLS fragment delay (ms)", "slipnet_vless_sni_delay", "300", "300", numeric = true)
-        val tcpMaxSeg = field("TCP MSS cap (0 = auto)", "slipnet_vless_tcp_mss", "0", "0", numeric = true)
-        val chPadding = switch("TLS ClientHello padding", "slipnet_vless_ch_padding", false)
-        val wsObfuscation = switch("Obfuscate WebSocket headers", "slipnet_vless_ws_obfuscation", true)
-        val wsPadding = switch("WebSocket cover ping frames", "slipnet_vless_ws_padding", false)
-        val vlessUuid = field("VLESS UUID", "slipnet_vless_uuid", "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
-        val vlessSecurity = spinner("VLESS security", "slipnet_vless_security", listOf("tls", "none"), "tls")
-        val vlessTransport = spinner("VLESS transport", "slipnet_vless_transport", listOf("ws", "tcp", "grpc"), "ws")
-        val vlessWsPath = field("VLESS WebSocket path", "slipnet_vless_ws_path", "/")
-        val vlessCdnIp = field("VLESS CDN / edge IP", "slipnet_vless_cdn_ip", "104.16.0.1")
-        val vlessCdnPort = field("VLESS CDN port", "slipnet_vless_cdn_port", "443", "443", numeric = true)
-        val naivePort = field("NaiveProxy port", "slipnet_naive_port", "443", "443", numeric = true)
-        val naiveUsername = field("NaiveProxy username", "slipnet_naive_username", "")
-        val naivePassword = field("NaiveProxy password", "slipnet_naive_password", "", secret = true)
-        val proxyHttpAppend = switch("Append local HTTP proxy to VPN", "slipnet_http_proxy_append", false)
-        val debugLogging = switch("SlipNet diagnostic logging", "slipnet_debug_logging", false)
-        val slipnetTheme = spinner("SlipNet appearance preference", "slipnet_dark_mode", listOf("System", "Light", "Dark"), "System")
-
-        heading("Tor bridges", "Blank bridge lines use SlipNet's built-in Snowflake default. Custom lines support obfs4, webtunnel and meek.")
-        val selectedTorProfile = selected?.let { EngineProfiles.decodeSlipNet(it.raw) }?.takeIf { it.protocol == "snowflake" }
-        val selectedTorBridges = selectedTorProfile?.torBridgeLines.orEmpty()
-        val storedTorBridges = prefs.getString("slipnet_tor_bridges", null)
-        val torModes = listOf("Built-in Snowflake", "Direct", "Snowflake AMP", "Obfs4", "Meek Azure", "WebTunnel", "Smart", "Custom")
-        val inferredTorMode = when (selectedTorBridges.trim()) {
-            "" -> "Built-in Snowflake"
-            "DIRECT" -> "Direct"
-            "SNOWFLAKE_AMP" -> "Snowflake AMP"
-            "SMART" -> "Smart"
-            else -> when {
-                selectedTorBridges.lineSequence().any { it.trim().startsWith("obfs4 ", true) } -> "Obfs4"
-                selectedTorBridges.lineSequence().any { it.trim().startsWith("meek_lite ", true) } -> "Meek Azure"
-                selectedTorBridges.lineSequence().any { it.trim().startsWith("webtunnel ", true) } -> "WebTunnel"
-                else -> "Custom"
-            }
-        }
-        val initialTorMode = if (selectedTorProfile != null) inferredTorMode else (prefs.getString("slipnet_tor_bridge_mode", "Built-in Snowflake") ?: "Built-in Snowflake")
-        val torBridgeMode = spinner("Tor bridge preset", "slipnet_tor_bridge_mode", torModes, initialTorMode)
-        if (selectedTorProfile != null) torBridgeMode.setSelection(torModes.indexOf(inferredTorMode).coerceAtLeast(0))
-        val bridgePrefill = if (selectedTorProfile != null) selectedTorBridges else storedTorBridges.orEmpty()
-        val torBridgeLines = field("Custom Tor bridge lines", "slipnet_tor_bridges", "obfs4 ...\nwebtunnel ...", bridgePrefill, multiline = true)
-        body.addView(tv("PASTE BRIDGE LINES FROM CLIPBOARD", 10.5f, Palette.cyan, 2).apply {
-            gravity = Gravity.CENTER
-            setPadding(dpi(10), dpi(9), dpi(10), dpi(9))
-            background = Palette.glass(this@MainActivity, 10f, Palette.stroke, Palette.glassTop, Palette.glassBottom)
-            isClickable = true
-            setOnClickListener {
-                val clip = runCatching {
-                    (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
-                }.getOrNull()
-                val pasted = runCatching {
-                    if (clip != null && clip.itemCount > 0) clip.getItemAt(0).coerceToText(this@MainActivity).toString().trim() else ""
-                }.getOrDefault("")
-                if (pasted.isBlank()) toast("Clipboard has no Tor bridge lines.") else torBridgeLines.setText(pasted)
-            }
-        }, lp(MATCH, dpi(40), 0, 5))
-        val torFallback = switch("Allow Tor fallback when profile supports it", "slipnet_tor_fallback", false)
-
-        heading("Profile behavior", "Per-profile values in a SlipNet share URI remain preserved. These defaults are stored separately.")
-        val sshTls = switch("Allow SSH over TLS", "slipnet_ssh_tls", false)
-        val sshWs = switch("Allow SSH over WebSocket", "slipnet_ssh_ws", false)
-        val dnsFallback = switch("Auto-reconnect after a dropped tunnel", "slipnet_auto_reconnect", true)
-        val splitTunnel = switch("Enable per-app split tunneling", "slipnet_split_tunnel", false)
-        body.addView(tv("Choose applications…", 11.5f, Palette.cyan, 2).apply {
-            gravity = Gravity.CENTER
-            setPadding(dpi(12), dpi(11), dpi(12), dpi(11))
-            background = Palette.glass(this@MainActivity, 12f, Palette.stroke, Palette.glassTop, Palette.glassBottom)
-            isClickable = true
-            setOnClickListener { showSplitTunnelDialog() }
-        }, lp(MATCH, WRAP, 2, 4))
-
-        val currentProtocol = selected?.let { EngineProfiles.decodeSlipNet(it.raw)?.protocol }.orEmpty()
-        body.addView(tv(
-            if (selected != null) "Selected profile: ${selected.name} • ${currentProtocol.ifBlank { "encrypted / auto" }}" else "No SlipNet profile selected. Import a slipnet:// profile from the Servers tab.",
-            10.5f, Palette.muted, 0
-        ), lp(MATCH, WRAP, 14, 12))
         root.addView(scroll, lp(MATCH, minOf(dpi(560), resources.displayMetrics.heightPixels * 3 / 4)))
-
-        val dialog = dialogBuilder().setTitle("SlipNet • Complete settings")
+        val dialog = dialogBuilder().setTitle("SlipNet settings")
             .setView(root).setNegativeButton("Close", null).setPositiveButton("Save settings", null).create()
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                fun number(view: EditText, label: String, min: Int, max: Int): Int? {
-                    val n = view.text.toString().trim().toIntOrNull()
-                    if (n == null || n !in min..max) { view.error = "$label must be $min–$max"; view.requestFocus(); return null }
-                    return n
+                fun number(et: EditText, label: String, min: Int, max: Int): Int? {
+                    val v = et.text.toString().trim().toIntOrNull()
+                    if (v == null || v < min || v > max) { et.error = "$label must be $min–$max"; return null }
+                    return v
                 }
                 val mtuValue = number(mtu, "MTU", 512, 1500) ?: return@setOnClickListener
-                val tunnelValue = number(maxTunnels, "Max tunnels", 1, 64) ?: return@setOnClickListener
-                val timeoutValue = number(timeout, "Timeout", 3, 180) ?: return@setOnClickListener
-                val dnsTimeoutValue = number(dnsTimeout, "DNS timeout", 250, 120000) ?: return@setOnClickListener
-                val connectionPoolValue = number(connectionPoolSize, "Connection pool", 1, 128) ?: return@setOnClickListener
-                val keepAliveValue = number(keepAlive, "Keep-alive", 500, 60000) ?: return@setOnClickListener
-                val uploadLimitValue = number(uploadLimit, "Upload limit", 0, 10_000_000) ?: return@setOnClickListener
-                val downloadLimitValue = number(downloadLimit, "Download limit", 0, 10_000_000) ?: return@setOnClickListener
-                val resolverSpreadValue = number(resolverSpread, "Resolver spread", 1, 5) ?: return@setOnClickListener
-                val sshPortValue = number(sshPort, "SSH port", 1, 65535) ?: return@setOnClickListener
-                val channelValue = number(sshChannels, "SSH channels", 1, 128) ?: return@setOnClickListener
-                val payloadValue = number(dnsPayload, "DNS payload", 0, 1400) ?: return@setOnClickListener
-                val qnameValue = number(qname, "QNAME", 64, 255) ?: return@setOnClickListener
-                val vayIdleValue = number(vayIdleTimeout, "VayDNS idle timeout", 0, 86400) ?: return@setOnClickListener
-                val vayKeepaliveValue = number(vayKeepalive, "VayDNS keep-alive", 0, 3600) ?: return@setOnClickListener
-                val vayUdpTimeoutValue = number(vayUdpTimeout, "VayDNS UDP timeout", 0, 60000) ?: return@setOnClickListener
-                val vayLabelsValue = number(vayMaxLabels, "VayDNS max labels", 0, 128) ?: return@setOnClickListener
-                val vayClientIdValue = number(vayClientId, "VayDNS Client ID size", 0, 32) ?: return@setOnClickListener
-                val vlessPortValue = number(vlessCdnPort, "VLESS CDN port", 1, 65535) ?: return@setOnClickListener
-                val naivePortValue = number(naivePort, "NaiveProxy port", 1, 65535) ?: return@setOnClickListener
-                val httpConnectPortValue = number(sshHttpProxyPort, "SSH HTTP proxy port", 1, 65535) ?: return@setOnClickListener
-                val proxyPortValue = number(proxyListenPort, "Local proxy port", 1, 65535) ?: return@setOnClickListener
-                val httpProxyPortValue = number(httpProxyPort, "HTTP proxy port", 1, 65535) ?: return@setOnClickListener
-                val sleepTimerValue = number(sleepTimer, "Sleep timer", 0, 1440) ?: return@setOnClickListener
-                val sniDelayValue = number(sniFragmentDelay, "TLS fragment delay", 0, 5000) ?: return@setOnClickListener
-                val tcpMssValue = number(tcpMaxSeg, "TCP MSS", 0, 1400) ?: return@setOnClickListener
-                val geoCode = geoCountry.text.toString().trim().uppercase(Locale.US)
-                if (geoCode.length != 2 || geoCode.any { it !in 'A'..'Z' }) { geoCountry.error = "Use a two-letter ISO country code"; return@setOnClickListener }
-                val rpsValue = rps.text.toString().trim().toDoubleOrNull()
-                if (rpsValue == null || rpsValue !in 0.0..1000.0) { rps.error = "Enter 0–1000"; return@setOnClickListener }
-                val country = soarCountry.text.toString().trim().uppercase(Locale.US)
-                if (country.isNotEmpty() && !country.matches(Regex("^[A-Z]{2}$"))) { soarCountry.error = "Use a two-letter country code"; return@setOnClickListener }
-                val portValue = sshPortValue
-                val dnsWorkerValue = when (dnsWorkers.selectedItem.toString()) {
-                    "2 workers" -> "two"
-                    "3 workers" -> "three"
-                    "5 workers (fastest)" -> "five"
-                    else -> "per_query"
-                }
-
-                // If the selected item is an editable Tor share link, save a derived
-                // local copy with bridge settings in field 26. Never rewrite a
-                // subscription profile or an encrypted single-profile URI.
-                val selectedTor = selectedTorProfile
-                var derivedTorUri: String? = null
-                var torEditUnavailable = false
-                if (selectedTor != null) {
-                    val bridgeText = torBridgeLines.text.toString().trim()
-                    val bridgeValue = when (torBridgeMode.selectedItem.toString()) {
-                        "Built-in Snowflake" -> ""
-                        "Direct" -> "DIRECT"
-                        "Snowflake AMP" -> "SNOWFLAKE_AMP"
-                        "Smart" -> "SMART"
-                        "Obfs4" -> bridgeText.takeIf { it.lineSequence().any { line -> line.trim().startsWith("obfs4 ", true) } }
-                        "Meek Azure" -> bridgeText.takeIf { it.lineSequence().any { line -> line.trim().startsWith("meek_lite ", true) } }
-                        "WebTunnel" -> bridgeText.takeIf { it.lineSequence().any { line -> line.trim().startsWith("webtunnel ", true) } }
-                        else -> bridgeText.takeIf { it.isNotBlank() }
-                    }
-                    if (bridgeValue == null) {
-                        toast("برای Obfs4، Meek یا WebTunnel باید bridge line معتبر وارد کنی.")
-                        torBridgeLines.error = "Paste a valid bridge line"
-                        torBridgeLines.requestFocus()
-                        return@setOnClickListener
-                    }
-                    derivedTorUri = EngineProfiles.updateSlipNetTorBridges(selected!!.raw, bridgeValue)
-                    torEditUnavailable = derivedTorUri == null
+                val maxTunnelsValue = number(maxTunnels, "Max tunnels", 1, 64) ?: return@setOnClickListener
+                val timeoutValue = number(timeout, "Timeout", 5, 120) ?: return@setOnClickListener
+                val dnsTimeoutValue = number(dnsTimeout, "DNS timeout", 500, 60000) ?: return@setOnClickListener
+                val poolValue = number(connectionPoolSize, "Pool size", 1, 128) ?: return@setOnClickListener
+                val keepAliveValue = number(keepAlive, "Keep-alive", 1000, 120000) ?: return@setOnClickListener
+                val upValue = number(uploadLimit, "Upload limit", 0, 100000) ?: return@setOnClickListener
+                val downValue = number(downloadLimit, "Download limit", 0, 100000) ?: return@setOnClickListener
+                val workersKey = when (dnsWorkers.selectedItemPosition) {
+                    1 -> "two"; 2 -> "three"; 3 -> "five"; else -> "per_query"
                 }
                 prefs.edit()
                     .putString("slipnet_protocol", protocol.selectedItem.toString())
                     .putInt("slipnet_mtu", mtuValue)
-                    .putInt("slipnet_max_tunnels", tunnelValue)
+                    .putInt("slipnet_max_tunnels", maxTunnelsValue)
                     .putInt("slipnet_timeout", timeoutValue)
                     .putInt("slipnet_dns_timeout", dnsTimeoutValue)
-                    .putInt("slipnet_connection_pool_size", connectionPoolValue)
+                    .putInt("slipnet_connection_pool_size", poolValue)
                     .putString("slipnet_buffer_size", bufferSize.selectedItem.toString())
                     .putInt("slipnet_keepalive_ms", keepAliveValue)
-                    .putInt("slipnet_upload_limit", uploadLimitValue)
-                    .putInt("slipnet_download_limit", downloadLimitValue)
-                    .putString("slipnet_dns_workers", dnsWorkerValue)
+                    .putString("slipnet_dns_workers", workersKey)
                     .putString("slipnet_congestion", congestion.selectedItem.toString())
+                    .putInt("slipnet_upload_limit", upValue)
+                    .putInt("slipnet_download_limit", downValue)
                     .putBoolean("slipnet_gso", gso.isChecked)
                     .putBoolean("slipnet_disable_quic", disableQuic.isChecked)
                     .putBoolean("slipnet_block_ipv6", blockIpv6.isChecked)
-                    .putString("slipnet_resolvers", resolvers.text.toString().trim())
-                    .putString("slipnet_dns_transport", dnsTransport.selectedItem.toString())
-                    .putString("slipnet_resolver_mode", resolverMode.selectedItem.toString())
-                    .putString("slipnet_doh_url", dohUrl.text.toString().trim())
-                    .putBoolean("slipnet_auto_resolver", autoResolver.isChecked)
-                    .putBoolean("slipnet_global_resolver_enabled", globalResolverEnabled.isChecked)
-                    .putString("slipnet_global_resolver_list", globalResolverList.text.toString().trim())
-                    .putBoolean("slipnet_dns_pool_enabled", dnsPoolEnabled.isChecked)
-                    .putString("slipnet_dns_pool_text", dnsPoolText.text.toString().trim())
-                    .putBoolean("slipnet_dns_pool_full_verification", dnsPoolFullVerification.isChecked)
-                    .putInt("slipnet_resolver_spread", resolverSpreadValue)
-                    .putBoolean("slipnet_dns_auto_tune", autoTune.isChecked)
-                    .putInt("slipnet_dns_payload", payloadValue)
-                    .putInt("slipnet_vay_qname", qnameValue)
-                    .putString("slipnet_vay_rps", rpsValue.toString())
-                    .putBoolean("slipnet_vay_compat", vayCompat.isChecked)
-                    .putString("slipnet_vay_record_type", vayRecordType.selectedItem.toString())
-                    .putInt("slipnet_vay_idle", vayIdleValue)
-                    .putInt("slipnet_vay_keepalive", vayKeepaliveValue)
-                    .putInt("slipnet_vay_udp_timeout", vayUdpTimeoutValue)
-                    .putInt("slipnet_vay_max_labels", vayLabelsValue)
-                    .putInt("slipnet_vay_client_id", vayClientIdValue)
-                    .putBoolean("slipnet_noiz_stealth", noizStealth.isChecked)
-                    .putBoolean("slipnet_soar_discovery", soarDiscovery.isChecked)
-                    .putString("slipnet_soar_country", country)
-                    .putString("slipnet_soar_tcp_mode", soarTcpMode.selectedItem.toString())
-                    .putBoolean("slipnet_ssh_chain", sshChain.isChecked)
-                    .putString("slipnet_ssh_host", sshHost.text.toString().trim())
-                    .putInt("slipnet_ssh_port", portValue)
-                    .putString("slipnet_ssh_username", sshUser.text.toString().trim())
-                    .putString("slipnet_ssh_password", sshPassword.text.toString())
-                    .putString("slipnet_ssh_private_key", sshKey.text.toString())
-                    .putString("slipnet_ssh_key_passphrase", sshKeyPassphrase.text.toString())
-                    .putString("slipnet_ssh_auth_type", sshAuthType.selectedItem.toString())
-                    .putInt("slipnet_ssh_channels", channelValue)
-                    .putBoolean("slipnet_ssh_channels_custom", sshChannelsCustom.isChecked)
-                    .putString("slipnet_ssh_cipher", sshCipher.selectedItem.toString())
-                    .putBoolean("slipnet_ssh_compression", sshCompression.isChecked)
-                    .putBoolean("slipnet_prevent_dns_fallback", preventDnsFallback.isChecked)
-                    .putString("slipnet_ssh_tls_sni", sshTlsSni.text.toString().trim())
-                    .putString("slipnet_ssh_http_proxy_host", sshHttpProxyHost.text.toString().trim())
-                    .putInt("slipnet_ssh_http_proxy_port", httpConnectPortValue)
-                    .putString("slipnet_ssh_http_proxy_custom_host", sshHttpProxyCustomHost.text.toString().trim())
-                    .putString("slipnet_ssh_ws_path", sshWsPath.text.toString().trim())
-                    .putString("slipnet_ssh_ws_host", sshWsHost.text.toString().trim())
-                    .putBoolean("slipnet_ssh_ws_tls", sshWsUseTls.isChecked)
-                    .putString("slipnet_ssh_payload", sshPayload.text.toString())
-                    .putBoolean("slipnet_auto_connect_boot", autoConnectBoot.isChecked)
-                    .putBoolean("slipnet_proxy_only", proxyOnly.isChecked)
-                    .putBoolean("slipnet_kill_switch", killSwitch.isChecked)
-                    .putBoolean("slipnet_notification_traffic", notificationTraffic.isChecked)
-                    .putString("slipnet_proxy_host", proxyListenHost.text.toString().trim())
-                    .putInt("slipnet_proxy_port", proxyPortValue)
-                    .putBoolean("slipnet_proxy_auth", proxyAuth.isChecked)
-                    .putString("slipnet_proxy_user", proxyUsername.text.toString())
-                    .putString("slipnet_proxy_pass", proxyPassword.text.toString())
-                    .putBoolean("slipnet_http_proxy_enabled", httpProxyEnabled.isChecked)
-                    .putInt("slipnet_http_proxy_port", httpProxyPortValue)
-                    .putInt("slipnet_sleep_timer", sleepTimerValue)
-                    .putString("slipnet_remote_dns_mode", remoteDnsMode.selectedItem.toString())
-                    .putString("slipnet_remote_dns_primary", remoteDnsPrimary.text.toString().trim())
-                    .putString("slipnet_remote_dns_fallback", remoteDnsFallback.text.toString().trim())
-                    .putBoolean("slipnet_domain_routing_enabled", domainRouting.isChecked)
-                    .putString("slipnet_domain_routing_mode", domainRoutingMode.selectedItem.toString())
-                    .putString("slipnet_domain_routing_domains", routedDomains.text.toString().trim())
-                    .putBoolean("slipnet_geo_bypass_enabled", geoBypass.isChecked)
-                    .putString("slipnet_geo_bypass_country", geoCode)
-                    .putBoolean("slipnet_vless_sni_fragment", sniFragmentEnabled.isChecked)
-                    .putString("slipnet_vless_sni", vlessSni.text.toString().trim())
-                    .putString("slipnet_vless_sni_strategy", sniFragmentStrategy.selectedItem.toString())
-                    .putInt("slipnet_vless_sni_delay", sniDelayValue)
-                    .putInt("slipnet_vless_tcp_mss", tcpMssValue)
-                    .putBoolean("slipnet_vless_ch_padding", chPadding.isChecked)
-                    .putBoolean("slipnet_vless_ws_obfuscation", wsObfuscation.isChecked)
-                    .putBoolean("slipnet_vless_ws_padding", wsPadding.isChecked)
-                    .putString("slipnet_vless_uuid", vlessUuid.text.toString().trim())
-                    .putString("slipnet_vless_security", vlessSecurity.selectedItem.toString())
-                    .putString("slipnet_vless_transport", vlessTransport.selectedItem.toString())
-                    .putString("slipnet_vless_ws_path", vlessWsPath.text.toString().trim())
-                    .putString("slipnet_vless_cdn_ip", vlessCdnIp.text.toString().trim())
-                    .putInt("slipnet_vless_cdn_port", vlessPortValue)
-                    .putInt("slipnet_naive_port", naivePortValue)
-                    .putString("slipnet_naive_username", naiveUsername.text.toString())
-                    .putString("slipnet_naive_password", naivePassword.text.toString())
-                    .putBoolean("slipnet_http_proxy_append", proxyHttpAppend.isChecked)
-                    .putBoolean("slipnet_debug_logging", debugLogging.isChecked)
-                    .putString("slipnet_dark_mode", slipnetTheme.selectedItem.toString())
-                    .putString("slipnet_tor_bridge_mode", torBridgeMode.selectedItem.toString())
-                    .putString("slipnet_tor_bridges", torBridgeLines.text.toString().trim())
-                    .putBoolean("slipnet_tor_fallback", torFallback.isChecked)
-                    .putBoolean("slipnet_ssh_tls", sshTls.isChecked)
-                    .putBoolean("slipnet_ssh_ws", sshWs.isChecked)
-                    .putBoolean("slipnet_auto_reconnect", dnsFallback.isChecked)
-                    .putBoolean("slipnet_split_tunnel", splitTunnel.isChecked)
                     .apply()
-
-                var torProfileSaved = false
-                derivedTorUri?.let { updatedRaw ->
-                    val original = selected
-                    if (original != null) {
-                        val derivedName = "${original.name} • ${torBridgeMode.selectedItem}"
-                        val derived = ServerItem(derivedName, updatedRaw, ConfigEngine.SLIPNET, ProfileParser.parse(updatedRaw), true, original.country)
-                        val locals = loadLocalProfiles().filterNot { it.raw.trim() == updatedRaw.trim() }.toMutableList()
-                        locals.add(derived)
-                        if (persistLocalProfiles(locals)) {
-                            servers = mergeSavedAndRemote(servers.filterNot { it.local })
-                            serversState = ServersState.READY
-                            setConfig(updatedRaw)
-                            rebuildServerList(-1)
-                            bindServerSummary()
-                            torProfileSaved = true
-                        } else {
-                            toast("تنظیمات ذخیره شدند، اما ذخیره پروفایل محلی ناموفق بود.")
-                        }
-                    }
-                }
                 dialog.dismiss()
-                slipNetScope.launch {
-                    try {
-                        withContext(Dispatchers.IO) {
-                            slipNetRuntime.applySettings(prefs)
-                        }
-
-                        when {
-                            torProfileSaved -> toast("تنظیمات SlipNet اعمال شد و پروفایل Tor محلی ذخیره شد.")
-                            torEditUnavailable -> toast("تنظیمات SlipNet اعمال شد؛ لینک Tor رمزگذاری‌شده مستقیماً قابل ویرایش نیست.")
-                            else -> toast("SlipNet settings saved and applied to the native runtime.")
-                        }
-
-                    } catch (_: Throwable) {
-                        toast("تنظیمات ذخیره شدند، اما اعمال آن‌ها روی موتور SlipNet ناموفق بود.")
-                    }
-                }
+                toast("تنظیمات SlipNet ذخیره شد.")
             }
         }
         dialog.show()
@@ -2154,7 +1839,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
             selectAll()
         }
         val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(18), dpi(8), dpi(18), 0) }
-        box.addView(tv("This check measures the response time of the website from the phone's normal internet connection. It is separate from each server's endpoint ping.", 11f, Palette.muted, 0), lp(MATCH, WRAP, 0, 10))
+        box.addView(Kit.noteCard(this, "This check measures the response time of the website from the phone's normal internet connection. It is separate from each server's endpoint ping."), lp(MATCH, WRAP, 0, 10))
         box.addView(input, lp(MATCH, dpi(48), 6))
         val dialog = dialogBuilder().setTitle("WEBSITE PING TARGET").setView(box)
             .setNegativeButton("Cancel", null).setNeutralButton("Test now", null).setPositiveButton("Save", null).create()
@@ -2218,21 +1903,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
     }
 
     private fun settingRow(parent: LinearLayout, icon: Icon, title: String, subtitle: String, value: String?, onClick: () -> Unit) {
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dpi(10), dpi(12), dpi(10), dpi(12))
-            isClickable = true
-            setOnClickListener { onClick() }
-            pressable(0.985f)
-        }
-        row.addView(IconView(this, icon, Palette.ice), lp(dpi(24), dpi(24)))
-        val t = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(12), 0, dpi(8), 0) }
-        t.addView(tv(title, 14f, Palette.text, 1))
-        t.addView(tv(subtitle, 10.5f, Palette.muted, 0).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }, lp(MATCH, WRAP, 3))
-        row.addView(t, LinearLayout.LayoutParams(0, WRAP, 1f))
-        if (value != null) row.addView(tv(value, 12f, Palette.cyan, 1))
-        parent.addView(row, lp(MATCH, WRAP))
+        Kit.settingRow(this, parent, icon, title, subtitle, value, onClick = onClick)
     }
 
     private fun splitSummary(): String {
@@ -2251,14 +1922,10 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         val modes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         fun refreshModes() {
             modes.removeAllViews()
-            fun button(label: String, value: String): TextView = tv(label, 10.5f, if (mode == value) Palette.ice else Palette.muted, 2).apply {
-                gravity = Gravity.CENTER
-                background = GradientDrawable().apply { cornerRadius = dpi(12).toFloat(); setColor(if (mode == value) Palette.bg2 else Palette.bg1); setStroke(dpi(1), if (mode == value) Palette.cyan else Palette.stroke) }
-                setPadding(dpi(8), dpi(11), dpi(8), dpi(11))
-                setOnClickListener { mode = value; refreshModes() }
-            }
-            modes.addView(button("Only selected", "include"), LinearLayout.LayoutParams(0, WRAP, 1f).apply { rightMargin = dpi(5) })
-            modes.addView(button("Exclude selected", "exclude"), LinearLayout.LayoutParams(0, WRAP, 1f).apply { leftMargin = dpi(5) })
+            modes.addView(
+                Kit.segmented(this, listOf("include" to "Only selected", "exclude" to "Exclude selected"), mode) { mode = it; refreshModes() },
+                LinearLayout.LayoutParams(MATCH, WRAP)
+            )
         }
         refreshModes()
         root.addView(modes, lp(MATCH, WRAP, 10))
@@ -2280,7 +1947,15 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
             val visible = filtered.take(80)
             countLabel.text = if (filtered.size > visible.size) "Showing ${visible.size} of ${filtered.size} apps" else "${filtered.size} apps"
             visible.forEach { info ->
-                val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dpi(8), dpi(5), dpi(8), dpi(5)) }
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dpi(8), dpi(7), dpi(8), dpi(7))
+                    background = Palette.glass(this@MainActivity, 14f)
+                }
+                row.addView(tv(info.label.take(1).uppercase(Locale.US), 14f, Palette.cyan, 2).apply {
+                    gravity = Gravity.CENTER
+                    background = GradientDrawable().apply { cornerRadius = dp(12f); setColor(Palette.withAlpha(Palette.cyan, 40)) }
+                }, lp(dpi(36), dpi(36), 0, 0, 0, 4))
                 val labels = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(6), 0, dpi(4), 0) }
                 labels.addView(tv(info.label, 12.5f, Palette.text, 1))
                 labels.addView(tv(info.packageName, 8.5f, Palette.dim, 0))
@@ -2291,9 +1966,10 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
                     setOnCheckedChangeListener { _, checked -> if (checked) selected.add(info.packageName) else selected.remove(info.packageName) }
                 }
                 row.addView(check, lp(WRAP, WRAP))
-                list.addView(row, lp(MATCH, WRAP, 1))
+                row.setOnClickListener { check.toggle() }
+                list.addView(row, lp(MATCH, WRAP, 6))
             }
-            if (filtered.isEmpty()) list.addView(tv("No matching apps", 12f, Palette.muted, 0).apply { gravity = Gravity.CENTER }, lp(MATCH, dpi(48)))
+            if (filtered.isEmpty()) list.addView(Kit.stateView(this, Kit.StateKind.EMPTY, "No matching apps", "Try a different name."), lp(MATCH, WRAP, 6))
         }
         search.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
@@ -2371,8 +2047,17 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         val scroll = ScrollView(this).apply { isFillViewport = true; addView(body) }
         fun populate() {
             body.removeAllViews()
-            if (connectionLogs.isEmpty()) body.addView(tv("No connection activity yet.", 12f, Palette.muted, 0), lp(MATCH, WRAP, 12))
-            else connectionLogs.asReversed().forEach { line -> body.addView(tv(line, 11f, Palette.text, 0), lp(MATCH, WRAP, 7)) }
+            if (connectionLogs.isEmpty()) body.addView(Kit.stateView(this, Kit.StateKind.EMPTY, "No connection activity yet", "Connection events will appear here."), lp(MATCH, WRAP, 12))
+            else connectionLogs.asReversed().forEach { line ->
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    setPadding(dpi(10), dpi(8), dpi(10), dpi(8))
+                    background = Palette.glass(this@MainActivity, 12f)
+                }
+                row.addView(tv(line.take(8), 10.5f, Palette.cyan, 4), lp(WRAP, WRAP, 1, 0, 0, 10))
+                row.addView(tv(line.drop(8).trim(), 11.5f, Palette.text, 0), LinearLayout.LayoutParams(0, WRAP, 1f))
+                body.addView(row, lp(MATCH, WRAP, 6))
+            }
         }
         populate()
         dialogBuilder().setTitle("CONNECTION LOGS").setView(scroll)
@@ -2401,20 +2086,32 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
             currentProtocol == "http" -> 2
             else -> 1
         }
-        dialogBuilder().setTitle("CONNECTION MODE")
-            .setSingleChoiceItems(options, checked) { d, which ->
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(16), dpi(8), dpi(16), dpi(4)) }
+        box.addView(Kit.noteCard(this, "VPN routes the whole device. The proxy modes only expose a local address at 127.0.0.1:10880 for apps you configure."), lp(MATCH, WRAP, 4, 4))
+        var dlg: AlertDialog? = null
+        val items = listOf(
+            Triple(Icon.SHIELD, options[0], "Routes all apps through the tunnel"),
+            Triple(Icon.GLOBE, options[1], "Local proxy at 127.0.0.1:10880"),
+            Triple(Icon.GLOBE, options[2], "Local proxy at 127.0.0.1:10880")
+        )
+        items.forEachIndexed { which, (icon, title, desc) ->
+            box.addView(Kit.optionCard(this, icon, title, desc, which == checked) {
                 val mode = if (which == 0) "vpn" else "proxy"
                 val proto = if (which == 2) "http" else "socks"
                 prefs.edit().putString("connection_mode", mode).putString("proxy_protocol", proto).apply()
-                d.dismiss()
+                dlg?.dismiss()
                 if (state == OrbState.CONNECTED || state == OrbState.CONNECTING) {
                     toast("Mode saved. Disconnect and reconnect to apply.")
                 }
                 render()
-            }
+            }, lp(MATCH, WRAP, 8))
+        }
+        dialogBuilder().setTitle("CONNECTION MODE")
+            .setView(ScrollView(this).apply { addView(box) })
             .setNegativeButton("Cancel", null)
             .setNeutralButton("Copy address", null)
             .create().also { d ->
+                dlg = d
                 d.setOnShowListener {
                     d.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
                         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -2437,16 +2134,118 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
             toast("Subscription profiles are read-only. Add a local copy to customize it.")
             return
         }
-        val options = if (item.engine == ConfigEngine.XRAY) arrayOf("Edit profile", "Duplicate profile", "Change TLS serverName", "Remove profile") else arrayOf("Edit profile", "Duplicate profile", "Remove profile")
-        dialogBuilder().setTitle(item.name).setItems(options) { _, which ->
-            when (options[which]) {
-                "Edit profile" -> editServerDialog(item)
-                "Duplicate profile" -> duplicateServerProfile(item)
-                "Change TLS serverName" -> showSniDialog(item)
-                "Remove profile" -> removeServerProfile(item)
-            }
-        }.show()
+        val settings = ProfileSettingsStore(this).get(item.raw)
+        val origin = settings.origin
+        val canShare = TirexNetShare.canShare(origin, item.local, item.panelId)
+        val sheet = Kit.Sheet(
+            this, item.name,
+            "${engineName(item.engine)} • Local profile",
+            flagBox(44, 14f, item.country, Palette.cyan)
+        )
+        sheet.action(Icon.EDIT, "Edit profile", "Change name, fields and DNS resolvers") { editServerDialog(item) }
+        sheet.action(Icon.COPY, "Duplicate profile", "Create an independent local copy") { duplicateServerProfile(item) }
+        if (canShare) sheet.action(Icon.GLOBE, "Share (TIREXNET)", "Send this profile to another TIREXNET user") { shareTirexNetProfile(item) }
+        if (item.engine == ConfigEngine.XRAY) sheet.action(Icon.SHIELD, "Change TLS serverName", "Set the SNI used for the TLS handshake") { showSniDialog(item) }
+        sheet.action(Icon.TRASH, "Remove profile", "Delete this profile from your device", danger = true) { removeServerProfile(item) }
+        sheet.show()
     }
+
+    private fun shareTirexNetProfile(item: ServerItem) {
+        val store = ProfileSettingsStore(this)
+        val settings = store.get(item.raw)
+        if (!TirexNetShare.canShare(settings.origin, item.local, item.panelId)) {
+            toast("Panel subscription profiles cannot be shared directly.")
+            return
+        }
+        try {
+            val result = TirexNetShare.encode(
+                name = item.name,
+                engine = item.engine,
+                raw = item.raw,
+                origin = if (settings.origin == TirexNetShare.ProfileOrigin.UNKNOWN)
+                    TirexNetShare.ProfileOrigin.MANUAL else settings.origin,
+                dnsResolvers = settings.dnsResolvers,
+                selectedResolver = settings.selectedResolver,
+                customSettings = settings.customSettings,
+                country = item.country
+            )
+            showShareSheet(item.name, result.uri)
+        } catch (e: TirexNetShare.ShareError.TooLarge) {
+            toast(e.message ?: "URI too large for QR")
+        } catch (e: Exception) {
+            toast("Share failed: ${e.message ?: "unknown"}")
+        }
+    }
+
+    private fun showShareSheet(title: String, uri: String) {
+        val sheet = Kit.Sheet(this, title, "Encrypted TIREXNET share")
+        sheet.content(Kit.noteCard(this, "Sensitive fields are encrypted. Casual readers cannot see host/port/credentials."))
+        val preview = EditText(this).apply {
+            setText(uri)
+            textSize = 10f
+            minLines = 3
+            maxLines = 4
+            isFocusable = false
+            isClickable = false
+            setTextColor(Palette.muted)
+            background = fieldBackground(false)
+            setPadding(dpi(12), dpi(10), dpi(12), dpi(10))
+        }
+        sheet.content(preview, 10)
+        sheet.action(Icon.COPY, "Copy", "Copy the encrypted share link") {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("tirexnet-share", uri))
+            toast("Copied")
+        }
+        sheet.action(Icon.GLOBE, "Android Share", "Send it with any installed app") {
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, uri)
+                putExtra(Intent.EXTRA_SUBJECT, title)
+            }
+            startActivity(Intent.createChooser(intent, "Share profile"))
+        }
+        sheet.action(Icon.FILE, "QR", "Show it as a QR code through a QR app") { showShareQrDialog(uri) }
+        sheet.show()
+    }
+
+    /** On-device QR (zxing core is already a dependency). No external QR app needed. */
+    private fun showShareQrDialog(uri: String) {
+        if (uri.length > TirexNetShare.QR_MAX_CHARS) {
+            toast("This profile is too large for a reliable QR code. Use Copy or Android Share instead.")
+            return
+        }
+        val bitmap = runCatching {
+            val hints = mapOf(
+                com.google.zxing.EncodeHintType.ERROR_CORRECTION to com.google.zxing.qrcode.decoder.ErrorCorrectionLevel.L,
+                com.google.zxing.EncodeHintType.MARGIN to 2,
+                com.google.zxing.EncodeHintType.CHARACTER_SET to "UTF-8"
+            )
+            val size = 900
+            val m = com.google.zxing.qrcode.QRCodeWriter().encode(uri, com.google.zxing.BarcodeFormat.QR_CODE, size, size, hints)
+            val px = IntArray(size * size)
+            for (y in 0 until size) for (x in 0 until size) px[y * size + x] = if (m.get(x, y)) Color.BLACK else Color.WHITE
+            android.graphics.Bitmap.createBitmap(px, size, size, android.graphics.Bitmap.Config.ARGB_8888)
+        }.getOrNull()
+        if (bitmap == null) {
+            toast("QR could not be generated. Use Copy or Android Share instead.")
+            return
+        }
+        val frame = FrameLayout(this).apply {
+            setPadding(dpi(12), dpi(12), dpi(12), dpi(12))
+            background = GradientDrawable().apply { cornerRadius = dp(18f); setColor(Color.WHITE) }
+        }
+        frame.addView(ImageView(this).apply {
+            setImageBitmap(bitmap)
+            contentDescription = "TIREXNET share QR code"
+        }, FrameLayout.LayoutParams(MATCH, MATCH))
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(20), dpi(8), dpi(20), dpi(4)) }
+        val side = minOf(resources.displayMetrics.widthPixels - dpi(80), dpi(320))
+        box.addView(frame, lp(side, side, 6).apply { gravity = Gravity.CENTER_HORIZONTAL })
+        box.addView(Kit.noteCard(this, "Scan this with a camera or QR scanner on a phone that has TIREXNET installed."), lp(MATCH, WRAP, 14))
+        dialogBuilder().setTitle("Share QR").setView(box).setPositiveButton("Close", null).show()
+    }
+
 
     private fun editServerDialog(item: ServerItem) {
         if (!item.local) {
@@ -2454,77 +2253,255 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
             return
         }
         val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(16), dpi(8), dpi(16), dpi(4)) }
-        val name = EditText(this).apply { setSingleLine(true); hint = "Profile name"; setText(item.name); textSize = 13f; background = fieldBackground(false); setPadding(dpi(10), dpi(8), dpi(10), dpi(8)) }
-        val raw = EditText(this).apply { hint = "Paste or edit the profile"; setText(item.raw); textSize = 10.5f; minLines = 5; maxLines = 9; gravity = Gravity.TOP; inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE; background = fieldBackground(false); setPadding(dpi(10), dpi(8), dpi(10), dpi(8)) }
+        val name = EditText(this).apply {
+            setSingleLine(true); hint = "Profile name"; setText(if (Kit.looksEncoded(item.name)) "" else item.name)
+            Kit.styleInput(this@MainActivity, this)
+        }
         val profileSettings = ProfileSettingsStore(this).get(item.raw)
-        val resolverInput = EditText(this).apply {
+        val decoded = ManualProfileDecoder.decode(item.raw)
+
+        val (nameCard, nameBody) = Kit.card(this, "Profile", Icon.PROFILE, subtitle = "How this server appears in your list")
+        nameBody.addView(tv("Profile name", 11.5f, Palette.muted, 1), lp(MATCH, WRAP, 8))
+        nameBody.addView(name, lp(MATCH, dpi(50), 6))
+        form.addView(nameCard, lp(MATCH, WRAP, 0))
+
+        // Decoded structured fields (no raw URI shown)
+        val decodedForm: Kit.FieldForm? = if (decoded != null && decoded.values.isNotEmpty()) {
+            if (!decoded.editableWithoutDroppingUnknownFields) {
+                form.addView(Kit.noteCard(this, decoded.note.ifBlank { "Some unknown fields are preserved in the internal config and will not be dropped on save." }), lp(MATCH, WRAP, 12))
+            }
+            Kit.FieldForm(this, decoded.protocol, decoded.values.toMutableMap(), fillDefaults = true).also {
+                form.addView(it.root, lp(MATCH, WRAP, 2))
+            }
+        } else {
+            form.addView(Kit.noteCard(this, "This profile format has no structured decoder. Name and DNS can still be changed; the internal configuration is preserved."), lp(MATCH, WRAP, 12))
+            null
+        }
+
+        // Multi-select DNS resolvers
+        val (dnsCard, dnsBody) = Kit.card(this, "DNS resolvers", Icon.GLOBE, subtitle = "This profile only • scan, select, set primary. Long-press a result to test DNS-over-TLS.")
+        form.addView(dnsCard, lp(MATCH, WRAP, 14))
+        val resolverSeed = EditText(this).apply {
             hint = "1.1.1.1:53\n8.8.8.8:53 or https://dns.google/dns-query"
             setText(profileSettings.dnsResolvers.joinToString("\n"))
-            textSize = 12f; minLines = 2; maxLines = 5; gravity = Gravity.TOP
+            textSize = 12f; minLines = 2; maxLines = 4; gravity = Gravity.TOP
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             setTextColor(Palette.text); setHintTextColor(Palette.dim); background = fieldBackground(false)
             setPadding(dpi(10), dpi(8), dpi(10), dpi(8))
         }
-        var selectedResolver = profileSettings.selectedResolver
+        dnsBody.addView(resolverSeed, lp(MATCH, dpi(80), 6))
+        val selectedCountTv = tv("Selected: 0", 11f, Palette.cyan, 1)
+        dnsBody.addView(selectedCountTv, lp(MATCH, WRAP, 4))
         val scanResults = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        form.addView(tv("Profile name", 11f, Palette.muted, 0))
-        form.addView(name, lp(MATCH, dpi(46), 4))
-        form.addView(tv("Configuration", 11f, Palette.muted, 0), lp(MATCH, WRAP, 10))
-        form.addView(raw, lp(MATCH, dpi(180), 4))
-        form.addView(ghostButton("Decode supported fields") { showDecodedProfileEditor(raw) }, lp(MATCH, dpi(42), 6))
-        form.addView(tv("DNS RESOLVERS • THIS PROFILE ONLY", 11f, Palette.cyan, 1), lp(MATCH, WRAP, 14))
-        form.addView(tv("One IP or IP:port per line; an HTTPS DNS-query URL is also accepted. Scan checks DNS reachability, not the VPN tunnel. Long-press a result for DoT.", 10f, Palette.muted, 0), lp(MATCH, WRAP, 4))
-        form.addView(resolverInput, lp(MATCH, dpi(88), 6))
-        form.addView(ghostButton("Scan DNS resolvers") {
-            val candidates = resolverInput.text.toString().lines().map { it.trim() }.filter { it.isNotEmpty() }
-            if (candidates.isEmpty()) { toast("Enter at least one DNS resolver."); return@ghostButton }
-            scanResults.removeAllViews()
-            scanResults.addView(tv("Scanning active network…", 10.5f, Palette.cyan, 0), lp(MATCH, WRAP, 6))
-            DnsResolverScanner.scan(this, candidates) { results ->
-                scanResults.removeAllViews()
-                if (results.isEmpty()) scanResults.addView(tv("No valid resolver address was tested.", 10f, Palette.red, 0), lp(MATCH, WRAP, 6))
-                results.forEach { result ->
-                    val label = "${if (result.dnsReachable) "●" else "○"} ${result.resolver}  |  ${result.latencyMs?.let { "${it}ms" } ?: "—"}  |  loss ${result.packetLossPercent}%\n${result.detail} • EDNS ${if (result.ednsSupported) "yes" else "no"} • NXDOMAIN hijack ${when (result.nxdomainHijackSuspected) { true -> "suspected"; false -> "not detected"; else -> "unknown" }}"
-                    val row = tv(label, 10f, if (result.dnsReachable) Palette.cyan else Palette.muted, 0).apply {
-                        setPadding(dpi(8), dpi(8), dpi(8), dpi(8)); background = Palette.glass(this@MainActivity, 10f)
-                        setOnClickListener { selectedResolver = result.resolver; toast("Selected ${result.resolver}") }
-                        setOnLongClickListener {
-                            val host = if (result.resolver.startsWith("[")) result.resolver.substringAfter("[").substringBefore("]") else result.resolver.substringBeforeLast(":")
-                            text = "$label\nTesting DNS-over-TLS on port 853…"
-                            DnsResolverScanner.testDot(this@MainActivity, host) { ok -> text = "$label\nDNS-over-TLS: ${if (ok) "reachable" else "not verified"}" }
-                            true
+        val selectedResolvers = linkedSetOf<String>() // preserve order
+        // pre-select existing
+        profileSettings.dnsResolvers.forEach { selectedResolvers.add(it) }
+        selectedCountTv.text = "Selected: ${selectedResolvers.size}"
+        var primaryResolver = profileSettings.selectedResolver.ifBlank { selectedResolvers.firstOrNull().orEmpty() }
+
+        fun refreshSelectedLabel() {
+            selectedCountTv.text = "Selected: ${selectedResolvers.size}" + if (primaryResolver.isNotBlank()) " • primary: $primaryResolver" else ""
+        }
+        refreshSelectedLabel()
+
+        fun addResolverRow(label: String, endpoint: String, detail: String) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dpi(4), dpi(6), dpi(4), dpi(6))
+            }
+            val cb = android.widget.CheckBox(this).apply {
+                isChecked = selectedResolvers.contains(endpoint)
+                setOnCheckedChangeListener { _, checked ->
+                    if (checked) {
+                        selectedResolvers.add(endpoint)
+                        if (primaryResolver.isBlank()) primaryResolver = endpoint
+                    } else {
+                        selectedResolvers.remove(endpoint)
+                        if (primaryResolver == endpoint || primaryResolver !in selectedResolvers) {
+                            primaryResolver = selectedResolvers.firstOrNull().orEmpty()
                         }
                     }
-                    scanResults.addView(row, lp(MATCH, WRAP, 5))
+                    refreshSelectedLabel()
                 }
             }
-        }, lp(MATCH, dpi(44), 6))
-        form.addView(scanResults, lp(MATCH, WRAP, 4))
-        val dialog = dialogBuilder().setTitle("EDIT PROFILE").setView(ScrollView(this).apply { isFillViewport = true; addView(form) }).setNegativeButton("Cancel", null).setPositiveButton("Save", null).create()
+            val text = TextView(this).apply {
+                this.text = "$label\n$detail"
+                textSize = 11.5f
+                setTextColor(Palette.text)
+                setPadding(dpi(6), 0, 0, 0)
+                setOnLongClickListener {
+                    val host = endpoint.substringBefore(':').substringAfter("://").substringBefore('/')
+                    if (host.isNotBlank()) {
+                        DnsResolverScanner.testDot(this@MainActivity, host) { ok ->
+                            runOnUiThread { this.text = "$label\n$detail\nDNS-over-TLS: ${if (ok) "reachable" else "not verified"}" }
+                        }
+                    }
+                    true
+                }
+                setOnClickListener {
+                    // set as primary when already selected
+                    if (selectedResolvers.contains(endpoint)) {
+                        primaryResolver = endpoint
+                        refreshSelectedLabel()
+                        toast("Primary resolver: $endpoint")
+                    }
+                }
+            }
+            row.addView(cb, LinearLayout.LayoutParams(WRAP, WRAP))
+            row.addView(text, LinearLayout.LayoutParams(0, WRAP, 1f))
+            scanResults.addView(row, lp(MATCH, WRAP, 2))
+        }
+
+        // show current selections as rows even before scan
+        selectedResolvers.forEach { ep -> addResolverRow(ep, ep, "saved") }
+
+        val actionRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        actionRow.addView(ghostButton("Scan") {
+            val candidates = resolverSeed.text.toString().lines().map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+            if (candidates.isEmpty()) { toast("Enter at least one DNS resolver."); return@ghostButton }
+            scanResults.removeAllViews()
+            toast("Scanning…")
+            DnsResolverScanner.scan(this, candidates) { results ->
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    scanResults.removeAllViews()
+                    if (results.isEmpty()) {
+                        dnsBody.addView(tv("No results", 11f, Palette.muted, 0))
+                        return@runOnUiThread
+                    }
+                    results.forEach { r ->
+                        val ep = r.resolver
+                        val ok = r.dnsReachable || r.udpReachable || r.tcpReachable
+                        val detail = buildString {
+                            if (r.udpReachable) append("UDP ")
+                            if (r.tcpReachable) append("TCP ")
+                            if (r.dotReachable) append("DoT ")
+                            if (r.latencyMs != null) append("${r.latencyMs}ms ")
+                            if (r.detail.isNotBlank()) append(r.detail)
+                            if (!ok && r.detail.isBlank()) append("failed")
+                        }.trim().ifBlank { "checked" }
+                        addResolverRow(ep, ep, detail)
+                    }
+                }
+            }
+        }, LinearLayout.LayoutParams(0, dpi(42), 1f).apply { rightMargin = dpi(4) })
+        actionRow.addView(ghostButton("Select All") {
+            for (i in 0 until scanResults.childCount) {
+                val row = scanResults.getChildAt(i) as? LinearLayout ?: continue
+                (row.getChildAt(0) as? android.widget.CheckBox)?.isChecked = true
+            }
+        }, LinearLayout.LayoutParams(0, dpi(42), 1f).apply { rightMargin = dpi(4) })
+        actionRow.addView(ghostButton("Clear") {
+            selectedResolvers.clear()
+            primaryResolver = ""
+            for (i in 0 until scanResults.childCount) {
+                val row = scanResults.getChildAt(i) as? LinearLayout ?: continue
+                (row.getChildAt(0) as? android.widget.CheckBox)?.isChecked = false
+            }
+            refreshSelectedLabel()
+        }, LinearLayout.LayoutParams(0, dpi(42), 1f).apply { rightMargin = dpi(4) })
+        actionRow.addView(ghostButton("Apply Selected") {
+            val settingsStore = ProfileSettingsStore(this)
+            val list = selectedResolvers.toList()
+            val primary = when {
+                list.isEmpty() -> ""
+                primaryResolver.isNotBlank() && primaryResolver in list -> primaryResolver
+                else -> list.firstOrNull().orEmpty()
+            }
+            primaryResolver = primary
+            // Persist DNS only for this profile; keep origin/customSettings; migrate hash if needed.
+            settingsStore.save(item.raw, list, primary, profileSettings.customSettings, profileSettings.origin)
+            refreshSelectedLabel()
+            toast(
+                if (list.isEmpty()) "DNS resolvers cleared for this profile."
+                else "Applied ${list.size} DNS resolver(s). Primary: ${primary.ifBlank { "none" }}"
+            )
+        }, LinearLayout.LayoutParams(0, dpi(42), 1f))
+        dnsBody.addView(actionRow, lp(MATCH, WRAP, 6))
+        dnsBody.addView(scanResults, lp(MATCH, WRAP, 4))
+
+        val dialog = dialogBuilder().setTitle("EDIT PROFILE")
+            .setView(ScrollView(this).apply { isFillViewport = true; addView(form) })
+            .setNegativeButton("Cancel", null).setPositiveButton("Save", null).create()
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val updatedRaw = raw.text.toString().trim()
-                val engine = ConfigDetector.detect(updatedRaw)
-                if (engine == ConfigEngine.UNKNOWN) { toast("This profile format is not supported."); return@setOnClickListener }
                 val profileName = name.text.toString().trim().ifBlank { item.name }
-                val meta = ProfileParser.parse(updatedRaw)
-                val updated = ServerItem(profileName.take(80), updatedRaw, engine, meta, true, item.country)
-                val locals = loadLocalProfiles().filterNot { it.raw.trim() == item.raw.trim() }.toMutableList()
-                locals.add(updated)
-                if (!persistLocalProfiles(locals)) { toast("Could not save this profile."); return@setOnClickListener }
+                var updatedRaw = item.raw
+                if (decoded != null && decodedForm != null && decoded.editableWithoutDroppingUnknownFields) {
+                    val newValues = linkedMapOf<String, String>()
+                    // keep any keys not shown
+                    decoded.values.forEach { (k, v) -> newValues[k] = v }
+                    decodedForm.collect().forEach { (k, v) -> newValues[k] = v }
+                    newValues["name"] = profileName
+                    when (val outcome = ManualProfile.build(decoded.protocol, newValues)) {
+                        is ManualOutcome.Ok -> updatedRaw = outcome.raw
+                        is ManualOutcome.Invalid -> {
+                            toast("${outcome.key}: ${outcome.message}")
+                            return@setOnClickListener
+                        }
+                    }
+                } else if (profileName != item.name) {
+                    // name-only update helpers for known schemes without full decode rebuild
+                    updatedRaw = tryRenameRaw(item, profileName) ?: item.raw
+                }
                 val settingsStore = ProfileSettingsStore(this)
                 settingsStore.migrate(item.raw, updatedRaw)
-                val resolverList = resolverInput.text.toString().lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.distinct().toList()
-                settingsStore.save(updatedRaw, resolverList, selectedResolver, profileSettings.customSettings)
+                // Empty selection must stay empty — never fall back to resolverSeed text.
+                val resolverList = selectedResolvers.toList()
+                val primary = when {
+                    resolverList.isEmpty() -> ""
+                    primaryResolver.isNotBlank() && primaryResolver in resolverList -> primaryResolver
+                    else -> resolverList.first()
+                }
+                settingsStore.save(updatedRaw, resolverList, primary, profileSettings.customSettings, profileSettings.origin)
+                val meta = ProfileParser.parse(updatedRaw)
+                val updated = ServerItem(profileName.take(80), updatedRaw, meta.engine, meta, true, item.country, item.panelId, item.panelName)
+                val locals = loadLocalProfiles().filterNot { it.raw.trim() == item.raw.trim() }.toMutableList()
+                locals.add(0, updated)
+                if (!persistLocalProfiles(locals)) { toast("Could not save this profile."); return@setOnClickListener }
                 servers = mergeSavedAndRemote(servers.filterNot { it.local })
                 serversState = ServersState.READY
-                if (currentConfig().trim() == item.raw.trim()) setConfig(updatedRaw) else rebuildServerList(-1)
+                rebuildServerList(-1)
+                if (selectedItem()?.raw?.trim() == item.raw.trim()) setConfig(updatedRaw)
                 dialog.dismiss()
                 toast("Profile saved.")
             }
         }
         dialog.show()
+        dialog.window?.setLayout((resources.displayMetrics.widthPixels * 0.94f).toInt(), WindowManager.LayoutParams.WRAP_CONTENT)
     }
+
+    /** Best-effort rename without exposing or rewriting unknown raw structure. */
+    private fun tryRenameRaw(item: ServerItem, newName: String): String? = runCatching {
+        when (item.engine) {
+            ConfigEngine.XRAY -> when {
+                item.raw.startsWith("vmess://", true) -> {
+                    val payload = item.raw.substringAfter("vmess://").substringBefore('#')
+                    val bytes = android.util.Base64.decode(payload, android.util.Base64.DEFAULT or android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP)
+                    val obj = JSONObject(String(bytes, Charsets.UTF_8)).put("ps", newName)
+                    "vmess://" + android.util.Base64.encodeToString(obj.toString().toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+                }
+                item.raw.startsWith("vless://", true) || item.raw.startsWith("trojan://", true) || item.raw.startsWith("ss://", true) ->
+                    Uri.parse(item.raw).buildUpon().fragment(newName).build().toString()
+                item.raw.trimStart().startsWith("{") -> JSONObject(item.raw).put("remarks", newName).toString()
+                else -> null
+            }
+            ConfigEngine.WIREGUARD, ConfigEngine.AMNEZIAWG -> {
+                val clean = item.raw.replace(Regex("(?im)^\\s*#\\s*Name\\s*=.*(?:\\r?\\n)?"), "")
+                "# Name = $newName\n$clean"
+            }
+            ConfigEngine.MHRV -> EngineProfiles.decodeMhrv(item.raw)?.let { EngineProfiles.encodeMhrv(newName, JSONObject(it.configJson)) }
+            ConfigEngine.DNS_TUNNEL -> EngineProfiles.decodeStormDns(item.raw)?.let { EngineProfiles.encodeStormDns(newName, it.clientConfig, it.resolvers) }
+            ConfigEngine.MASTERDNS -> MasterDnsProfiles.decode(item.raw)?.let { p ->
+                val obj = JSONObject(item.raw.substringAfter("://").let { String(android.util.Base64.decode(it, android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING), Charsets.UTF_8) }).put("name", newName)
+                "masterdns://" + android.util.Base64.encodeToString(obj.toString().toByteArray(Charsets.UTF_8), android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING)
+            }
+            ConfigEngine.COTTENDNS -> EngineProfiles.decodeCottenDns(item.raw)?.let { EngineProfiles.encodeCottenDns(newName, it.clientConfig, it.resolvers) }
+            ConfigEngine.DNS_CHANGER -> DnsChangerProfiles.decode(item.raw)?.let { DnsChangerProfiles.encode(newName, it.ipv4Primary, it.ipv4Secondary, it.ipv6Primary, it.ipv6Secondary) }
+            else -> null
+        }
+    }.getOrNull()
 
     private fun duplicateServerProfile(item: ServerItem) {
         val newName = (item.name + " (copy)").take(80)
@@ -2544,7 +2521,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
                 }
                 ConfigEngine.WIREGUARD, ConfigEngine.AMNEZIAWG -> {
                     val clean = item.raw.replace(Regex("(?im)^\\s*#\\s*Name\\s*=.*(?:\\r?\\n)?"), "")
-                    "# Name = $newName\\n$clean"
+                    "# Name = $newName\n$clean"
                 }
                 ConfigEngine.MHRV -> EngineProfiles.decodeMhrv(item.raw)?.let { EngineProfiles.encodeMhrv(newName, JSONObject(it.configJson)) }
                 ConfigEngine.DNS_TUNNEL -> EngineProfiles.decodeStormDns(item.raw)?.let { EngineProfiles.encodeStormDns(newName, it.clientConfig, it.resolvers) }
@@ -2564,53 +2541,50 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         val meta = ProfileParser.parse(copiedRaw)
         val duplicate = ServerItem(newName, copiedRaw, meta.engine, meta, true, item.country)
         if (!persistLocalProfiles(listOf(duplicate) + locals)) { toast("Could not save the duplicated profile."); return }
-        ProfileSettingsStore(this).duplicate(item.raw, copiedRaw)
+        ProfileSettingsStore(this).duplicate(item.raw, copiedRaw, TirexNetShare.ProfileOrigin.LOCAL_DUPLICATE)
         servers = mergeSavedAndRemote(servers.filterNot { it.local }); serversState = ServersState.READY
         rebuildServerList(-1); toast("Profile duplicated.")
     }
 
     private fun showDecodedProfileEditor(rawTarget: EditText) {
+        // Structured field editor — never displays the raw share URI.
         val decoded = ManualProfileDecoder.decode(rawTarget.text.toString())
-        if (decoded == null) { toast("This format has no safe field decoder. Use the raw configuration editor."); return }
-        if (!decoded.editableWithoutDroppingUnknownFields) {
-            dialogBuilder().setTitle("Raw-only profile").setMessage(decoded.note.ifBlank { "Unknown fields are present. Raw editing preserves them more safely." }).setPositiveButton("OK", null).show()
+        if (decoded == null) {
+            toast("This format has no safe field decoder.")
             return
         }
+        if (!decoded.editableWithoutDroppingUnknownFields) {
+            dialogBuilder().setTitle("Limited edit")
+                .setMessage(decoded.note.ifBlank { "Unknown fields are present. Only safe fields are shown; the rest stay in the internal config." })
+                .setPositiveButton("OK", null).show()
+        }
         val values = decoded.values.toMutableMap()
-        val form = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(14), dpi(8), dpi(14), dpi(8)) }
-        val editors = linkedMapOf<String, EditText>()
-        ManualProfile.fields(decoded.protocol).forEach { spec ->
-            if (spec.showWhen != null && !spec.showWhen.invoke(values)) return@forEach
-            form.addView(tv(spec.label + if (spec.required) " *" else "", 10.5f, Palette.muted, 0), lp(MATCH, WRAP, 8))
-            val editor = EditText(this).apply {
-                hint = spec.hint; setText(values[spec.key].orEmpty()); textSize = 12f
-                setTextColor(Palette.text); setHintTextColor(Palette.dim)
-                setSingleLine(spec.kind != FieldKind.MULTILINE)
-                if (spec.kind == FieldKind.MULTILINE) { minLines = 2; maxLines = 4; gravity = Gravity.TOP }
-                inputType = when (spec.kind) {
-                    FieldKind.NUMBER -> InputType.TYPE_CLASS_NUMBER
-                    FieldKind.SECRET -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-                    FieldKind.MULTILINE -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-                    else -> InputType.TYPE_CLASS_TEXT
-                }
-                background = fieldBackground(false); setPadding(dpi(10), dpi(8), dpi(10), dpi(8))
-            }
-            editors[spec.key] = editor
-            form.addView(editor, lp(MATCH, if (spec.kind == FieldKind.MULTILINE) dpi(84) else dpi(44), 3))
+        // Same renderer as Manual Config: grouped cards, General vs Advanced, chip selectors.
+        val ff = Kit.FieldForm(this, decoded.protocol, values, fillDefaults = true)
+        val scroll = ScrollView(this).apply {
+            clipToPadding = false
+            setPadding(dpi(14), dpi(4), dpi(14), dpi(10))
+            addView(ff.root)
         }
-        val scroller = ScrollView(this).apply { isFillViewport = true; addView(form) }
-        val dialog = dialogBuilder().setTitle("EDIT ${decoded.protocol.label.uppercase(Locale.US)} FIELDS").setView(scroller)
-            .setNegativeButton("Cancel", null).setPositiveButton("Apply", null).create()
-        dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                editors.forEach { (key, edit) -> values[key] = edit.text.toString() }
-                when (val built = ManualProfile.build(decoded.protocol, values)) {
-                    is ManualOutcome.Invalid -> { editors[built.key]?.error = built.message; toast(built.message) }
-                    is ManualOutcome.Ok -> { rawTarget.setText(built.raw); dialog.dismiss(); toast("Decoded fields applied. Review and save the profile.") }
+        dialogBuilder().setTitle("Edit fields • ${decoded.protocol.label}")
+            .setView(scroll)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Apply") { _, _ ->
+                if (!decoded.editableWithoutDroppingUnknownFields) {
+                    toast("Changes applied only to safe fields; unknown data kept internally.")
                 }
-            }
-        }
-        dialog.show()
+                val newValues = linkedMapOf<String, String>()
+                decoded.values.forEach { (k, v) -> newValues[k] = v }
+                ff.collect().forEach { (k, v) -> newValues[k] = v }
+                when (val outcome = ManualProfile.build(decoded.protocol, newValues)) {
+                    is ManualOutcome.Ok -> {
+                        // Write reconstructed raw back into the hidden target (not shown in UI).
+                        rawTarget.setText(outcome.raw)
+                        toast("Fields applied.")
+                    }
+                    is ManualOutcome.Invalid -> toast("${outcome.key}: ${outcome.message}")
+                }
+            }.show()
     }
 
     private fun removeServerProfile(item: ServerItem) {
@@ -3064,6 +3038,9 @@ private fun buildLogin(): View {
         inputType = if (password) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         background = Palette.glass(this@MainActivity, 16f, Palette.stroke, Palette.fieldFill, Palette.fieldFill)
+        setOnFocusChangeListener { v, focus ->
+            v.background = Palette.glass(this@MainActivity, 16f, if (focus) Palette.strokeActive else Palette.stroke, Palette.fieldFill, Palette.fieldFill)
+        }
     }
 
     private fun primaryButton(label: String, onClick: () -> Unit): TextView = tv(label, 14f, Palette.onPrimary, 2).apply {
@@ -3558,18 +3535,20 @@ private fun buildLogin(): View {
         val duplicates: Int,
         val invalid: Int,
         val persisted: Boolean,
-        val bundleFailures: Int = 0
+        val bundleFailures: Int = 0,
+        val shareFailures: Int = 0
     )
 
     /** One structured config stays whole; otherwise every non-empty line is a separate share link. */
     private fun splitConfigs(text: String): List<String> {
         val t = text.trim()
         if (t.isEmpty()) return emptyList()
+        if (TirexNetShare.isTirexNetShare(t)) return listOf(t)
         if (t.startsWith("{") || t.contains("[interface]", ignoreCase = true) ||
             ConfigDetector.detect(t) == ConfigEngine.OPENVPN) return listOf(t)
 
         val lines = t.lineSequence().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.toList()
-        val slipSchemes = listOf("slipnet://", "slipnet-enc://", "slipnet-bundle-enc://")
+        val slipSchemes = listOf("slipnet://", "slipnet-enc://", "slipnet-bundle-enc://", "tirexnet://share/")
         fun isSlipStart(line: String) = slipSchemes.any { line.startsWith(it, true) }
         if (lines.firstOrNull()?.let(::isSlipStart) == true) {
             // A share URI may be wrapped over several lines by chat apps.
@@ -3585,10 +3564,22 @@ private fun buildLogin(): View {
     private fun doImport(text: String, existingRaws: Set<String>, country: String = "", bundlePassword: String = ""): ImportOutcome {
         val expanded = ArrayList<String>()
         var bundleFailures = 0
+        var shareFailures = 0
+        val tirexPayloads = ArrayList<TirexNetShare.SharePayload>()
         for (candidate in splitConfigs(text)) {
             if (candidate.startsWith("slipnet-bundle-enc://", true)) {
                 val unpacked = if (bundlePassword.isNotBlank()) EngineProfiles.decodeSlipNetBundle(candidate, bundlePassword) else null
                 if (unpacked.isNullOrEmpty()) bundleFailures++ else expanded.addAll(unpacked)
+            } else if (TirexNetShare.isTirexNetShare(candidate)) {
+                try {
+                    val decoded = TirexNetShare.decode(candidate)
+                    tirexPayloads.add(decoded.payload)
+                    expanded.add(decoded.payload.raw)
+                } catch (e: TirexNetShare.ShareError) {
+                    shareFailures++
+                } catch (_: Exception) {
+                    shareFailures++
+                }
             } else {
                 expanded.add(candidate)
             }
@@ -3599,7 +3590,9 @@ private fun buildLogin(): View {
         saved.forEach { known.add(it.raw.trim()) }
         val added = ArrayList<ServerItem>()
         var dup = 0
-        var bad = bundleFailures
+        var bad = bundleFailures + shareFailures
+        val store = ProfileSettingsStore(this)
+        var tirexIdx = 0
         for (c in candidates) {
             val meta = ProfileParser.parse(c)
             val structured = c.startsWith("{")
@@ -3608,16 +3601,45 @@ private fun buildLogin(): View {
                 ConfigEngine.XRAY -> structured || meta.host.isNotBlank()
                 ConfigEngine.SLIPNET -> EngineProfiles.decodeSlipNet(c) != null
                 ConfigEngine.DNS_CHANGER -> DnsChangerProfiles.decode(c) != null
-                else -> meta.host.isNotBlank()
+                else -> meta.host.isNotBlank() || meta.engine != ConfigEngine.UNKNOWN
             }
             if (!ok) { bad++; continue }
             if (!known.add(c.trim())) { dup++; continue }
-            val name = ProfileParser.bestName(listOf(meta.name), saved.size + added.size + 1)
-            added.add(ServerItem(name, c.trim(), meta.engine, meta, true, country.ifEmpty { ProfileParser.flagCountryOf(name) }))
+            val fromTirex = tirexPayloads.getOrNull(tirexIdx)
+            if (fromTirex != null && fromTirex.raw.trim() == c.trim()) tirexIdx++
+            val displayName = when {
+                fromTirex != null -> fromTirex.name.ifBlank { "Imported profile" }
+                else -> ProfileParser.bestName(listOf(meta.name), saved.size + added.size + 1)
+            }
+            val item = ServerItem(
+                displayName,
+                c.trim(),
+                meta.engine,
+                meta,
+                true,
+                country.ifEmpty { fromTirex?.country?.ifEmpty { ProfileParser.flagCountryOf(displayName) } ?: ProfileParser.flagCountryOf(displayName) }
+            )
+            added.add(item)
+            // Apply origin + DNS from opaque share
+            if (fromTirex != null) {
+                store.save(
+                    c.trim(),
+                    fromTirex.dnsResolvers,
+                    fromTirex.selectedResolver,
+                    fromTirex.customSettings,
+                    TirexNetShare.ProfileOrigin.IMPORTED_TIREXNET
+                )
+            } else {
+                // Mark pasted imports when origin still unknown
+                val existing = store.get(c.trim())
+                if (existing.origin == TirexNetShare.ProfileOrigin.UNKNOWN) {
+                    store.setOrigin(c.trim(), TirexNetShare.ProfileOrigin.PASTED)
+                }
+            }
         }
-        if (added.isEmpty()) return ImportOutcome(emptyList(), dup, bad, true, bundleFailures)
+        if (added.isEmpty()) return ImportOutcome(emptyList(), dup, bad, true, bundleFailures, shareFailures)
         val persisted = persistLocalProfiles(added + saved)
-        return ImportOutcome(if (persisted) added else emptyList(), dup, bad, persisted, bundleFailures)
+        return ImportOutcome(if (persisted) added else emptyList(), dup, bad, persisted, bundleFailures, shareFailures)
     }
 
     private fun importText(text: String, country: String = "") {
@@ -3691,6 +3713,7 @@ private fun buildLogin(): View {
         }
         if (o.added.isEmpty()) {
             val msg = when {
+                o.shareFailures > 0 -> "لینک tirexnet:// نامعتبر، ناقص، دستکاری‌شده یا ناسازگار با این نسخه است."
                 o.bundleFailures > 0 -> "رمز بسته SlipNet اشتباه است یا فایل bundle خراب شده است."
                 o.duplicates > 0 && o.invalid == 0 -> "این کانفیگ قبلاً در لیست هست."
                 else -> "کانفیگ پشتیبانی‌شده‌ای پیدا نشد. Xray / WireGuard / AmneziaWG / OpenVPN / MHRV / StormDNS / MasterDNS / CottenDNS / Patterniha / SlipNet لازم است."
@@ -3708,6 +3731,7 @@ private fun buildLogin(): View {
         if (o.duplicates > 0) msg += " (${o.duplicates} تکراری رد شد)"
         if (o.invalid > 0) msg += " (${o.invalid} مورد نامعتبر)"
         if (o.bundleFailures > 0) msg += " • رمز یا ساختار SlipNet bundle نامعتبر بود"
+        if (o.shareFailures > 0) msg += " • ${o.shareFailures} لینک tirexnet:// نامعتبر بود"
         toast(msg)
         if (addOverlay != null) { closeAddServer(); showTab(1) }
     }
@@ -4594,7 +4618,7 @@ private fun request(
 
         // --- 3. Raw editor
         val rawCard = GlassCard(this, 22f, pad = 16)
-        rawCard.addView(tv("RAW CONFIG", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
+        rawCard.addView(tv("IMPORT CONFIG", 8.5f, Palette.muted, 1).apply { letterSpacing = 0.18f })
         rawCard.addView(tv("Paste Xray, WireGuard, OpenVPN, MHRV, StormDNS, MasterDNS (masterdns://), CottenDNS, Patterniha or SlipNet (slipnet://) share links. SlipNet links can be imported here; runtime availability is shown in SlipNet settings.", 11.5f, Palette.muted, 0), lp(MATCH, WRAP, 6))
         val raw = EditText(this).apply {
             hint = "vless://…  |  { \"outbounds\": … }  |  [Interface] …"
@@ -4722,89 +4746,32 @@ private fun request(
         val box = manualFieldsBox ?: return
         box.removeAllViews()
         manualFieldViews.clear()
-        var lastSection = ""
-        for (f in ManualProfile.fields(manualProtocol)) {
-            val cond = f.showWhen
-            if (cond != null && !cond(manualValues)) continue
-            if (f.section.isNotEmpty() && f.section != lastSection) {
-                lastSection = f.section
-                box.addView(tv(f.section.uppercase(), 8.5f, Palette.cyan, 1).apply { letterSpacing = 0.18f }, lp(MATCH, WRAP, 18))
-            }
-            box.addView(tv(f.label + if (f.required) " *" else "", 11f, Palette.muted, 1), lp(MATCH, WRAP, 12))
-            if (f.kind == FieldKind.CHOICE) {
-                val hs = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
-                val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-                hs.addView(r, FrameLayout.LayoutParams(WRAP, WRAP))
-                val current = manualValues[f.key].orEmpty()
-                for (c in f.choices) {
-                    r.addView(chip(if (c.isEmpty()) "none" else c, c == current) {
-                        manualValues[f.key] = c
-                        rebuildManualFields() // dependent fields (TLS, Reality, transport) appear/disappear
-                    }, lp(WRAP, WRAP, 0, 0, 0, 8))
-                }
-                box.addView(hs, lp(MATCH, WRAP, 6))
-            } else {
-                val et = EditText(this).apply {
-                    hint = f.hint
-                    textSize = 14f
-                    setTextColor(Palette.text)
-                    setHintTextColor(Palette.dim)
-                    setSingleLine(f.kind != FieldKind.MULTILINE)
-                    if (f.kind == FieldKind.MULTILINE) {
-                        minLines = 3
-                        maxLines = 6
-                        gravity = Gravity.TOP or Gravity.START
-                    }
-                    setPadding(dpi(14), dpi(if (f.kind == FieldKind.MULTILINE) 10 else 0), dpi(14), dpi(10))
-                    background = fieldBackground(false)
-                    inputType = when (f.kind) {
-                        FieldKind.NUMBER -> InputType.TYPE_CLASS_NUMBER
-                        FieldKind.SECRET -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-                        FieldKind.MULTILINE -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-                        else -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-                    }
-                    imeOptions = EditorInfo.IME_ACTION_NEXT
-                    textDirection = View.TEXT_DIRECTION_FIRST_STRONG // Persian and English both render correctly
-                    contentDescription = f.label
-                    setText(manualValues[f.key].orEmpty())
-                    addTextChangedListener(object : TextWatcher {
-                        override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
-                        override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
-                        override fun afterTextChanged(s: Editable?) { manualValues[f.key] = s?.toString().orEmpty() }
-                    })
-                }
-                manualFieldViews[f.key] = et
-                box.addView(et, lp(MATCH, dpi(if (f.kind == FieldKind.MULTILINE) 116 else 50), 6))
-            }
-        }
+        // Same renderer as the decoded editor: grouped cards, General vs Advanced, chip selectors.
+        val form = Kit.FieldForm(this, manualProtocol, manualValues)
+        manualForm = form
+        box.addView(form.root, lp(MATCH, WRAP))
+        manualFieldViews.putAll(form.inputs)
+        val notes = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         if (manualProtocol == ManualProtocol.DNS_CHANGER) {
-            box.addView(tv(
-                "Dedicated DNS mode • forwards classic DNS (UDP/53) to the selected resolvers. Other traffic stays on the normal network. Android allows only one active VPN at a time, so disconnect another VPN before using this profile.",
-                10.5f, Palette.cyan, 0
+            notes.addView(Kit.noteCard(this,
+                "Dedicated DNS mode • forwards classic DNS (UDP/53) to the selected resolvers. Other traffic stays on the normal network. Android allows only one active VPN at a time, so disconnect another VPN before using this profile."
             ), lp(MATCH, WRAP, 12))
         }
         if (manualProtocol.isSlipNet) {
-            box.addView(tv(
-                "Saved as an official SlipNet profile and run by the in-app SlipNet engine (DNSTT / VayDNS / Soar and optional SSH).",
-                10.5f, Palette.cyan, 0
+            notes.addView(Kit.noteCard(this,
+                "Saved as an official SlipNet profile and run by the in-app SlipNet engine (DNSTT / VayDNS / Soar and optional SSH)."
             ), lp(MATCH, WRAP, 12))
         } else if (manualProtocol == ManualProtocol.MASTERDNS) {
-            box.addView(tv(
-                "Runs the MasterDnsVPN client locally (SOCKS5 on 127.0.0.1) and routes the whole device through it. Domains, key and encryption method must match the server.",
-                10.5f, Palette.cyan, 0
+            notes.addView(Kit.noteCard(this,
+                "Runs the MasterDnsVPN client locally (SOCKS5 on 127.0.0.1) and routes the whole device through it. Domains, key and encryption method must match the server."
             ), lp(MATCH, WRAP, 12))
         }
+        box.addView(notes, lp(MATCH, WRAP))
         // Optional flag source for manual profiles (the only reliable country metadata we have for them).
-        box.addView(tv("Country code (optional)", 11f, Palette.muted, 1), lp(MATCH, WRAP, 12))
-        val cc = EditText(this).apply {
+        val (ccCard, ccBody) = Kit.card(this, "Flag", Icon.GLOBE, subtitle = "Optional country shown next to this server")
+        Kit.labeledInput(this, ccBody, "Country code (optional)") {
             hint = "e.g. DE, US, TR"
-            textSize = 14f
-            setTextColor(Palette.text)
-            setHintTextColor(Palette.dim)
-            setSingleLine(true)
             filters = arrayOf<android.text.InputFilter>(android.text.InputFilter.LengthFilter(2))
-            setPadding(dpi(14), 0, dpi(14), 0)
-            background = fieldBackground(false)
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             imeOptions = EditorInfo.IME_ACTION_DONE
             contentDescription = "Country code"
@@ -4815,16 +4782,17 @@ private fun request(
                 override fun afterTextChanged(s: Editable?) { manualCountry = s?.toString().orEmpty() }
             })
         }
-        box.addView(cc, lp(MATCH, dpi(50), 6))
+        box.addView(ccCard, lp(MATCH, WRAP, 14))
     }
 
     private fun saveManual() {
         val values = HashMap(manualValues)
-        for ((_, v) in manualFieldViews) v.background = fieldBackground(false)
+        manualForm?.clearErrors()
         when (val out = ManualProfile.build(manualProtocol, values)) {
             is ManualOutcome.Invalid -> {
                 manualError?.apply { text = out.message; visibility = View.VISIBLE }
-                manualFieldViews[out.key]?.let { it.background = fieldBackground(true); it.requestFocus() }
+                manualForm?.markError(out.key) // opens Advanced automatically if the bad field lives there
+                manualForm?.let { manualFieldViews.clear(); manualFieldViews.putAll(it.inputs) }
             }
             is ManualOutcome.Ok -> {
                 manualError?.visibility = View.GONE
@@ -4844,11 +4812,11 @@ private fun request(
     /** Dialogs follow the in-app theme instead of always using the system dark one. */
     private fun dialogBuilder(): AlertDialog.Builder = AlertDialog.Builder(
         this,
-        if (Palette.dark) android.R.style.Theme_Material_Dialog_Alert else android.R.style.Theme_Material_Light_Dialog_Alert
+        if (Palette.dark) com.tirexnet.app.R.style.TirexDialogDark else com.tirexnet.app.R.style.TirexDialogLight
     )
 
     private fun toast(message: String) {
-        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+        Kit.toast(this, message)
     }
 
     companion object {

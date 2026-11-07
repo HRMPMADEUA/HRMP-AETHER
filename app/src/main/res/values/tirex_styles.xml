@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Used by every AlertDialog in the app so no dialog keeps the stock Android look. -->
+    <style name="TirexDialogDark" parent="@android:style/Theme.Material.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/tirex_dialog_bg_dark</item>
+        <item name="android:colorAccent">#3797F4</item>
+        <item name="android:textColorPrimary">#F4F8FF</item>
+        <item name="android:textColorSecondary">#A9BCD2</item>
+        <item name="android:textColorAlertDialogListItem">#F4F8FF</item>
+        <item name="android:windowMinWidthMajor">92%</item>
+        <item name="android:windowMinWidthMinor">92%</item>
+    </style>
+    <style name="TirexDialogLight" parent="@android:style/Theme.Material.Light.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/tirex_dialog_bg_light</item>
+        <item name="android:colorAccent">#196FCD</item>
+        <item name="android:textColorPrimary">#15273B</item>
+        <item name="android:textColorSecondary">#536981</item>
+        <item name="android:textColorAlertDialogListItem">#15273B</item>
+        <item name="android:windowMinWidthMajor">92%</item>
+        <item name="android:windowMinWidthMinor">92%</item>
+    </style>
+</resources>
