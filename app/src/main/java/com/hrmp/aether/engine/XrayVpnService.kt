@@ -305,6 +305,17 @@ class XrayVpnService : VpnService() {
         message: String,
         active: Boolean
     ) {
+        if (!active) {
+            // When WireGuard / SlipNet / DNS Changer / OpenVPN starts, Android revokes this service's VPN
+            // (onRevoke) and Xray reports "disconnected" a moment later. That event is stale: the new engine
+            // owns the connection now. Reporting it would wipe the new engine's state and make the UI drop
+            // a perfectly good connection ("connects then disconnects by itself").
+            val owner = getSharedPreferences("tirexnet", MODE_PRIVATE).getString("active_engine", "").orEmpty()
+            if (owner.isNotBlank() && owner !in XRAY_FAMILY) {
+                isActive = false
+                return
+            }
+        }
         isActive = active
         if (active) {
             // Same notification id as the foreground one: name + live speed + Disconnect, refreshed in place.
@@ -361,6 +372,9 @@ class XrayVpnService : VpnService() {
 
     companion object {
         private const val TAG = "TirexXray"
+
+        /** Engines that run inside this service (ConfigEngine names). */
+        private val XRAY_FAMILY = setOf("XRAY", "MHRV", "DNS_TUNNEL", "MASTERDNS", "COTTENDNS", "SNI_SPOOF")
 
         private const val STARTUP_TIMEOUT_SECONDS = 10L
 

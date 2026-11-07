@@ -31,6 +31,30 @@ sealed interface TirexSlipNetImportResult {
     data class Failure(val message: String) : TirexSlipNetImportResult
 }
 
+/** One decoded field of a SlipNet profile. [secret] values are masked in the UI until the user taps them. */
+data class TirexSlipNetField(val key: String, val value: String, val secret: Boolean = false)
+
+/**
+ * Everything the official SlipNet decoder returned for one profile, plus the owner's limits
+ * interpreted from it. Built from the official [ServerProfile] model, so nothing is guessed or dropped.
+ */
+data class TirexSlipNetInspection(
+    val name: String,
+    val fields: List<TirexSlipNetField>,
+    val warnings: List<String>,
+    /** Epoch millis; 0 = no expiry. */
+    val expiresAtMillis: Long,
+    val sharingAllowed: Boolean,
+    val deviceBound: Boolean,
+    val locked: Boolean
+)
+
+sealed interface TirexSlipNetInspectResult {
+    data class Ok(val profiles: List<TirexSlipNetInspection>) : TirexSlipNetInspectResult
+    data object NeedsPassword : TirexSlipNetInspectResult
+    data class Failure(val message: String) : TirexSlipNetInspectResult
+}
+
 /** In-process bridge to SlipNet's database, settings and VPN service. No SlipNet UI is launched. */
 class TirexSlipNetRuntime(context: Context) {
     private val appContext = context.applicationContext
@@ -102,6 +126,77 @@ class TirexSlipNetRuntime(context: Context) {
                 TirexSlipNetImportResult.Ready(selected.name, importedCount, parsed.warnings)
             }
         }
+    }
+
+    /**
+     * Decodes a slipnet:// or slipnet-enc:// link with SlipNet's own importer (which holds the real key,
+     * IV/tag handling and version checks) and returns every field. Nothing is saved and no secret is logged.
+     * slipnet-bundle-enc:// is a different, password-based format and is passed through unchanged.
+     */
+    suspend fun inspect(raw: String, bundlePassword: String? = null): TirexSlipNetInspectResult =
+        when (val parsed = importer.parseAndImport(
+            input = raw.trim(),
+            localDeviceId = manager.getDeviceId(),
+            bundlePassword = bundlePassword
+        )) {
+            ImportResult.NeedsPassword -> TirexSlipNetInspectResult.NeedsPassword
+            is ImportResult.Error -> TirexSlipNetInspectResult.Failure(parsed.message)
+            is ImportResult.Success ->
+                if (parsed.profiles.isEmpty()) TirexSlipNetInspectResult.Failure("No valid SlipNet profile was found.")
+                else TirexSlipNetInspectResult.Ok(parsed.profiles.map { describe(it, parsed.warnings) })
+        }
+
+    private fun renderValue(value: Any?): String = when (value) {
+        null -> ""
+        is Collection<*> -> value.joinToString(", ") { renderValue(it) }
+        is Enum<*> -> value.name.lowercase(Locale.US)
+        is String, is Number, is Boolean -> value.toString()
+        else -> {
+            // Nested model (e.g. a DNS resolver): prefer host:port when the model exposes them.
+            val host = runCatching { value.javaClass.getMethod("getHost").invoke(value)?.toString() }.getOrNull()
+            val port = runCatching { value.javaClass.getMethod("getPort").invoke(value)?.toString() }.getOrNull()
+            if (!host.isNullOrBlank()) (if (!port.isNullOrBlank()) "$host:$port" else host) else value.toString()
+        }
+    }
+
+    private fun describe(profile: ServerProfile, warnings: List<String>): TirexSlipNetInspection {
+        val values = LinkedHashMap<String, Any?>()
+        profile.javaClass.methods
+            .filter { it.parameterCount == 0 && it.name != "getClass" && it.name.length > 2 &&
+                (it.name.startsWith("get") || (it.name.startsWith("is") && it.returnType == java.lang.Boolean.TYPE)) }
+            .sortedBy { it.name }
+            .forEach { m ->
+                val key = if (m.name.startsWith("get")) m.name.removePrefix("get").replaceFirstChar { it.lowercase(Locale.US) } else m.name
+                runCatching { values[key] = m.invoke(profile) }
+            }
+        val priority = listOf("name", "tunnel", "protocol", "domain", "host", "publickey", "resolver", "dns", "port", "listen",
+            "socks", "congestion", "mtu", "keepalive", "ssh", "expir", "shar", "bound", "bind", "lock")
+        val fields = values.entries
+            .map { (k, v) -> TirexSlipNetField(k, renderValue(v), Regex("(?i)pass|secret|privatekey|hash|token").containsMatchIn(k)) }
+            .filter { it.value.isNotBlank() }
+            .sortedBy { f -> priority.indexOfFirst { f.key.lowercase(Locale.US).contains(it) }.let { if (it < 0) priority.size else it } }
+        val expires = values.entries.firstOrNull { it.key.lowercase(Locale.US).contains("expir") && it.value is Number }
+            ?.let { (it.value as Number).toLong() } ?: 0L
+        val sharing = values.entries.firstOrNull { it.key.lowercase(Locale.US).contains("shar") && it.value is Boolean }
+            ?.let { (k, v) ->
+                val low = k.lowercase(Locale.US)
+                val restrictive = listOf("block", "disable", "prevent", "forbid", "restrict", "lock").any { low.contains(it) }
+                if (restrictive) !(v as Boolean) else (v as Boolean)
+            } ?: true
+        val bound = values.entries.any { (k, v) ->
+            val low = k.lowercase(Locale.US)
+            (low.contains("bound") || low.contains("bind")) && ((v is Boolean && v) || (v is String && v.isNotBlank()))
+        }
+        val locked = values["isLocked"] == true
+        return TirexSlipNetInspection(
+            name = profile.name,
+            fields = fields,
+            warnings = warnings,
+            expiresAtMillis = expires,
+            sharingAllowed = sharing,
+            deviceBound = bound,
+            locked = locked
+        )
     }
 
     fun preparedProfileNeedsPassword(): Boolean = preparedProfile?.isLocked == true

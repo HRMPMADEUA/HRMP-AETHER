@@ -72,6 +72,8 @@ import com.tirexnet.app.engine.MhrvEngine
 import com.tirexnet.app.engine.MhrvCertificate
 import com.tirexnet.app.engine.OpenVpnEngine
 import com.tirexnet.app.engine.OvpnImport
+import com.tirexnet.app.TirexSlipNetInspectResult
+import com.tirexnet.app.TirexSlipNetInspection
 import com.tirexnet.app.engine.WireGuardImport
 import com.tirexnet.app.engine.PingKind
 import com.tirexnet.app.engine.PingResult
@@ -127,6 +129,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 
 class MainActivity : Activity() {
@@ -368,7 +371,10 @@ private fun savePanelSession(
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val message = intent?.getStringExtra(XrayVpnService.EXTRA_MESSAGE) ?: return
-            applyStatus(message, intent.getBooleanExtra(XrayVpnService.EXTRA_ACTIVE, false))
+            val active = intent.getBooleanExtra(XrayVpnService.EXTRA_ACTIVE, false)
+            // A "disconnected" report from the Xray service is stale once another engine owns the tunnel.
+            if (!active && otherEngineOwnsTunnel()) return
+            applyStatus(message, active)
         }
     }
 
@@ -2061,6 +2067,8 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
     private fun friendlyConnectionError(raw: String): String {
         val v = raw.lowercase(Locale.US)
         return when {
+            v.contains("handshake") -> "WireGuard could not complete the handshake. Check the endpoint, the keys and your network, then try again."
+            v.contains("startup failed") || v.contains("could not start") -> ConfigSanitizer.redact(raw).take(140)
             v.contains("openvpn core") -> "OpenVPN is not available in this build. The profile is saved, but it cannot connect yet."
             v.contains("openvpn profile invalid") -> ConfigSanitizer.redact(raw).substringAfter("invalid: ", "This OpenVPN profile is not valid.").take(140)
             v.contains("permission") || v.contains("denied") || v.contains("revoked") -> "VPN permission was not granted. Please allow the connection request."
@@ -2221,13 +2229,15 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         val settings = ProfileSettingsStore(this).get(item.raw)
         val origin = settings.origin
         if (origin == TirexNetShare.ProfileOrigin.PROTECTED_IMPORT) { showProtectedActions(item); return }
-        val canShare = TirexNetShare.canShare(origin, item.local, item.panelId)
+        // The owner of an imported SlipNet profile can forbid re-sharing; that limit is honoured here.
+        val canShare = TirexNetShare.canShare(origin, item.local, item.panelId) && slipLimit(item, "slip.noshare") != "1"
         val sheet = Kit.Sheet(
             this, item.name,
             "${engineName(item.engine)} • Local profile",
             flagBox(44, 14f, item.country, Palette.cyan)
         )
         sheet.action(Icon.EDIT, "Edit profile", "Change name, fields and DNS resolvers") { editServerDialog(item) }
+        if (item.engine == ConfigEngine.SLIPNET) sheet.action(Icon.INFO, "Profile details", "All decoded fields, limits and policy") { showSlipNetDetails(item) }
         sheet.action(Icon.COPY, "Duplicate profile", "Create an independent local copy") { duplicateServerProfile(item) }
         if (canShare) sheet.action(Icon.GLOBE, "Share (TIREXNET)", "Send this profile to another TIREXNET user") { chooseShareMode(item) }
         if (item.engine == ConfigEngine.XRAY) sheet.action(Icon.SHIELD, "Change TLS serverName", "Set the SNI used for the TLS handshake") { showSniDialog(item) }
@@ -2251,6 +2261,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
 
     private fun shareTirexNetProfile(item: ServerItem, protectedShare: Boolean = false) {
         if (isProtected(item)) { toastProtected(); return }
+        if (slipLimit(item, "slip.noshare") == "1") { toast("The owner of this profile does not allow sharing it."); return }
         val store = ProfileSettingsStore(this)
         val settings = store.get(item.raw)
         if (!TirexNetShare.canShare(settings.origin, item.local, item.panelId)) {
@@ -3396,6 +3407,7 @@ private fun buildLogin(): View {
             return
         }
 
+        slipRestrictionBlock(selectedItem())?.let { toast(it); return }
         pendingRaw = config
         pendingEngine = ConfigEngine.SLIPNET
 
@@ -3566,12 +3578,38 @@ private fun buildLogin(): View {
         return stopped
     }
 
+    private val xrayFamily = setOf(ConfigEngine.XRAY, ConfigEngine.MHRV, ConfigEngine.DNS_TUNNEL, ConfigEngine.MASTERDNS, ConfigEngine.COTTENDNS, ConfigEngine.SNI_SPOOF)
+
+    /** True when a non-Xray engine is running or starting, so Xray status broadcasts must not touch the UI state. */
+    private fun otherEngineOwnsTunnel(): Boolean {
+        if (WgTunnelEngine.isActive || OpenVpnEngine.isActive) return true
+        if (runCatching { slipNetRuntime.isConnectedOrConnecting() }.getOrDefault(false)) return true
+        return (state == OrbState.CONNECTING || state == OrbState.CONNECTED) && pendingEngine !in xrayFamily &&
+            pendingEngine != ConfigEngine.UNKNOWN
+    }
+
+    private fun anotherEngineStillActive(target: ConfigEngine): Boolean =
+        (target !in xrayFamily && XrayVpnService.isActive) ||
+            (target != ConfigEngine.WIREGUARD && target != ConfigEngine.AMNEZIAWG && WgTunnelEngine.isActive) ||
+            (target != ConfigEngine.OPENVPN && OpenVpnEngine.isActive) ||
+            (target != ConfigEngine.SLIPNET && runCatching { slipNetRuntime.isConnectedOrConnecting() }.getOrDefault(false)) ||
+            (target != ConfigEngine.DNS_CHANGER && DnsChangerVpnService.isActive)
+
     private fun startSelectedEngine() {
         val target = pendingEngine
         if (stopConflictingEngines(target)) {
-            // Give the previous tunnel a moment to release the interface before the next one claims it.
-            handler.postDelayed({ startSelectedEngineNow() }, 600L)
+            // Wait until the previous engine has really released the tunnel (up to ~4 s), then start the new one.
+            waitForPreviousEngine(target, 0)
         } else startSelectedEngineNow()
+    }
+
+    private fun waitForPreviousEngine(target: ConfigEngine, attempt: Int) {
+        if (isFinishing || isDestroyed) return
+        if (anotherEngineStillActive(target) && attempt < 20) {
+            handler.postDelayed({ waitForPreviousEngine(target, attempt + 1) }, 200L)
+        } else {
+            handler.postDelayed({ startSelectedEngineNow() }, 150L)
+        }
     }
 
     private fun showOpenVpnUnavailableDialog() {
@@ -3792,6 +3830,7 @@ private fun buildLogin(): View {
     /** Parses, de-duplicates and saves. Runs off the main thread. Never logs or returns config content. */
     private fun doImport(text: String, existingRaws: Set<String>, country: String = "", bundlePassword: String = "", nameHint: String = ""): ImportOutcome {
         var firstReason = ""
+        val slipInspections = HashMap<String, TirexSlipNetInspection>()
         val expanded = ArrayList<String>()
         var bundleFailures = 0
         var shareFailures = 0
@@ -3829,7 +3868,16 @@ private fun buildLogin(): View {
             val ok = when (meta.engine) {
                 ConfigEngine.UNKNOWN -> false
                 ConfigEngine.XRAY -> structured || meta.host.isNotBlank()
-                ConfigEngine.SLIPNET -> EngineProfiles.decodeSlipNet(c) != null
+                ConfigEngine.SLIPNET -> EngineProfiles.decodeSlipNet(c) != null && run {
+                    if (!c.startsWith("slipnet-enc://", true)) true
+                    else when (val r = inspectSlipNet(c)) {
+                        // Official SlipNet could not be reached (e.g. core not linked): keep the previous behaviour.
+                        null -> true
+                        is TirexSlipNetInspectResult.Ok -> { slipInspections[c] = r.profiles.first(); true }
+                        TirexSlipNetInspectResult.NeedsPassword -> { if (firstReason.isEmpty()) firstReason = "This SlipNet profile needs a password."; false }
+                        is TirexSlipNetInspectResult.Failure -> { if (firstReason.isEmpty()) firstReason = r.message.take(200); false }
+                    }
+                }
                 ConfigEngine.DNS_CHANGER -> DnsChangerProfiles.decode(c) != null
                 ConfigEngine.WIREGUARD, ConfigEngine.AMNEZIAWG -> WireGuardImport.validate(c).let { problem ->
                     if (problem != null && firstReason.isEmpty()) firstReason = problem
@@ -3845,8 +3893,10 @@ private fun buildLogin(): View {
             if (!known.add(c.trim())) { dup++; continue }
             val fromTirex = tirexPayloads.getOrNull(tirexIdx)
             if (fromTirex != null && fromTirex.raw.trim() == c.trim()) tirexIdx++
+            val slipInfo = slipInspections[c]
             val displayName = when {
                 fromTirex != null -> fromTirex.name.ifBlank { "Imported profile" }
+                slipInfo != null && slipInfo.name.isNotBlank() -> slipInfo.name.trim().take(80)
                 else -> {
                     // A real name only: embedded name, then the file name, then the server host. Never blank/UUID/number.
                     val fromFile = if (nameHint.isNotBlank() && candidates.size == 1) when (meta.engine) {
@@ -3891,10 +3941,113 @@ private fun buildLogin(): View {
                     store.setOrigin(c.trim(), TirexNetShare.ProfileOrigin.PASTED)
                 }
             }
+            if (slipInfo != null) {
+                // The owner's limits are stored as plain, non-secret metadata next to the profile and enforced by the UI.
+                val cur = store.get(c.trim())
+                val custom = LinkedHashMap(cur.customSettings)
+                custom["slip.expires"] = slipInfo.expiresAtMillis.toString()
+                custom["slip.noshare"] = if (slipInfo.sharingAllowed) "0" else "1"
+                custom["slip.bound"] = if (slipInfo.deviceBound) "1" else "0"
+                custom["slip.locked"] = if (slipInfo.locked) "1" else "0"
+                store.save(
+                    c.trim(), cur.dnsResolvers, cur.selectedResolver, custom,
+                    if (slipInfo.locked) TirexNetShare.ProfileOrigin.PROTECTED_IMPORT
+                    else if (cur.origin == TirexNetShare.ProfileOrigin.UNKNOWN) TirexNetShare.ProfileOrigin.PASTED else cur.origin
+                )
+            }
         }
         if (added.isEmpty()) return ImportOutcome(emptyList(), dup, bad, true, bundleFailures, shareFailures, firstReason)
         val persisted = persistLocalProfiles(added + saved)
         return ImportOutcome(if (persisted) added else emptyList(), dup, bad, persisted, bundleFailures, shareFailures, firstReason)
+    }
+
+    /** Official SlipNet decode on the current (worker) thread; null when the SlipNet runtime is unavailable. */
+    private fun inspectSlipNet(raw: String): TirexSlipNetInspectResult? = try {
+        runBlocking(Dispatchers.IO) { slipNetRuntime.inspect(raw) }
+    } catch (e: Throwable) {
+        null
+    }
+
+    private fun slipLimit(item: ServerItem?, key: String): String =
+        if (item == null || !item.local) "" else ProfileSettingsStore(this).get(item.raw).customSettings[key].orEmpty()
+
+    private fun formatDate(millis: Long): String =
+        SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date(millis))
+
+    /** The owner's expiry is a real restriction: an expired profile is not connected. */
+    private fun slipRestrictionBlock(item: ServerItem?): String? {
+        val expires = slipLimit(item, "slip.expires").toLongOrNull() ?: 0L
+        return if (expires > 0 && System.currentTimeMillis() > expires)
+            "This profile expired on ${formatDate(expires)}. Ask its owner for a new one." else null
+    }
+
+    private fun showSlipNetDetails(item: ServerItem) {
+        toast("Reading profile…")
+        slipNetScope.launch {
+            val result = try {
+                withContext(Dispatchers.IO) { slipNetRuntime.inspect(item.raw) }
+            } catch (e: Throwable) {
+                TirexSlipNetInspectResult.Failure(e.message ?: "This profile could not be read.")
+            }
+            when (result) {
+                is TirexSlipNetInspectResult.Ok -> presentSlipNetDetails(item, result.profiles.first())
+                TirexSlipNetInspectResult.NeedsPassword -> toast("This profile needs its password.")
+                is TirexSlipNetInspectResult.Failure -> showImportErrorDialog("SlipNet profile", result.message)
+            }
+        }
+    }
+
+    private fun humanizeKey(key: String): String =
+        key.replace(Regex("([a-z0-9])([A-Z])"), "$1 $2").replaceFirstChar { it.uppercase(Locale.US) }
+
+    private fun presentSlipNetDetails(item: ServerItem, info: TirexSlipNetInspection) {
+        val sheet = Kit.Sheet(this, info.name.ifBlank { item.name }, "SlipNet • decoded profile", flagBox(44, 14f, item.country, Palette.cyan))
+        // Owner limits, shown honestly: expiry, device binding, sharing policy.
+        val limits = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        fun pill(text: String, color: Int) = limits.addView(Kit.pill(this, text, color), lp(WRAP, WRAP, 0, 0, 0, 8))
+        if (info.expiresAtMillis > 0) {
+            val expired = System.currentTimeMillis() > info.expiresAtMillis
+            pill(if (expired) "EXPIRED" else "EXPIRES ${formatDate(info.expiresAtMillis).substringBefore(' ')}", if (expired) Palette.red else Palette.mint)
+        } else pill("NO EXPIRY", Palette.mint)
+        if (info.deviceBound) pill("DEVICE BOUND", Palette.amber)
+        if (!info.sharingAllowed) pill("SHARING OFF", Palette.amber)
+        if (info.locked) pill("LOCKED", Palette.violet)
+        sheet.content(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(limits) }, 4)
+        info.warnings.take(3).forEach { sheet.content(Kit.noteCard(this, it, Palette.amber), 8) }
+
+        fun valueRow(parent: LinearLayout, f: com.tirexnet.app.TirexSlipNetField) {
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dpi(2), dpi(8), dpi(2), dpi(8)) }
+            row.addView(tv(humanizeKey(f.key), 11.5f, Palette.muted, 1), LinearLayout.LayoutParams(dpi(112), WRAP))
+            var shown = !f.secret
+            val value = tv(if (shown) f.value else "••••••••  (tap to show)", 12.5f, Palette.text, 1).apply { setTextIsSelectable(false) }
+            value.setOnClickListener {
+                if (f.secret) { shown = !shown; value.text = if (shown) f.value else "••••••••  (tap to show)" }
+            }
+            row.addView(value, LinearLayout.LayoutParams(0, WRAP, 1f))
+            parent.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
+        }
+        val connKeys = listOf("name", "tunnel", "protocol", "domain", "host", "publickey", "resolver", "dns", "port", "listen", "congestion", "mtu", "keepalive", "expir")
+        val credKeys = listOf("user", "pass", "uuid", "privatekey", "passphrase")
+        val (cConn, bConn) = Kit.card(this, "Connection & DNS", Icon.GLOBE)
+        val (cCred, bCred) = Kit.card(this, "Credentials", Icon.SHIELD, Palette.violet, "Tap a hidden value to show it")
+        val rest = ArrayList<com.tirexnet.app.TirexSlipNetField>()
+        for (f in info.fields) {
+            val low = f.key.lowercase(Locale.US)
+            when {
+                credKeys.any { low.contains(it) } -> valueRow(bCred, f)
+                connKeys.any { low.contains(it) } -> valueRow(bConn, f)
+                else -> rest.add(f)
+            }
+        }
+        if (bConn.childCount > 0) sheet.content(cConn, 10)
+        if (bCred.childCount > 0) sheet.content(cCred, 10)
+        if (rest.isNotEmpty()) {
+            val (cAll, bAll) = Kit.advancedCard(this, "${rest.size} more fields • nothing is hidden")
+            rest.forEach { valueRow(bAll, it) }
+            sheet.content(cAll, 10)
+        }
+        sheet.content(Kit.noteCard(this, "Editable here: profile name and DNS resolvers (Edit profile). The other fields belong to the encrypted source and are applied exactly as the owner defined them."), 10)
+        sheet.show()
     }
 
     private fun importText(text: String, country: String = "") {
