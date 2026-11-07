@@ -71,6 +71,8 @@ import com.tirexnet.app.engine.MasterDnsProfiles
 import com.tirexnet.app.engine.MhrvEngine
 import com.tirexnet.app.engine.MhrvCertificate
 import com.tirexnet.app.engine.OpenVpnEngine
+import com.tirexnet.app.engine.OvpnImport
+import com.tirexnet.app.engine.WireGuardImport
 import com.tirexnet.app.engine.PingKind
 import com.tirexnet.app.engine.PingResult
 import com.tirexnet.app.engine.PingTester
@@ -548,12 +550,23 @@ private fun savePanelSession(
     // =====================================================================
 
     private var crashScreenShown = false
+    /** File name of the file being imported, used only to name a profile that has no embedded name. */
+    @Volatile private var importNameHint: String = ""
 
     private fun installCrashRecorder() {
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
             // Keep only a neutral marker in the UI; preserve the real crash for logcat diagnostics.
-            runCatching { prefs.edit().putString("last_crash", "unexpected_shutdown").commit() }
+            runCatching {
+                // Class names + redacted message + top frames only: enough to find the cause, no config content.
+                val detail = buildString {
+                    append("thread=").append(thread.name).append('\n')
+                    append(error.javaClass.name).append(": ").append(ConfigSanitizer.redact(error.message.orEmpty()).take(200))
+                    error.stackTrace.take(16).forEach { append("\n  at ").append(it) }
+                    error.cause?.let { append("\nCaused by: ").append(it.javaClass.name) }
+                }
+                prefs.edit().putString("last_crash", "unexpected_shutdown").putString("last_crash_detail", detail).commit()
+            }
             previous?.uncaughtException(thread, error)
         }
     }
@@ -578,6 +591,18 @@ private fun savePanelSession(
             setOnClickListener { prefs.edit().remove("last_crash").commit(); recreate() }
         }
         col.addView(go, lp(MATCH, WRAP, 12))
+        val detail = prefs.getString("last_crash_detail", "").orEmpty()
+        if (detail.isNotBlank()) {
+            col.addView(TextView(this).apply {
+                text = "Copy crash details"; textSize = 13f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
+                setBackgroundColor(Color.rgb(40, 52, 78)); setPadding(0, dpi(12), 0, dpi(12))
+                setOnClickListener {
+                    val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    cm.setPrimaryClip(ClipData.newPlainText("TIREXNET crash", "TIREXNET " + versionName() + "\n" + detail))
+                    Toast.makeText(this@MainActivity, "Crash details copied.", Toast.LENGTH_SHORT).show()
+                }
+            }, lp(MATCH, WRAP, 10))
+        }
         val sv = ScrollView(this).apply { setBackgroundColor(Color.rgb(8, 12, 24)); addView(col) }
         setContentView(sv)
     }
@@ -1209,7 +1234,7 @@ private fun savePanelSession(
                     // Country flag takes the place of the old XR/WG/AW badge. The engine is still detected internally.
                     row.addView(flagBox(46, 14f, item.country, if (sel) Palette.cyan else Palette.ice).also { it.setSelectedState(sel) }, lp(dpi(50), dpi(50)))
                     val info = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dpi(12), 0, dpi(8), 0) }
-                    info.addView(tv(item.name, 14.5f, Palette.text, 1).apply { maxLines = 2; ellipsize = TextUtils.TruncateAt.END })
+                    info.addView(tv((if (isProtected(item)) "🔒 " else "") + item.name, 14.5f, Palette.text, 1).apply { maxLines = 2; ellipsize = TextUtils.TruncateAt.END })
                     val sub = listOf(
                         if (sel) "Selected" else "",
                         item.panelName.ifBlank { if (item.panelId.equals("ali", true) || item.panelId.equals("alipanel", true)) "AliPanel" else "" },
@@ -2016,6 +2041,8 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
     private fun friendlyConnectionError(raw: String): String {
         val v = raw.lowercase(Locale.US)
         return when {
+            v.contains("openvpn core") -> "OpenVPN is not available in this build. The profile is saved, but it cannot connect yet."
+            v.contains("openvpn profile invalid") -> ConfigSanitizer.redact(raw).substringAfter("invalid: ", "This OpenVPN profile is not valid.").take(140)
             v.contains("permission") || v.contains("denied") || v.contains("revoked") -> "VPN permission was not granted. Please allow the connection request."
             v.contains("dns") || v.contains("network") || v.contains("timeout") || v.contains("unreachable") -> "The server did not respond. Check your internet connection or choose another server."
             v.contains("config") || v.contains("invalid") || v.contains("parse") || v.contains("json") -> "This profile could not be started. Edit it or choose another profile."
@@ -2128,6 +2155,43 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
             .joinToString("") { "%02x".format(it) }
     }.getOrDefault(raw.trim().hashCode().toString())
 
+    /** Limited menu for a protected profile: use, view safe info, remove. Nothing that exposes or alters the config. */
+    private fun showProtectedActions(item: ServerItem) {
+        val sheet = Kit.Sheet(this, item.name, "🔒 Protected Profile • ${engineName(item.engine)}", flagBox(44, 14f, item.country, Palette.violet))
+        sheet.content(Kit.noteCard(this, "The owner shared this profile as protected. Its configuration is hidden and cannot be edited, copied or shared in TIREXNET.", Palette.violet))
+        sheet.action(Icon.POWER, "Use this profile", "Select it, then connect from Home") {
+            setConfig(item.raw)
+            toast("Selected. Tap Connect on Home.")
+        }
+        sheet.action(Icon.INFO, "Profile info", "Name, protocol and status") { showProtectedInfo(item) }
+        sheet.action(Icon.TRASH, "Remove profile", "Delete this profile from your device", danger = true) { removeServerProfile(item) }
+        sheet.show()
+    }
+
+    private fun showProtectedInfo(item: ServerItem) {
+        val active = selectedItem()?.raw?.trim() == item.raw.trim()
+        val status = when {
+            active && state == OrbState.CONNECTED -> "Connected"
+            active && state == OrbState.CONNECTING -> "Connecting…"
+            active -> "Selected"
+            else -> "Not selected"
+        }
+        val sheet = Kit.Sheet(this, "Protected Profile", item.name, Kit.badge(this, Icon.SHIELD, Palette.violet, 44))
+        fun row(label: String, value: String) {
+            val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dpi(4), dpi(10), dpi(4), dpi(10)) }
+            r.addView(tv(label, 12f, Palette.muted, 1), LinearLayout.LayoutParams(dpi(110), WRAP))
+            r.addView(tv(value, 13f, Palette.text, 1), LinearLayout.LayoutParams(0, WRAP, 1f))
+            sheet.content(r, 0)
+        }
+        row("Name", item.name)
+        row("Protocol", engineName(item.engine))
+        row("Status", status)
+        row("Source", "Imported • Protected share")
+        sheet.content(Kit.noteCard(this,
+            "Server address and credentials are intentionally not shown. The lock is enforced by the app only; it cannot stop someone who modifies the app or inspects its storage.", Palette.violet), 10)
+        sheet.show()
+    }
+
     private fun showServerActions(item: ServerItem) {
         // Subscription data is immutable: no edit/delete action may change or hide it.
         if (!item.local) {
@@ -2136,6 +2200,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         }
         val settings = ProfileSettingsStore(this).get(item.raw)
         val origin = settings.origin
+        if (origin == TirexNetShare.ProfileOrigin.PROTECTED_IMPORT) { showProtectedActions(item); return }
         val canShare = TirexNetShare.canShare(origin, item.local, item.panelId)
         val sheet = Kit.Sheet(
             this, item.name,
@@ -2144,13 +2209,28 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         )
         sheet.action(Icon.EDIT, "Edit profile", "Change name, fields and DNS resolvers") { editServerDialog(item) }
         sheet.action(Icon.COPY, "Duplicate profile", "Create an independent local copy") { duplicateServerProfile(item) }
-        if (canShare) sheet.action(Icon.GLOBE, "Share (TIREXNET)", "Send this profile to another TIREXNET user") { shareTirexNetProfile(item) }
+        if (canShare) sheet.action(Icon.GLOBE, "Share (TIREXNET)", "Send this profile to another TIREXNET user") { chooseShareMode(item) }
         if (item.engine == ConfigEngine.XRAY) sheet.action(Icon.SHIELD, "Change TLS serverName", "Set the SNI used for the TLS handshake") { showSniDialog(item) }
         sheet.action(Icon.TRASH, "Remove profile", "Delete this profile from your device", danger = true) { removeServerProfile(item) }
         sheet.show()
     }
 
-    private fun shareTirexNetProfile(item: ServerItem) {
+    /** True for a profile that was imported from a "Protected Share" (application-level lock). */
+    private fun isProtected(item: ServerItem?): Boolean =
+        item != null && item.local && ProfileSettingsStore(this).get(item.raw).origin == TirexNetShare.ProfileOrigin.PROTECTED_IMPORT
+
+    private fun toastProtected() = toast("This is a protected profile. It cannot be edited, copied or shared.")
+
+    private fun chooseShareMode(item: ServerItem) {
+        if (isProtected(item)) { toastProtected(); return }
+        val sheet = Kit.Sheet(this, "Share profile", item.name)
+        sheet.action(Icon.GLOBE, "Normal Share", "Recipient can edit, duplicate and re-share the profile") { shareTirexNetProfile(item, false) }
+        sheet.action(Icon.SHIELD, "Protected Share", "Recipient can only connect, disconnect and delete (app-level lock)") { shareTirexNetProfile(item, true) }
+        sheet.show()
+    }
+
+    private fun shareTirexNetProfile(item: ServerItem, protectedShare: Boolean = false) {
+        if (isProtected(item)) { toastProtected(); return }
         val store = ProfileSettingsStore(this)
         val settings = store.get(item.raw)
         if (!TirexNetShare.canShare(settings.origin, item.local, item.panelId)) {
@@ -2167,9 +2247,10 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
                 dnsResolvers = settings.dnsResolvers,
                 selectedResolver = settings.selectedResolver,
                 customSettings = settings.customSettings,
-                country = item.country
+                country = item.country,
+                protectedProfile = protectedShare
             )
-            showShareSheet(item.name, result.uri)
+            showShareSheet(item.name, result.uri, protectedShare)
         } catch (e: TirexNetShare.ShareError.TooLarge) {
             toast(e.message ?: "URI too large for QR")
         } catch (e: Exception) {
@@ -2177,9 +2258,12 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         }
     }
 
-    private fun showShareSheet(title: String, uri: String) {
-        val sheet = Kit.Sheet(this, title, "Encrypted TIREXNET share")
+    private fun showShareSheet(title: String, uri: String, protectedShare: Boolean = false) {
+        val sheet = Kit.Sheet(this, title, if (protectedShare) "Protected TIREXNET share" else "Encrypted TIREXNET share")
         sheet.content(Kit.noteCard(this, "Sensitive fields are encrypted. Casual readers cannot see host/port/credentials."))
+        if (protectedShare) sheet.content(Kit.noteCard(this,
+            "Protected: the recipient's TIREXNET locks this profile (no edit, copy or re-share). This is an app-level restriction, not strong encryption against a determined user. Older app versions ignore the lock.",
+            Palette.violet), 8)
         val preview = EditText(this).apply {
             setText(uri)
             textSize = 10f
@@ -2248,6 +2332,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
 
 
     private fun editServerDialog(item: ServerItem) {
+        if (isProtected(item)) { toastProtected(); return }
         if (!item.local) {
             toast("Subscription profiles cannot be edited. Import or duplicate one as a local profile first.")
             return
@@ -2504,6 +2589,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
     }.getOrNull()
 
     private fun duplicateServerProfile(item: ServerItem) {
+        if (isProtected(item)) { toastProtected(); return }
         val newName = (item.name + " (copy)").take(80)
         val copiedRaw = runCatching {
             when (item.engine) {
@@ -2659,7 +2745,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
     }.getOrNull()
 
     private fun showPatternihaBasePicker() {
-        val candidates = servers.filter { it.engine == ConfigEngine.XRAY && EngineProfiles.supportsPatterniha(it.raw) }
+        val candidates = servers.filter { it.engine == ConfigEngine.XRAY && EngineProfiles.supportsPatterniha(it.raw) && !isProtected(it) }
         if (candidates.isEmpty()) {
             toast("ابتدا یک کانفیگ Xray با TLS یا REALITY وارد کن؛ اطلاعات احراز هویت از همان پروفایل حفظ می‌شود.")
             return
@@ -2676,6 +2762,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
     }
 
     private fun showPatternihaDialog(item: ServerItem) {
+        if (isProtected(item)) { toastProtected(); return }
         if (item.engine != ConfigEngine.XRAY) {
             toast("Patterniha needs an Xray TLS/REALITY profile as the credential base.")
             return
@@ -2781,6 +2868,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
     }
 
     private fun showSniDialog(item: ServerItem) {
+        if (isProtected(item)) { toastProtected(); return }
         val edit = EditText(this).apply { hint = "SNI hostname"; setSingleLine(true); setText(extractSni(item.raw)); textSize = 13f; setPadding(dpi(12), dpi(8), dpi(12), dpi(8)); background = fieldBackground(false) }
         dialogBuilder().setTitle("TLS SERVER NAME")
             .setMessage("Sets the TLS / REALITY serverName for this Xray profile.")
@@ -3364,7 +3452,49 @@ private fun buildLogin(): View {
         applyStatus("Disconnected.", false)
     }
 
+    /**
+     * Only one VPN service may run. Before a different engine starts, stop whichever other engine is still
+     * active so two services never fight over the tun interface. Returns true when something was stopped.
+     */
+    private fun stopConflictingEngines(target: ConfigEngine): Boolean {
+        var stopped = false
+        val xrayFamily = setOf(ConfigEngine.XRAY, ConfigEngine.MHRV, ConfigEngine.DNS_TUNNEL, ConfigEngine.MASTERDNS, ConfigEngine.COTTENDNS, ConfigEngine.SNI_SPOOF)
+        val wgFamily = setOf(ConfigEngine.WIREGUARD, ConfigEngine.AMNEZIAWG)
+        if (target !in xrayFamily && XrayVpnService.isActive) {
+            startService(Intent(this, XrayVpnService::class.java).setAction(XrayVpnService.ACTION_STOP)); stopped = true
+        }
+        if (target !in wgFamily && WgTunnelEngine.isActive) {
+            WgTunnelEngine.stop { _, _ -> }; stopped = true
+        }
+        if (target != ConfigEngine.OPENVPN && OpenVpnEngine.isActive) {
+            OpenVpnEngine.stop { _, _ -> }; stopped = true
+        }
+        if (target != ConfigEngine.SLIPNET && slipNetRuntime.isConnectedOrConnecting()) {
+            slipNetRuntime.disconnect(); stopped = true
+        }
+        if (target != ConfigEngine.DNS_CHANGER && DnsChangerVpnService.isActive) {
+            startService(Intent(this, DnsChangerVpnService::class.java).setAction(DnsChangerVpnService.ACTION_STOP)); stopped = true
+        }
+        return stopped
+    }
+
     private fun startSelectedEngine() {
+        val target = pendingEngine
+        if (stopConflictingEngines(target)) {
+            // Give the previous tunnel a moment to release the interface before the next one claims it.
+            handler.postDelayed({ startSelectedEngineNow() }, 600L)
+        } else startSelectedEngineNow()
+    }
+
+    private fun showOpenVpnUnavailableDialog() {
+        if (isFinishing || isDestroyed) return
+        dialogBuilder().setTitle("OpenVPN is not available yet")
+            .setMessage("This build of TIREXNET can import and store OpenVPN profiles, but it does not include an OpenVPN core, so it cannot open the tunnel. Your profile is kept. Xray, WireGuard and SlipNet profiles are not affected.")
+            .setPositiveButton("OK", null)
+            .show()
+    }
+
+    private fun startSelectedEngineNow() {
         when (pendingEngine) {
             ConfigEngine.XRAY -> {
                 applyStatus("در حال راه‌اندازی هسته Xray…", false)
@@ -3384,7 +3514,10 @@ private fun buildLogin(): View {
             ConfigEngine.OPENVPN -> {
                 applyStatus("در حال راه‌اندازی OpenVPN…", false)
                 OpenVpnEngine.start(this, pendingRaw) { message, active ->
-                    runOnUiThread { applyStatus(message, active) }
+                    runOnUiThread {
+                        applyStatus(message, active)
+                        if (!active && message == OpenVpnEngine.NO_CORE_MESSAGE) showOpenVpnUnavailableDialog()
+                    }
                 }
             }
             ConfigEngine.MHRV, ConfigEngine.DNS_TUNNEL, ConfigEngine.MASTERDNS, ConfigEngine.COTTENDNS, ConfigEngine.SNI_SPOOF -> startAuxiliaryProxyEngine(pendingEngine, pendingRaw)
@@ -3461,6 +3594,13 @@ private fun buildLogin(): View {
                 applyStatus("VPN permission was denied.", false)
                 toast("اجازه‌ی VPN لازم است.")
             }
+        } else if (requestCode == PICK_OVPN && resultCode == RESULT_OK) {
+            val uris = ArrayList<Uri>()
+            data?.clipData?.let { cd -> for (i in 0 until minOf(cd.itemCount, 12)) cd.getItemAt(i).uri?.let { uris.add(it) } }
+            if (uris.isEmpty()) data?.data?.let { uris.add(it) }
+            if (uris.isEmpty()) return
+            setAddStatus("Importing…", false)
+            importOvpnBundle(uris)
         } else if (requestCode == PICK_CONFIG && resultCode == RESULT_OK) {
             val uri = data?.data ?: return
             setAddStatus("Importing…", false)
@@ -3536,7 +3676,8 @@ private fun buildLogin(): View {
         val invalid: Int,
         val persisted: Boolean,
         val bundleFailures: Int = 0,
-        val shareFailures: Int = 0
+        val shareFailures: Int = 0,
+        val reason: String = ""
     )
 
     /** One structured config stays whole; otherwise every non-empty line is a separate share link. */
@@ -3561,7 +3702,8 @@ private fun buildLogin(): View {
     }
 
     /** Parses, de-duplicates and saves. Runs off the main thread. Never logs or returns config content. */
-    private fun doImport(text: String, existingRaws: Set<String>, country: String = "", bundlePassword: String = ""): ImportOutcome {
+    private fun doImport(text: String, existingRaws: Set<String>, country: String = "", bundlePassword: String = "", nameHint: String = ""): ImportOutcome {
+        var firstReason = ""
         val expanded = ArrayList<String>()
         var bundleFailures = 0
         var shareFailures = 0
@@ -3601,6 +3743,14 @@ private fun buildLogin(): View {
                 ConfigEngine.XRAY -> structured || meta.host.isNotBlank()
                 ConfigEngine.SLIPNET -> EngineProfiles.decodeSlipNet(c) != null
                 ConfigEngine.DNS_CHANGER -> DnsChangerProfiles.decode(c) != null
+                ConfigEngine.WIREGUARD, ConfigEngine.AMNEZIAWG -> WireGuardImport.validate(c).let { problem ->
+                    if (problem != null && firstReason.isEmpty()) firstReason = problem
+                    problem == null
+                }
+                ConfigEngine.OPENVPN -> OpenVpnEngine.validate(c).let { problem ->
+                    if (problem != null && firstReason.isEmpty()) firstReason = problem
+                    problem == null
+                }
                 else -> meta.host.isNotBlank() || meta.engine != ConfigEngine.UNKNOWN
             }
             if (!ok) { bad++; continue }
@@ -3609,7 +3759,22 @@ private fun buildLogin(): View {
             if (fromTirex != null && fromTirex.raw.trim() == c.trim()) tirexIdx++
             val displayName = when {
                 fromTirex != null -> fromTirex.name.ifBlank { "Imported profile" }
-                else -> ProfileParser.bestName(listOf(meta.name), saved.size + added.size + 1)
+                else -> {
+                    // A real name only: embedded name, then the file name, then the server host. Never blank/UUID/number.
+                    val fromFile = if (nameHint.isNotBlank() && candidates.size == 1) when (meta.engine) {
+                        ConfigEngine.OPENVPN -> OvpnImport.suggestName(nameHint, c)
+                        ConfigEngine.WIREGUARD, ConfigEngine.AMNEZIAWG -> WireGuardImport.suggestName(nameHint)
+                        else -> ""
+                    } else ""
+                    val best = ProfileParser.bestName(listOf(meta.name, fromFile), -1)
+                    when {
+                        best != "Server -1" -> best
+                        meta.engine == ConfigEngine.OPENVPN && meta.host.isNotBlank() -> "OpenVPN · ${meta.host}".take(80)
+                        (meta.engine == ConfigEngine.WIREGUARD || meta.engine == ConfigEngine.AMNEZIAWG) && meta.host.isNotBlank() ->
+                            "WireGuard · ${meta.host}".take(80)
+                        else -> ProfileParser.bestName(emptyList(), saved.size + added.size + 1)
+                    }
+                }
             }
             val item = ServerItem(
                 displayName,
@@ -3627,7 +3792,9 @@ private fun buildLogin(): View {
                     fromTirex.dnsResolvers,
                     fromTirex.selectedResolver,
                     fromTirex.customSettings,
-                    TirexNetShare.ProfileOrigin.IMPORTED_TIREXNET
+                    // The lock comes only from the validated share metadata, never from the (attacker-controlled) payload origin.
+                    if (fromTirex.protectedProfile) TirexNetShare.ProfileOrigin.PROTECTED_IMPORT
+                    else TirexNetShare.ProfileOrigin.IMPORTED_TIREXNET
                 )
             } else {
                 // Mark pasted imports when origin still unknown
@@ -3637,17 +3804,24 @@ private fun buildLogin(): View {
                 }
             }
         }
-        if (added.isEmpty()) return ImportOutcome(emptyList(), dup, bad, true, bundleFailures, shareFailures)
+        if (added.isEmpty()) return ImportOutcome(emptyList(), dup, bad, true, bundleFailures, shareFailures, firstReason)
         val persisted = persistLocalProfiles(added + saved)
-        return ImportOutcome(if (persisted) added else emptyList(), dup, bad, persisted, bundleFailures, shareFailures)
+        return ImportOutcome(if (persisted) added else emptyList(), dup, bad, persisted, bundleFailures, shareFailures, firstReason)
     }
 
     private fun importText(text: String, country: String = "") {
         importWithOptionalSlipNetPassword(text, country)
     }
 
+    private fun queryDisplayName(uri: Uri): String = runCatching {
+        contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0).orEmpty() else ""
+        } ?: ""
+    }.getOrDefault("").ifBlank { uri.lastPathSegment?.substringAfterLast('/').orEmpty() }
+
     private fun importUri(uri: Uri) {
         io.execute {
+            val fileName = queryDisplayName(uri)
             val text = try {
                 contentResolver.openInputStream(uri)?.use { readLimited(it) }.orEmpty()
             } catch (e: Exception) {
@@ -3655,7 +3829,89 @@ private fun buildLogin(): View {
                 return@execute
             }
             runOnUiThread {
-                if (!isFinishing && !isDestroyed) importWithOptionalSlipNetPassword(text, "")
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                val refs = if (ConfigDetector.detect(text.trim()) == ConfigEngine.OPENVPN) OvpnImport.referencedFiles(text) else emptyList()
+                if (refs.isNotEmpty()) {
+                    setAddStatus("This OpenVPN profile needs additional files.", true)
+                    askForOvpnReferencedFiles(refs)
+                    return@runOnUiThread
+                }
+                importNameHint = fileName
+                importWithOptionalSlipNetPassword(text, "")
+            }
+        }
+    }
+
+    private fun askForOvpnReferencedFiles(refs: List<String>) {
+        dialogBuilder().setTitle("OpenVPN profile needs more files")
+            .setMessage("This .ovpn refers to separate files:\n\n" + refs.take(8).joinToString("\n") { "• $it" } +
+                "\n\nSelect the .ovpn together with these files (select several in the file picker). They are merged into one self-contained profile.")
+            .setPositiveButton("Select files") { _, _ -> pickOvpnFiles() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showImportErrorDialog(title: String, message: String) {
+        if (isFinishing || isDestroyed) return
+        dialogBuilder().setTitle(title).setMessage(message).setPositiveButton("OK", null).show()
+    }
+
+    private fun pickOvpnFiles() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        }
+        startActivityForResult(intent, PICK_OVPN)
+    }
+
+    private fun readBytesLimited(stream: InputStream, limit: Int = 1024 * 1024): ByteArray {
+        val out = ByteArrayOutputStream()
+        val buffer = ByteArray(4096)
+        var total = 0
+        while (true) {
+            val n = stream.read(buffer)
+            if (n < 0) break
+            total += n
+            require(total <= limit) { "File is too large." }
+            out.write(buffer, 0, n)
+        }
+        return out.toByteArray()
+    }
+
+    /** .ovpn plus the files it references (ca/cert/key/tls-*), merged into one inline profile. */
+    private fun importOvpnBundle(uris: List<Uri>) {
+        io.execute {
+            val files = LinkedHashMap<String, ByteArray>()
+            try {
+                for (u in uris) {
+                    val bytes = contentResolver.openInputStream(u)?.use { readBytesLimited(it) } ?: throw IllegalStateException("unreadable")
+                    files[queryDisplayName(u).ifBlank { "file${files.size + 1}" }] = bytes
+                }
+            } catch (e: Exception) {
+                runOnUiThread { importFailed("فایل انتخاب‌شده قابل خواندن نیست.") }
+                return@execute
+            }
+            val main = files.entries.firstOrNull { it.key.endsWith(".ovpn", true) }
+                ?: files.entries.firstOrNull { e ->
+                    runCatching { ConfigDetector.detect(String(e.value, Charsets.UTF_8).trim()) == ConfigEngine.OPENVPN }.getOrDefault(false)
+                }
+            if (main == null) {
+                runOnUiThread { showImportErrorDialog("OpenVPN import", "No .ovpn file was selected. Select the .ovpn file together with its certificate/key files."); setAddStatus("No .ovpn file selected.", true) }
+                return@execute
+            }
+            val others = files.filterKeys { it != main.key }
+            val result = OvpnImport.inline(String(main.value, Charsets.UTF_8), others)
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                val merged = result.config
+                if (merged == null) {
+                    showImportErrorDialog("OpenVPN import failed", result.error.orEmpty())
+                    setAddStatus(result.error.orEmpty(), true)
+                    return@runOnUiThread
+                }
+                importNameHint = main.key
+                importWithOptionalSlipNetPassword(merged, "")
             }
         }
     }
@@ -3696,7 +3952,9 @@ private fun buildLogin(): View {
 
     private fun runSlipNetImport(text: String, existing: Set<String>, country: String, bundlePassword: String) {
         io.execute {
-            val outcome = doImport(text, existing, country, bundlePassword)
+            val hint = importNameHint
+            importNameHint = ""
+            val outcome = doImport(text, existing, country, bundlePassword, hint)
             runOnUiThread { if (!isFinishing && !isDestroyed) applyImport(outcome) }
         }
     }
@@ -3715,6 +3973,7 @@ private fun buildLogin(): View {
             val msg = when {
                 o.shareFailures > 0 -> "لینک tirexnet:// نامعتبر، ناقص، دستکاری‌شده یا ناسازگار با این نسخه است."
                 o.bundleFailures > 0 -> "رمز بسته SlipNet اشتباه است یا فایل bundle خراب شده است."
+                o.reason.isNotBlank() && o.duplicates == 0 -> o.reason
                 o.duplicates > 0 && o.invalid == 0 -> "این کانفیگ قبلاً در لیست هست."
                 else -> "کانفیگ پشتیبانی‌شده‌ای پیدا نشد. Xray / WireGuard / AmneziaWG / OpenVPN / MHRV / StormDNS / MasterDNS / CottenDNS / Patterniha / SlipNet لازم است."
             }
@@ -3775,7 +4034,7 @@ private fun buildLogin(): View {
             fillFlag(homeFlag, "", 44)
             return
         }
-        homeServerName?.text = item.name
+        homeServerName?.text = (if (isProtected(item)) "🔒 " else "") + item.name
         fillFlag(homeFlag, item.country, 44)
         bindHomePing()
     }
@@ -4522,6 +4781,8 @@ private fun request(
             "state=" + state.name + "\n" +
             "engine=" + engineLabelShort() + "\n" +
             "message=" + statusMessage + "\n" +
+            (OpenVpnEngine.lastError.takeIf { it.isNotBlank() }?.let { "openvpn_error=$it\n" } ?: "") +
+            (prefs.getString("last_crash_detail", "").orEmpty().takeIf { it.isNotBlank() }?.let { "last_crash=\n$it\n" } ?: "") +
             "android=" + Build.VERSION.SDK_INT + " device=" + Build.MODEL
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         cm.setPrimaryClip(ClipData.newPlainText("TIREXNET diagnostics", text))
@@ -4585,6 +4846,12 @@ private fun request(
         tiles.addView(actionTile(Icon.FILE, "File", "Import from file") { pickFile() },
             LinearLayout.LayoutParams(0, dpi(92), 1f).apply { leftMargin = dpi(5) })
         quick.addView(tiles, lp(MATCH, WRAP, 14))
+        val fileTiles = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        fileTiles.addView(actionTile(Icon.FILE, "WireGuard", "Import .conf file") { pickFile() },
+            LinearLayout.LayoutParams(0, dpi(92), 1f).apply { rightMargin = dpi(5) })
+        fileTiles.addView(actionTile(Icon.FILE, "OpenVPN", "Import .ovpn + files") { pickOvpnFiles() },
+            LinearLayout.LayoutParams(0, dpi(92), 1f).apply { leftMargin = dpi(5) })
+        quick.addView(fileTiles, lp(MATCH, WRAP, 10))
         quick.addView(ghostButton("Patterniha • Rootless SNI profile") { showPatternihaBasePicker() }, lp(MATCH, dpi(46), 8))
         val status = tv("", 12f, Palette.muted, 1).apply { visibility = View.GONE }
         addStatus = status
@@ -4822,5 +5089,6 @@ private fun request(
     companion object {
         private const val VPN_REQUEST = 71
         private const val PICK_CONFIG = 72
+        private const val PICK_OVPN = 73
     }
 }

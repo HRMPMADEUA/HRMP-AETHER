@@ -55,6 +55,8 @@ object TirexNetShare {
         MANUAL,
         IMPORTED_TIREXNET,
         LOCAL_DUPLICATE,
+        /** Imported from a "Protected Share": application-level lock, see [SharePayload.protectedProfile]. */
+        PROTECTED_IMPORT,
         UNKNOWN
     }
 
@@ -68,7 +70,9 @@ object TirexNetShare {
         val selectedResolver: String = "",
         val customSettings: Map<String, String> = emptyMap(),
         val country: String = "",
-        val createdAt: Long = System.currentTimeMillis()
+        val createdAt: Long = System.currentTimeMillis(),
+        /** Creator asked for a protected (locked) profile. Metadata only; separate from the connection config. */
+        val protectedProfile: Boolean = false
     )
 
     data class EncodeResult(val uri: String, val byteSize: Int)
@@ -87,6 +91,8 @@ object TirexNetShare {
         if (panelId.isNotBlank()) return false
         return when (origin) {
             ProfileOrigin.PANEL -> false
+            // A protected profile must never be re-shared (that would hand out an editable copy).
+            ProfileOrigin.PROTECTED_IMPORT -> false
             // Legacy local profiles (no recorded origin) are the user's own: they are not panel-linked
             // (panelId is blank, checked above), so sharing them is allowed.
             ProfileOrigin.UNKNOWN -> true
@@ -102,7 +108,8 @@ object TirexNetShare {
         dnsResolvers: List<String> = emptyList(),
         selectedResolver: String = "",
         customSettings: Map<String, String> = emptyMap(),
-        country: String = ""
+        country: String = "",
+        protectedProfile: Boolean = false
     ): EncodeResult {
         require(raw.isNotBlank()) { "empty raw" }
         val json = JSONObject()
@@ -115,6 +122,7 @@ object TirexNetShare {
             .put("selDns", selectedResolver)
             .put("custom", JSONObject(customSettings))
             .put("country", country.take(40))
+            .put("prot", protectedProfile)
             .put("ts", System.currentTimeMillis())
         val plain = gzip(json.toString().toByteArray(StandardCharsets.UTF_8))
         val iv = ByteArray(IV_BYTES).also { SecureRandom().nextBytes(it) }
@@ -188,6 +196,10 @@ object TirexNetShare {
         }
         val raw = json.optString("raw", "")
         if (raw.isBlank()) throw ShareError.Tampered("Missing raw config")
+        // Protection metadata must be a real boolean; anything else is malformed/tampered data.
+        val protectedFlag = if (json.has("prot")) {
+            (json.opt("prot") as? Boolean) ?: throw ShareError.Tampered("Invalid protection metadata")
+        } else false
         val origin = runCatching {
             ProfileOrigin.valueOf(json.optString("origin", "IMPORTED_TIREXNET"))
         }.getOrDefault(ProfileOrigin.IMPORTED_TIREXNET)
@@ -211,7 +223,8 @@ object TirexNetShare {
                 selectedResolver = json.optString("selDns", ""),
                 customSettings = custom,
                 country = json.optString("country", ""),
-                createdAt = json.optLong("ts", System.currentTimeMillis())
+                createdAt = json.optLong("ts", System.currentTimeMillis()),
+                protectedProfile = protectedFlag
             )
         )
     }
