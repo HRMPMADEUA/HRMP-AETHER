@@ -3871,8 +3871,13 @@ private fun buildLogin(): View {
                 ConfigEngine.SLIPNET -> EngineProfiles.decodeSlipNet(c) != null && run {
                     if (!c.startsWith("slipnet-enc://", true)) true
                     else when (val r = inspectSlipNet(c)) {
-                        // Official SlipNet could not be reached (e.g. core not linked): keep the previous behaviour.
-                        null -> true
+                        // Encrypted profiles are accepted only after successful official decryption.
+                        null -> {
+                            if (firstReason.isEmpty()) {
+                                firstReason = "SlipNet runtime unavailable: encrypted profile was not decrypted."
+                            }
+                            false
+                        }
                         is TirexSlipNetInspectResult.Ok -> { slipInspections[c] = r.profiles.first(); true }
                         TirexSlipNetInspectResult.NeedsPassword -> { if (firstReason.isEmpty()) firstReason = "This SlipNet profile needs a password."; false }
                         is TirexSlipNetInspectResult.Failure -> { if (firstReason.isEmpty()) firstReason = r.message.take(200); false }
