@@ -257,6 +257,8 @@ private fun savePanelSession(
 
     activePanelId = panelId.lowercase()
     token = newToken
+    clientMode = false
+    editor.putBoolean("client_mode", false)
 
     editor.putString("active_panel_id", activePanelId)
     editor.putString("token", newToken)
@@ -358,6 +360,8 @@ private fun savePanelSession(
     private var loginPanelLabel: TextView? = null
     private var selectedLoginPanelId: String = "pasarguard"
     private var addingPanelLogin = false
+    /** Client-only mode: the user chose "USE AS CLIENT". No panel session exists; only local profiles are used. */
+    private var clientMode = false
     private var confirmInput: EditText? = null
     private var registerMode = false
 
@@ -433,6 +437,9 @@ private fun savePanelSession(
         }
 
         observeSlipNetConnection()
+        // Client mode is only meaningful without a panel session; a stored session always wins.
+        clientMode = prefs.getBoolean("client_mode", false) && token.isBlank()
+        if (token.isNotBlank()) prefs.edit().remove("client_mode").apply()
         reconcileState()
         render()
         applySystemBars() // after setContentView: the decor view exists now
@@ -500,7 +507,7 @@ private fun savePanelSession(
     override fun onBackPressed() {
         when {
             addOverlay != null -> closeAddServer()
-            token.isNotBlank() && currentTab != 0 -> showTab(0)
+            (token.isNotBlank() || clientMode) && currentTab != 0 -> showTab(0)
             else -> super.onBackPressed()
         }
     }
@@ -684,7 +691,7 @@ private fun savePanelSession(
         contentFrame = content
         column.addView(content, LinearLayout.LayoutParams(MATCH, 0, 1f))
 
-        if (token.isBlank() || addingPanelLogin) {
+        if ((token.isBlank() && !clientMode) || addingPanelLogin) {
             nav = null
             tabViews = emptyList()
             content.addView(buildLogin(), FrameLayout.LayoutParams(MATCH, MATCH))
@@ -741,7 +748,7 @@ private fun savePanelSession(
         titles.addView(tv("PRIVATE CONNECTION", 8f, Palette.muted, 1).apply { letterSpacing = 0.18f }, lp(WRAP, WRAP, 3))
         row.addView(titles, LinearLayout.LayoutParams(0, WRAP, 1f))
 
-        if (token.isNotBlank()) {
+        if (token.isNotBlank() || clientMode) {
             row.addView(
                 roundButton(if (Palette.dark) Icon.SUN else Icon.MOON, if (Palette.dark) "Switch to light theme" else "Switch to dark theme") { toggleTheme() },
                 lp(dpi(38), dpi(38))
@@ -970,7 +977,7 @@ private fun savePanelSession(
     }.getOrDefault(code.uppercase(Locale.US))
 
     private fun showRegionPicker() {
-        if (serversState == ServersState.IDLE && token.isNotBlank()) ensureServersLoaded()
+        if (serversState == ServersState.IDLE && (token.isNotBlank() || clientMode)) ensureServersLoaded()
         var pending = regionFilter
         val dialog = Dialog(this)
         val panel = LinearLayout(this).apply {
@@ -1175,7 +1182,7 @@ private fun savePanelSession(
     }
 
     private fun ensureServersLoaded() {
-        if (serversState == ServersState.IDLE && token.isNotBlank()) loadServers()
+        if (serversState == ServersState.IDLE && (token.isNotBlank() || clientMode)) loadServers()
     }
 
     private fun rebuildServerList(popIndex: Int) {
@@ -1590,6 +1597,16 @@ if (alipanelToken.isBlank()) {
 }
 
 col.addView(panelCard, lp(MATCH, WRAP, 14))
+        if (clientMode && token.isBlank()) {
+            // No panel account: hide the account/subscription cards instead of showing empty placeholders.
+            sub.visibility = View.GONE
+            actions.visibility = View.GONE
+            panelCard.visibility = View.GONE
+            val (clientCard, clientBody) = Kit.card(this, "Client mode", Icon.PROFILE, subtitle = "Using TIREXNET without a panel account")
+            clientBody.addView(Kit.noteCard(this, "Add your own configs with Paste, File or Manual entry. Account, subscription and panel features need a panel login."), lp(MATCH, WRAP, 8))
+            clientBody.addView(primaryButton("Sign in to a panel") { openPanelLogin(selectedLoginPanelId) }, lp(MATCH, dpi(50), 12))
+            col.addView(clientCard, lp(MATCH, WRAP, 14))
+        }
 
         val anchor = tv("SETTINGS", 10f, Palette.cyan, 2).apply { letterSpacing = 0.22f }
         settingsAnchor = anchor
@@ -1623,6 +1640,9 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
         settingRow(gAboutBody, Icon.SHIELD, "Privacy", "چه چیزی روی گوشی ذخیره می‌شود", null) { showPrivacy() }
         settingRow(gAboutBody, Icon.INFO, "App version", packageName, versionName()) { }
         settingRow(gAboutBody, Icon.REFRESH, "App updates", "بررسی نسخه جدید در GitHub و نصب APK", "Check") { checkForUpdates() }
+        gAboutBody.addView(Kit.sectionHeader(this, "Developer information"), lp(MATCH, WRAP, 16, 4))
+        devLinkCard(gAboutBody, "Developer Channel", "t.me/TirexNet", "https://t.me/TirexNet")
+        devLinkCard(gAboutBody, "Developer ID", "T.ME/HRMPMADEUA", "https://t.me/HRMPMADEUA")
         col.addView(gAbout, lp(MATCH, WRAP, 12))
         return sv
     }
@@ -3051,7 +3071,7 @@ col.addView(panelCard, lp(MATCH, WRAP, 14))
 private fun buildLogin(): View {
         val (sv, col) = tabScroll()
         col.addView(tv("SECURE ACCESS", 10f, Palette.cyan, 2).apply { letterSpacing = 0.26f }, lp(WRAP, WRAP, 22))
-        if (addingPanelLogin && token.isNotBlank()) {
+        if (addingPanelLogin && (token.isNotBlank() || clientMode)) {
     col.addView(
         ghostButton("← Back to profile") {
             addingPanelLogin = false
@@ -3099,7 +3119,75 @@ private fun buildLogin(): View {
             tv("احراز هویت از طریق سرویس TIREXNET انجام می‌شود.", 10.5f, Palette.dim, 0).apply { gravity = Gravity.CENTER },
             lp(MATCH, WRAP, 16)
         )
+        if (!addingPanelLogin && token.isBlank()) {
+            // Pushes the button to the very bottom on tall screens; on small screens the page simply scrolls.
+            col.addView(View(this), LinearLayout.LayoutParams(MATCH, 0, 1f))
+            col.addView(Kit.divider(this), lp(MATCH, dpi(1), 18, 0, 24, 24))
+            col.addView(
+                tv("USE AS CLIENT", 14f, Palette.cyan, 2).apply {
+                    gravity = Gravity.CENTER
+                    letterSpacing = 0.12f
+                    minHeight = dpi(54)
+                    background = Palette.glass(this@MainActivity, 16f, Palette.strokeActive, Palette.withAlpha(Palette.cyan, 30), Palette.withAlpha(Palette.violet, 24))
+                    isClickable = true
+                    contentDescription = "USE AS CLIENT"
+                    setOnClickListener { enterClientMode() }
+                    pressable(0.97f)
+                },
+                lp(MATCH, dpi(54), 0, 0, 0, 0)
+            )
+            col.addView(
+                tv("بدون حساب پنل وارد شو و کانفیگ‌های خودت را اضافه کن. هیچ کانفیگی به‌طور خودکار ساخته نمی‌شود.", 10.5f, Palette.dim, 0).apply { gravity = Gravity.CENTER },
+                lp(MATCH, WRAP, 8, 24)
+            )
+        }
         return sv
+    }
+
+    /** "USE AS CLIENT": open the normal UI without any panel session, token or default profile. */
+    private fun enterClientMode() {
+        clientMode = true
+        addingPanelLogin = false
+        prefs.edit().putBoolean("client_mode", true).apply()
+        currentTab = 0
+        serversState = ServersState.IDLE
+        servers = emptyList()
+        render()
+        // No panel sessions exist, so this loads only profiles the user saved themselves (possibly none).
+        loadServers()
+    }
+
+    private fun openExternalLink(url: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE))
+        } catch (e: android.content.ActivityNotFoundException) {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("TIREXNET link", url))
+            toast("No app can open this link. It was copied instead.")
+        } catch (e: Exception) {
+            toast("Could not open the link.")
+        }
+    }
+
+    /** One clickable developer entry: its own glass card with an icon, a label and the address. */
+    private fun devLinkCard(parent: LinearLayout, label: String, display: String, url: String) {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dpi(12), dpi(12), dpi(12), dpi(12))
+            background = Palette.glass(this@MainActivity, 18f, Palette.strokeActive, Palette.withAlpha(Palette.cyan, 24), Palette.glassBottom)
+            isClickable = true
+            contentDescription = "$label $display"
+            setOnClickListener { openExternalLink(url) }
+            pressable(0.98f)
+        }
+        card.addView(Kit.badge(this, Icon.GLOBE, Palette.cyan, 40), lp(dpi(40), dpi(40), 0, 0, 0, 12))
+        val t = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        t.addView(tv(label, 11.5f, Palette.muted, 1))
+        t.addView(tv(display, 15f, Palette.cyan, 2), lp(MATCH, WRAP, 2))
+        card.addView(t, LinearLayout.LayoutParams(0, WRAP, 1f))
+        card.addView(IconView(this, Icon.CHEVRON, Palette.dim), LinearLayout.LayoutParams(dpi(18), dpi(18)))
+        parent.addView(card, lp(MATCH, WRAP, 8))
     }
 
     private fun showLoginPanelPicker() {
@@ -4205,7 +4293,10 @@ private fun buildLogin(): View {
     }
 
     private fun loadAccount(manual: Boolean = false) {
-        if (token.isBlank()) return
+        if (token.isBlank()) {
+            if (manual || clientMode) toast("This feature needs a panel account. Sign in from the Profile tab.")
+            return
+        }
         val t = token
         io.execute {
             try {
@@ -4717,15 +4808,16 @@ private fun request(
     private fun bindAccount() {
         val unavailable = if (accountError != null) "Unavailable" else "—"
         val name = accUser.ifBlank { unavailable }
-        homeAccName?.text = name
+        val clientOnly = clientMode && token.isBlank()
+        homeAccName?.text = if (clientOnly) "Client mode" else name
         homeAccStatus?.text = accStatus.ifBlank { "" }
         val exp = if (expireText.isBlank()) unavailable else expireText.take(24)
         homeExpiry?.text = exp
         statsExpiry?.text = exp
         profExpiry?.text = exp
-        profName?.text = name
+        profName?.text = if (clientOnly) "Client mode" else name
         profAvatar?.text = (accUser.firstOrNull()?.uppercaseChar() ?: 'T').toString()
-        profStatus?.text = accStatus.uppercase(Locale.US)
+        profStatus?.text = if (clientOnly) "NO PANEL ACCOUNT" else accStatus.uppercase(Locale.US)
         profPanel?.text = accPanelUser.ifBlank { unavailable }
         val usageStr = when {
             usedBytes < 0 -> unavailable
