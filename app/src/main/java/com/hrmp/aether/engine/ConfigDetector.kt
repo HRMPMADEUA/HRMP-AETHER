@@ -7,6 +7,10 @@ object ConfigDetector {
         val s = raw.trim()
         if (s.isEmpty()) return ConfigEngine.UNKNOWN
         val lower = s.lowercase()
+        if (lower.startsWith("soar://")) {
+            // Soar / WhiteDNS profiles run on the SlipNet engine; only well-formed ones are accepted.
+            return if (SoarProfile.parse(s) is SoarProfile.Result.Ok) ConfigEngine.SLIPNET else ConfigEngine.UNKNOWN
+        }
         if (lower.startsWith("slipnet://") || lower.startsWith("slipnet-enc://") || lower.startsWith("slipnet-bundle-enc://")) {
             return if (EngineProfiles.decodeSlipNet(s) != null) ConfigEngine.SLIPNET else ConfigEngine.UNKNOWN
         }

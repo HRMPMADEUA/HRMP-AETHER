@@ -72,6 +72,7 @@ import com.tirexnet.app.engine.MhrvEngine
 import com.tirexnet.app.engine.MhrvCertificate
 import com.tirexnet.app.engine.OpenVpnEngine
 import com.tirexnet.app.engine.OvpnImport
+import com.tirexnet.app.engine.SoarProfile
 import com.tirexnet.app.TirexSlipNetInspectResult
 import com.tirexnet.app.TirexSlipNetInspection
 import com.tirexnet.app.engine.WireGuardImport
@@ -3815,7 +3816,7 @@ private fun buildLogin(): View {
             ConfigDetector.detect(t) == ConfigEngine.OPENVPN) return listOf(t)
 
         val lines = t.lineSequence().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.toList()
-        val slipSchemes = listOf("slipnet://", "slipnet-enc://", "slipnet-bundle-enc://", "tirexnet://share/")
+        val slipSchemes = listOf("slipnet://", "slipnet-enc://", "slipnet-bundle-enc://", "tirexnet://share/", "soar://")
         fun isSlipStart(line: String) = slipSchemes.any { line.startsWith(it, true) }
         if (lines.firstOrNull()?.let(::isSlipStart) == true) {
             // A share URI may be wrapped over several lines by chat apps.
@@ -3869,6 +3870,16 @@ private fun buildLogin(): View {
                 ConfigEngine.UNKNOWN -> false
                 ConfigEngine.XRAY -> structured || meta.host.isNotBlank()
                 ConfigEngine.SLIPNET -> EngineProfiles.decodeSlipNet(c) != null && run {
+        if (SoarProfile.isSoar(c)) {
+            when (val soar = SoarProfile.parse(c)) {
+                is SoarProfile.Result.Ok -> true
+                is SoarProfile.Result.Error -> {
+                    if (firstReason.isEmpty()) firstReason = soar.message.take(200)
+                    false
+                }
+        }
+            }
+        } else run {
                     if (!c.startsWith("slipnet-enc://", true)) true
                     else when (val r = inspectSlipNet(c)) {
                         // Encrypted profiles are accepted only after successful official decryption.
@@ -5032,6 +5043,7 @@ private fun request(
             "engine=" + engineLabelShort() + "\n" +
             "message=" + statusMessage + "\n" +
             (OpenVpnEngine.lastError.takeIf { it.isNotBlank() }?.let { "openvpn_error=$it\n" } ?: "") +
+(WgTunnelEngine.lastError.takeIf { it.isNotBlank() }?.let { "wireguard_error=$it\n" } ?: "") +
             (prefs.getString("last_crash_detail", "").orEmpty().takeIf { it.isNotBlank() }?.let { "last_crash=\n$it\n" } ?: "") +
             "android=" + Build.VERSION.SDK_INT + " device=" + Build.MODEL
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
