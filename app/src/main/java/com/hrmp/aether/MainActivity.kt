@@ -3869,29 +3869,46 @@ private fun buildLogin(): View {
             val ok = when (meta.engine) {
                 ConfigEngine.UNKNOWN -> false
                 ConfigEngine.XRAY -> structured || meta.host.isNotBlank()
-                ConfigEngine.SLIPNET -> EngineProfiles.decodeSlipNet(c) != null && run {
-        if (SoarProfile.isSoar(c)) {
-            when (val soar = SoarProfile.parse(c)) {
-                is SoarProfile.Result.Ok -> true
-                is SoarProfile.Result.Error -> {
-                    if (firstReason.isEmpty()) firstReason = soar.message.take(200)
-                    false
-                }
-        }
-            }
-        } else run {
-                    if (!c.startsWith("slipnet-enc://", true)) true
-                    else when (val r = inspectSlipNet(c)) {
-                        // Encrypted profiles are accepted only after successful official decryption.
-                        null -> {
-                            if (firstReason.isEmpty()) {
-                                firstReason = "SlipNet runtime unavailable: encrypted profile was not decrypted."
+                ConfigEngine.SLIPNET -> {
+                    if (SoarProfile.isSoar(c)) {
+                        when (val soar = SoarProfile.parse(c)) {
+                            is SoarProfile.Result.Ok -> true
+                            is SoarProfile.Result.Invalid -> {
+                                if (firstReason.isEmpty()) {
+                                    firstReason = soar.reason.take(200)
+                                }
+                                false
                             }
-                            false
                         }
-                        is TirexSlipNetInspectResult.Ok -> { slipInspections[c] = r.profiles.first(); true }
-                        TirexSlipNetInspectResult.NeedsPassword -> { if (firstReason.isEmpty()) firstReason = "This SlipNet profile needs a password."; false }
-                        is TirexSlipNetInspectResult.Failure -> { if (firstReason.isEmpty()) firstReason = r.message.take(200); false }
+                    } else if (EngineProfiles.decodeSlipNet(c) == null) {
+                        false
+                    } else if (!c.startsWith("slipnet-enc://", true)) {
+                        true
+                    } else {
+                        when (val r = inspectSlipNet(c)) {
+                            null -> {
+                                if (firstReason.isEmpty()) {
+                                    firstReason = "SlipNet runtime unavailable: encrypted profile was not decrypted."
+                                }
+                                false
+                            }
+                            is TirexSlipNetInspectResult.Ok -> {
+                                slipInspections[c] = r.profiles.first()
+                                true
+                            }
+                            TirexSlipNetInspectResult.NeedsPassword -> {
+                                if (firstReason.isEmpty()) {
+                                    firstReason = "This SlipNet profile needs a password."
+                                }
+                                false
+                            }
+                            is TirexSlipNetInspectResult.Failure -> {
+                                if (firstReason.isEmpty()) {
+                                    firstReason = r.message.take(200)
+                                }
+                                false
+                            }
+                        }
                     }
                 }
                 ConfigEngine.DNS_CHANGER -> DnsChangerProfiles.decode(c) != null
