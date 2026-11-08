@@ -19,29 +19,31 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * WireGuard / AmneziaWG engine backed by wgtunnel.
+ * WireGuard / AmneziaWG engine (wgtunnel).
  *
- * Root cause of "InternalError: Failed to acquire service" after disconnect:
- * wgtunnel's RuntimeManager waits for com.wgtunnel.backend.service.VpnService
- * (and Companion / TunnelService) to register themselves. After stop(), those
- * Android services can stay half-alive in the process; the next start() times
- * out waiting for a fresh onStartCommand. Force-stopping the three services
- * and recreating TunnelBackend between sessions fixes reconnect without
- * killing the whole app process.
+ * "Failed to acquire service" after disconnect happens when wgtunnel's
+ * VpnService / CompanionService stay half-registered in the process.
+ *
+ * Strategy:
+ * - Normal stop: only official backend.stop(tunnel) — never reflect suspend APIs.
+ * - Before each start (and on acquire-service retry): soft-stop the three
+ *   wgtunnel services, drop the TunnelBackend instance, wait, then create fresh.
+ * - Never call stopAllActiveTunnels via Java reflection (it is a suspend
+ *   function; invoke() crashes the process).
  */
 object WgTunnelEngine {
 
     private const val TUNNEL_ID = 1
     private const val HANDSHAKE_TIMEOUT_MS = 45_000L
-    private const val POST_STOP_SETTLE_MS = 600L
-    private const val PRE_START_SETTLE_MS = 350L
-    private const val RETRY_SETTLE_MS = 900L
+    private const val POST_STOP_SETTLE_MS = 500L
+    private const val PRE_START_SETTLE_MS = 400L
+    private const val RETRY_SETTLE_MS = 1000L
     private const val MAX_START_ATTEMPTS = 3
 
     private val WG_SERVICE_CLASSES = listOf(
-        "com.wgtunnel.backend.service.VpnService",
         "com.wgtunnel.backend.service.VpnCompanionService",
-        "com.wgtunnel.backend.service.TunnelService"
+        "com.wgtunnel.backend.service.TunnelService",
+        "com.wgtunnel.backend.service.VpnService"
     )
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -81,40 +83,37 @@ object WgTunnelEngine {
     }
 
     /**
-     * Hard-stop every wgtunnel Android service so the next start() gets a clean
-     * onStartCommand / RuntimeManager registration.
+     * Ask Android to stop wgtunnel services. Safe: wrapped in runCatching,
+     * never throws into the caller. Companion first, then tunnel, then VPN.
      */
-    private fun forceStopWgtunnelServices(app: Context) {
+    private fun softStopWgtunnelServices(app: Context) {
         for (name in WG_SERVICE_CLASSES) {
-            runCatching {
+            try {
                 val cls = Class.forName(name)
+                // stopService is the supported way to request a started service to stop.
                 app.stopService(Intent(app, cls))
-            }
-        }
-        // Also try ACTION_STOP style if any service defines it (harmless if ignored).
-        for (name in WG_SERVICE_CLASSES) {
-            runCatching {
-                val cls = Class.forName(name)
-                app.stopService(Intent(app, cls).setAction("STOP"))
+            } catch (_: Throwable) {
+                // Class not found / security — ignore; backend.stop already ran.
             }
         }
     }
 
-    private suspend fun teardownFully(app: Context, settleMs: Long) {
-        val current = backend
-        if (current != null) {
-            runCatching { current.stop(TUNNEL_ID).getOrThrow() }
-            runCatching {
-                // Prefer stop-all if the API exists on this version.
-                val m = current.javaClass.methods.firstOrNull {
-                    it.name == "stopAllActiveTunnels" && it.parameterTypes.isEmpty()
-                }
-                m?.invoke(current)
-            }
-        }
+    /** Official tunnel stop only. No reflection of suspend APIs. */
+    private suspend fun stopTunnelQuietly() {
+        val current = backend ?: return
+        runCatching { current.stop(TUNNEL_ID).getOrThrow() }
+    }
+
+    /**
+     * Full cleanup used before a new start / after failures.
+     * Does NOT run on the user "Disconnect" path beyond stopTunnelQuietly + null backend,
+     * so the UI never dies from aggressive service kills during disconnect.
+     */
+    private suspend fun prepareCleanBackend(app: Context, settleMs: Long) {
+        stopTunnelQuietly()
         backend = null
-        forceStopWgtunnelServices(app)
         isActive = false
+        softStopWgtunnelServices(app)
         if (settleMs > 0) delay(settleMs)
     }
 
@@ -139,24 +138,16 @@ object WgTunnelEngine {
         override fun updateState(state: Tunnel.State) = Unit
     }
 
-    private suspend fun startOnce(app: Context, parsed: Config, amnezia: Boolean): Pair<Boolean, String> {
-        // Drop any stale service bindings before touching the backend.
-        forceStopWgtunnelServices(app)
-        delay(PRE_START_SETTLE_MS)
+    private suspend fun startOnce(
+        app: Context,
+        parsed: Config,
+        amnezia: Boolean
+    ): Pair<Boolean, String> {
+        // Clean slate so RuntimeManager can register a new VpnService.
+        prepareCleanBackend(app, PRE_START_SETTLE_MS)
 
-        // Never reuse a backend that may still hold a dead RuntimeManager binding.
-        backend = null
         val currentBackend = ensureBackend(app)
         isActive = false
-
-        // If library still thinks a tunnel is up, stop it first.
-        runCatching {
-            val status = currentBackend.status.first()
-            if (status.activeTunnels.containsKey(TUNNEL_ID)) {
-                currentBackend.stop(TUNNEL_ID).getOrThrow()
-                delay(POST_STOP_SETTLE_MS)
-            }
-        }
 
         currentBackend.start(
             tunnel = newTunnel(),
@@ -173,14 +164,14 @@ object WgTunnelEngine {
         }
 
         if (finalStatus == null) {
-            runCatching { currentBackend.stop(TUNNEL_ID).getOrThrow() }
+            stopTunnelQuietly()
             isActive = false
             return false to "WireGuard did not receive a healthy handshake within 45 seconds."
         }
 
-        return when (val finalState = finalStatus.activeTunnels[TUNNEL_ID]?.transportState) {
+        return when (finalStatus.activeTunnels[TUNNEL_ID]?.transportState) {
             is Tunnel.State.Up.HandshakeFailure -> {
-                runCatching { currentBackend.stop(TUNNEL_ID).getOrThrow() }
+                stopTunnelQuietly()
                 isActive = false
                 false to "WireGuard handshake failed. Check endpoint, peer keys and server."
             }
@@ -193,7 +184,7 @@ object WgTunnelEngine {
                 }
             }
             else -> {
-                runCatching { currentBackend.stop(TUNNEL_ID).getOrThrow() }
+                stopTunnelQuietly()
                 isActive = false
                 false to "WireGuard did not receive a healthy handshake within 45 seconds."
             }
@@ -211,7 +202,6 @@ object WgTunnelEngine {
 
         scope.launch {
             operationMutex.withLock {
-                var lastThrowable: Throwable? = null
                 try {
                     val profileDns = ProfileSettingsStore(app).get(raw)
                     val selectedDns = (listOf(profileDns.selectedResolver) + profileDns.dnsResolvers)
@@ -222,15 +212,19 @@ object WgTunnelEngine {
                     val parsed = buildConfig(configuredRaw, amnezia)
 
                     var result: Pair<Boolean, String>? = null
+                    var last: Throwable? = null
                     for (attempt in 1..MAX_START_ATTEMPTS) {
                         try {
                             result = startOnce(app, parsed, amnezia)
                             break
                         } catch (e: Throwable) {
-                            lastThrowable = e
+                            last = e
                             lastError = describeFailure(e)
-                            // Always full teardown before retry — especially on acquire-service.
-                            teardownFully(app, if (isAcquireServiceFailure(e)) RETRY_SETTLE_MS else POST_STOP_SETTLE_MS)
+                            // Extra settle on acquire-service failures.
+                            prepareCleanBackend(
+                                app,
+                                if (isAcquireServiceFailure(e)) RETRY_SETTLE_MS else POST_STOP_SETTLE_MS
+                            )
                             if (attempt == MAX_START_ATTEMPTS) throw e
                         }
                     }
@@ -239,9 +233,11 @@ object WgTunnelEngine {
                         ?: (false to "WireGuard startup failed. Check the profile and try again.")
                     withContext(Dispatchers.Main) { callback(message, ok) }
                 } catch (e: Throwable) {
-                    lastThrowable = e
                     lastError = describeFailure(e)
-                    teardownFully(app, POST_STOP_SETTLE_MS)
+                    // Keep process alive: only quiet stop + null backend.
+                    runCatching { stopTunnelQuietly() }
+                    backend = null
+                    isActive = false
 
                     val root = generateSequence(e) { it.cause }.last()
                     val message = when {
@@ -260,30 +256,31 @@ object WgTunnelEngine {
         }
     }
 
+    /**
+     * Disconnect path — must never kill the process.
+     * Only official stop + drop backend reference. Service soft-stop is deferred
+     * to the next start() so reconnect still works without a force-close.
+     */
     fun stop(callback: (String, Boolean) -> Unit) {
         TirexNotifier.stopUpdates()
-        val app = appContext
 
         scope.launch {
             operationMutex.withLock {
                 try {
-                    if (app != null) {
-                        teardownFully(app, POST_STOP_SETTLE_MS)
-                    } else {
-                        runCatching { backend?.stop(TUNNEL_ID)?.getOrThrow() }
-                        backend = null
-                        isActive = false
-                    }
-                    withContext(Dispatchers.Main) {
-                        callback("VPN disconnected.", false)
-                    }
+                    stopTunnelQuietly()
                 } catch (t: Throwable) {
                     lastError = "stop: " + describeFailure(t)
+                } finally {
                     backend = null
                     isActive = false
-                    app?.let { forceStopWgtunnelServices(it) }
+                    // Gentle request only — do not crash if services are already gone.
+                    appContext?.let { ctx ->
+                        try {
+                            softStopWgtunnelServices(ctx)
+                        } catch (_: Throwable) {
+                        }
+                    }
                     withContext(Dispatchers.Main) {
-                        // Always report disconnected so the UI can reconnect.
                         callback("VPN disconnected.", false)
                     }
                 }
