@@ -4,6 +4,12 @@ import android.net.Uri
 import android.util.Base64
 import org.json.JSONObject
 import java.net.URLDecoder
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
+import java.nio.charset.StandardCharsets
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 /** Conservative decoder. It refuses field editing when rebuilding could drop unknown vendor data. */
 object ManualProfileDecoder {
@@ -18,18 +24,25 @@ object ManualProfileDecoder {
         val raw = rawValue.trim()
         if (raw.isEmpty()) return null
         return runCatching {
+            // Normalize locked / encrypted SlipNet links to plain slipnet:// before field decode.
+            val normalized = when {
+                raw.startsWith("slipnet-enc://", true) -> decryptAndUnlockSlipNetEnc(raw) ?: raw
+                raw.startsWith("slipnet://", true) -> raw
+                else -> raw
+            }
             when {
-                raw.startsWith("vless://", true) -> decodeUri(raw, ManualProtocol.VLESS)
-                raw.startsWith("trojan://", true) -> decodeUri(raw, ManualProtocol.TROJAN)
-                raw.startsWith("vmess://", true) -> decodeVmess(raw)
-                raw.startsWith("ss://", true) -> decodeShadowsocks(raw)
-                raw.startsWith("masterdns://", true) -> decodeMasterDns(raw)
-                raw.startsWith("stormdns://", true) -> decodeStormDns(raw)
-                raw.startsWith("cottendns://", true) -> decodeCottenDns(raw)
-                raw.startsWith("mhrv-rs://", true) -> decodeMhrv(raw)
-                raw.startsWith("dnschanger://", true) -> decodeDnsChanger(raw)
-                raw.startsWith("slipnet://", true) -> decodeSlipNet(raw)
-                raw.contains("[Interface]", true) && raw.contains("[Peer]", true) -> decodeWireGuard(raw)
+                normalized.startsWith("vless://", true) -> decodeUri(normalized, ManualProtocol.VLESS)
+                normalized.startsWith("trojan://", true) -> decodeUri(normalized, ManualProtocol.TROJAN)
+                normalized.startsWith("vmess://", true) -> decodeVmess(normalized)
+                normalized.startsWith("ss://", true) -> decodeShadowsocks(normalized)
+                normalized.startsWith("masterdns://", true) -> decodeMasterDns(normalized)
+                normalized.startsWith("stormdns://", true) -> decodeStormDns(normalized)
+                normalized.startsWith("cottendns://", true) -> decodeCottenDns(normalized)
+                normalized.startsWith("mhrv-rs://", true) -> decodeMhrv(normalized)
+                normalized.startsWith("dnschanger://", true) -> decodeDnsChanger(normalized)
+                normalized.startsWith("slipnet://", true) -> decodeSlipNet(normalized)
+                normalized.startsWith("soar://", true) -> decodeSoarLink(normalized)
+                normalized.contains("[Interface]", true) && normalized.contains("[Peer]", true) -> decodeWireGuard(normalized)
                 else -> null
             }
         }.getOrNull()
@@ -344,4 +357,117 @@ object ManualProfileDecoder {
         String(Base64.decode(value, Base64.DEFAULT or Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
     }.getOrNull()
     private fun percent(value: String): String = runCatching { URLDecoder.decode(value.replace("+", "%2B"), "UTF-8") }.getOrDefault(value)
+
+    // --- SlipNet encrypted unlock (same public app key as SlipNetDecodeFallback) ---
+
+    private const val SLIPNET_PUBLIC_KEY_HEX =
+        "214F052025B2F949605A5429EC3D5FA80C2022C168AD946E68852D447214DBD3"
+
+    /**
+     * Decrypts slipnet-enc:// with the public app key, strips lock fields,
+     * and returns a plain slipnet:// URI suitable for [decodeSlipNet].
+     */
+    private fun decryptAndUnlockSlipNetEnc(raw: String): String? {
+        val token = raw.substringAfter("://").substringBefore('#')
+            .replace("%2B", "+", ignoreCase = true)
+            .replace("%2F", "/", ignoreCase = true)
+            .replace("%3D", "=", ignoreCase = true)
+            .replace(' ', '+')
+            .replace("\r", "")
+            .replace("\n", "")
+            .replace("\t", "")
+        val compact = token.trim()
+        if (compact.isEmpty()) return null
+        val padded = compact + "=".repeat((4 - compact.length % 4) % 4)
+        val data = listOf(
+            Base64.NO_WRAP,
+            Base64.URL_SAFE or Base64.NO_WRAP,
+            Base64.DEFAULT,
+            Base64.URL_SAFE or Base64.DEFAULT
+        ).firstNotNullOfOrNull { mode ->
+            runCatching { Base64.decode(padded, mode) }.getOrNull()?.takeIf { it.isNotEmpty() }
+        } ?: return null
+
+        // envelope: version(1) + nonce(12) + ciphertext|tag
+        if (data.size < 29 || data[0] != 0x01.toByte()) return null
+        val nonce = data.copyOfRange(1, 13)
+        val ciphertext = data.copyOfRange(13, data.size)
+        val keyBytes = ByteArray(SLIPNET_PUBLIC_KEY_HEX.length / 2) { i ->
+            SLIPNET_PUBLIC_KEY_HEX.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+        }
+        val plaintext = runCatching {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                SecretKeySpec(keyBytes, "AES"),
+                GCMParameterSpec(128, nonce)
+            )
+            cipher.doFinal(ciphertext)
+        }.getOrNull() ?: return null
+
+        val plain = runCatching {
+            StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(plaintext))
+                .toString()
+        }.getOrNull() ?: return null
+
+        if (plain.isBlank() || plain.contains('\u0000')) return null
+        val parts = plain.trimEnd('|').split('|').toMutableList()
+        if (parts.isEmpty() || parts[0].toIntOrNull() == null) return null
+
+        // Unlock
+        if (parts.size > 37) {
+            val mainResolver = parts.getOrNull(4)?.trim().orEmpty()
+            val hiddenResolver = parts.getOrNull(37)?.trim().orEmpty()
+            if (mainResolver.isEmpty() && hiddenResolver.isNotEmpty()) {
+                parts[4] = hiddenResolver
+            }
+        }
+        if (parts.size > 31) parts[31] = "0"
+        if (parts.size > 32) parts[32] = ""
+        if (parts.size > 36) parts[36] = "0"
+        if (parts.size > 37) parts[37] = ""
+
+        val unlocked = parts.joinToString("|") + "|"
+        val encoded = Base64.encodeToString(
+            unlocked.toByteArray(StandardCharsets.UTF_8),
+            Base64.NO_WRAP
+        )
+        return "slipnet://$encoded"
+    }
+
+        /** Minimal support for soar:// share links used by some exporters. */
+    private fun decodeSoarLink(raw: String): Decoded? {
+        val parsed = SoarProfile.parse(raw)
+        return when (parsed) {
+            is SoarProfile.Result.Ok -> {
+                val p = parsed.data
+                val settings = p.settings
+                Decoded(
+                    ManualProtocol.SLIPNET_SOAR,
+                    linkedMapOf(
+                        "name" to p.name,
+                        "domain" to p.domain,
+                        "publicKey" to p.publicKey,
+                        "resolvers" to p.resolvers.joinToString("\n"),
+                        "dnsTransport" to settings["dnsTransport"].orEmpty().ifBlank { "udp" },
+                        "resolverMode" to settings["resolverMode"].orEmpty().ifBlank { "roundrobin" },
+                        "keepAlive" to settings["keepAlive"].orEmpty().ifBlank { "5000" },
+                        "tcpListenPort" to settings["tcpListenPort"].orEmpty().ifBlank { "1080" },
+                        "dnsPayloadSize" to settings["dnsPayloadSize"].orEmpty().ifBlank { "0" },
+                        "soarDiscovery" to if (settings["soarDiscovery"] == "1" || settings["soarDiscovery"] == "on") "on" else "off",
+                        "soarCountry" to p.country,
+                        "soarTcpMode" to settings["soarTcpMode"].orEmpty().ifBlank { "auto" },
+                        "soarDiscoveryList" to settings["soarDiscoveryList"].orEmpty().ifBlank { "soar" },
+                        "soarDiscoveryCustom" to settings["soarDiscoveryCustom"].orEmpty()
+                    ),
+                    true
+                )
+            }
+            else -> null
+        }
+    }
+
 }
