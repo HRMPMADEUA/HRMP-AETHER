@@ -10,10 +10,12 @@ import java.util.Locale
  * native implementations rather than a generic DNS placeholder.
  */
 object SlipNetManualProfile {
+    private val ssModes = setOf(ManualProtocol.SLIPNET_SS, ManualProtocol.SLIPNET_SS_SSH)
     private val dnsttModes = setOf(ManualProtocol.SLIPNET_DNSTT, ManualProtocol.SLIPNET_DNSTT_SSH)
     private val vayModes = setOf(ManualProtocol.SLIPNET_VAYDNS, ManualProtocol.SLIPNET_VAYDNS_SSH)
     private val soarModes = setOf(ManualProtocol.SLIPNET_SOAR, ManualProtocol.SLIPNET_SOAR_SSH)
     private val sshModes = setOf(
+        ManualProtocol.SLIPNET_SS_SSH,
         ManualProtocol.SLIPNET_DNSTT_SSH,
         ManualProtocol.SLIPNET_VAYDNS_SSH,
         ManualProtocol.SLIPNET_SOAR_SSH
@@ -21,6 +23,7 @@ object SlipNetManualProfile {
 
     fun fields(protocol: ManualProtocol, name: FieldSpec): List<FieldSpec> {
         val isSsh = protocol in sshModes
+        val isSs = protocol in ssModes
         val isDnstt = protocol in dnsttModes
         val isVay = protocol in vayModes
         val isSoar = protocol in soarModes
@@ -37,6 +40,17 @@ object SlipNetManualProfile {
             FieldSpec("tcpListenPort", "Local TCP port", FieldKind.NUMBER, hint = "1080", default = "1080"),
             FieldSpec("dnsPayloadSize", "DNS payload size", FieldKind.NUMBER, hint = "0 = automatic", default = "0")
         )
+
+        if (isSs) {
+            base += FieldSpec(
+                "socksUsername", "SOCKS username",
+                required = false, hint = "Optional SOCKS auth username"
+            )
+            base += FieldSpec(
+                "socksPassword", "SOCKS password", FieldKind.SECRET,
+                required = false, hint = "Optional SOCKS auth password"
+            )
+        }
 
         when {
             isDnstt -> {
@@ -111,15 +125,18 @@ object SlipNetManualProfile {
 
     fun build(protocol: ManualProtocol, values: Map<String, String>, fallbackName: String): ManualOutcome {
         val mode = when (protocol) {
+            ManualProtocol.SLIPNET_SS -> "ss"
+            ManualProtocol.SLIPNET_SS_SSH -> "ss_ssh"
             ManualProtocol.SLIPNET_DNSTT -> "dnstt"
             ManualProtocol.SLIPNET_DNSTT_SSH -> "dnstt_ssh"
             ManualProtocol.SLIPNET_VAYDNS -> "vaydns"
             ManualProtocol.SLIPNET_VAYDNS_SSH -> "vaydns_ssh"
             ManualProtocol.SLIPNET_SOAR -> "soar"
             ManualProtocol.SLIPNET_SOAR_SSH -> "soar_ssh"
-            else -> return ManualOutcome.Invalid("protocol", "Choose DNSTT, VayDNS or Soar.")
+            else -> return ManualOutcome.Invalid("protocol", "Choose Slipstream, DNSTT, VayDNS or Soar.")
         }
         val useSsh = protocol in sshModes
+        val isSs = protocol in ssModes
         val isDnstt = protocol in dnsttModes
         val isVay = protocol in vayModes
         val isSoar = protocol in soarModes
@@ -243,8 +260,8 @@ object SlipNetManualProfile {
         set(9, "127.0.0.1")
         set(10, "0")
         set(11, publicKey)
-        set(12, "")
-        set(13, "")
+        set(12, if (isSs) values["socksUsername"].orEmpty() else "")
+        set(13, if (isSs) values["socksPassword"].orEmpty() else "")
         set(14, if (useSsh) "1" else "0")
         set(15, sshUser)
         set(16, sshPassword)
