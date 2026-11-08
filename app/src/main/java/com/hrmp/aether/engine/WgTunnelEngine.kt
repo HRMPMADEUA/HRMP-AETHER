@@ -1,12 +1,12 @@
 package com.tirexnet.app.engine
 
 import android.content.Context
+import android.content.Intent
 import com.wgtunnel.backend.Tunnel
 import com.wgtunnel.backend.TunnelBackend
 import com.wgtunnel.backend.model.BackendMode
 import com.wgtunnel.parser.AmneziaConfigNormalizer
 import com.wgtunnel.parser.Config
-import java.net.InetAddress
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -19,72 +19,101 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * WireGuard / AmneziaWG engine.
+ * WireGuard / AmneziaWG engine backed by wgtunnel.
  *
- * Important lifecycle note:
- * wgtunnel's TunnelBackend can leave a dead Android service binding after stop.
- * Reusing that instance causes "InternalError: Failed to acquire service" on the
- * next connect until the process is killed. This engine therefore always recreates
- * the backend after a full stop (or after an acquire-service failure).
+ * Root cause of "InternalError: Failed to acquire service" after disconnect:
+ * wgtunnel's RuntimeManager waits for com.wgtunnel.backend.service.VpnService
+ * (and Companion / TunnelService) to register themselves. After stop(), those
+ * Android services can stay half-alive in the process; the next start() times
+ * out waiting for a fresh onStartCommand. Force-stopping the three services
+ * and recreating TunnelBackend between sessions fixes reconnect without
+ * killing the whole app process.
  */
 object WgTunnelEngine {
 
     private const val TUNNEL_ID = 1
     private const val HANDSHAKE_TIMEOUT_MS = 45_000L
-    private const val PROBE_HOST = "connectivitycheck.gstatic.com"
-    /** Give Android time to tear down the previous VpnService binding. */
-    private const val POST_STOP_SETTLE_MS = 450L
-    private const val ACQUIRE_RETRY_SETTLE_MS = 700L
+    private const val POST_STOP_SETTLE_MS = 600L
+    private const val PRE_START_SETTLE_MS = 350L
+    private const val RETRY_SETTLE_MS = 900L
+    private const val MAX_START_ATTEMPTS = 3
 
-    private val scope =
-        CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val WG_SERVICE_CLASSES = listOf(
+        "com.wgtunnel.backend.service.VpnService",
+        "com.wgtunnel.backend.service.VpnCompanionService",
+        "com.wgtunnel.backend.service.TunnelService"
+    )
 
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val operationMutex = Mutex()
 
-    @Volatile
-    private var backend: TunnelBackend? = null
-
-    @Volatile
-    private var monitor: AndroidNetworkMonitor? = null
+    @Volatile private var backend: TunnelBackend? = null
+    @Volatile private var monitor: AndroidNetworkMonitor? = null
+    @Volatile private var appContext: Context? = null
 
     @Volatile
     var isActive: Boolean = false
+        private set
 
-    /** Redacted "Class: message <- root cause" of the last start/stop failure, for diagnostics. Never hidden. */
-    @Volatile var lastError: String = ""
+    @Volatile
+    var lastError: String = ""
         private set
 
     private fun describeFailure(e: Throwable): String {
         val root = generateSequence(e) { it.cause }.last()
-        val head = e.javaClass.simpleName + ": " + ConfigSanitizer.redact(e.message.orEmpty()).take(120)
+        val head = e.javaClass.simpleName + ": " +
+            ConfigSanitizer.redact(e.message.orEmpty()).take(120)
         return if (root !== e) {
             head + " <- " + root.javaClass.simpleName + ": " +
                 ConfigSanitizer.redact(root.message.orEmpty()).take(120)
-        } else {
-            head
-        }
+        } else head
     }
 
     private fun isAcquireServiceFailure(e: Throwable): Boolean {
-        val chain = generateSequence(e) { it.cause }.toList()
-        return chain.any { t ->
+        return generateSequence(e) { it.cause }.any { t ->
             val msg = t.message.orEmpty()
             msg.contains("Failed to acquire service", ignoreCase = true) ||
                 msg.contains("acquire service", ignoreCase = true) ||
-                (t.javaClass.simpleName.contains("InternalError", ignoreCase = true) &&
-                    msg.contains("service", ignoreCase = true))
+                msg.contains("Unable to start", ignoreCase = true) ||
+                (msg.contains("service", ignoreCase = true) &&
+                    msg.contains("timeout", ignoreCase = true))
         }
     }
 
-    /** Stop tunnel if any, drop backend so the next start creates a fresh service binding. */
-    private suspend fun resetBackend(settleMs: Long = POST_STOP_SETTLE_MS) {
+    /**
+     * Hard-stop every wgtunnel Android service so the next start() gets a clean
+     * onStartCommand / RuntimeManager registration.
+     */
+    private fun forceStopWgtunnelServices(app: Context) {
+        for (name in WG_SERVICE_CLASSES) {
+            runCatching {
+                val cls = Class.forName(name)
+                app.stopService(Intent(app, cls))
+            }
+        }
+        // Also try ACTION_STOP style if any service defines it (harmless if ignored).
+        for (name in WG_SERVICE_CLASSES) {
+            runCatching {
+                val cls = Class.forName(name)
+                app.stopService(Intent(app, cls).setAction("STOP"))
+            }
+        }
+    }
+
+    private suspend fun teardownFully(app: Context, settleMs: Long) {
         val current = backend
         if (current != null) {
             runCatching { current.stop(TUNNEL_ID).getOrThrow() }
-            // Some backend builds expose no explicit close; nulling forces a new instance.
+            runCatching {
+                // Prefer stop-all if the API exists on this version.
+                val m = current.javaClass.methods.firstOrNull {
+                    it.name == "stopAllActiveTunnels" && it.parameterTypes.isEmpty()
+                }
+                m?.invoke(current)
+            }
         }
         backend = null
-        // Keep the network monitor; recreating it is optional and registering many callbacks is worse.
+        forceStopWgtunnelServices(app)
         isActive = false
         if (settleMs > 0) delay(settleMs)
     }
@@ -107,35 +136,33 @@ object WgTunnelEngine {
         override val ipStrategy: Tunnel.IpStrategy =
             Tunnel.IpStrategy.PreferIpv6(recoveryEnabled = true)
         override val features: Set<Tunnel.Feature> = emptySet()
-        override fun updateState(state: Tunnel.State) {
-            // Backend owns transport-state tracking.
-        }
+        override fun updateState(state: Tunnel.State) = Unit
     }
 
-    private suspend fun startOnce(
-        app: Context,
-        parsed: Config,
-        amnezia: Boolean
-    ): Pair<Boolean, String> {
-        // If a previous tunnel is still marked active on this backend, stop it first.
-        val existing = backend
-        if (existing != null) {
-            val previousStatus = runCatching { existing.status.first() }.getOrNull()
-            if (previousStatus?.activeTunnels?.containsKey(TUNNEL_ID) == true) {
-                runCatching { existing.stop(TUNNEL_ID).getOrThrow() }
+    private suspend fun startOnce(app: Context, parsed: Config, amnezia: Boolean): Pair<Boolean, String> {
+        // Drop any stale service bindings before touching the backend.
+        forceStopWgtunnelServices(app)
+        delay(PRE_START_SETTLE_MS)
+
+        // Never reuse a backend that may still hold a dead RuntimeManager binding.
+        backend = null
+        val currentBackend = ensureBackend(app)
+        isActive = false
+
+        // If library still thinks a tunnel is up, stop it first.
+        runCatching {
+            val status = currentBackend.status.first()
+            if (status.activeTunnels.containsKey(TUNNEL_ID)) {
+                currentBackend.stop(TUNNEL_ID).getOrThrow()
                 delay(POST_STOP_SETTLE_MS)
             }
         }
-
-        val currentBackend = ensureBackend(app)
-        isActive = false
 
         currentBackend.start(
             tunnel = newTunnel(),
             mode = BackendMode.Vpn(parsed)
         ).getOrThrow()
 
-        // Backend.status is Flow, not StateFlow — wait for Up or failure.
         val finalStatus = withTimeoutOrNull(HANDSHAKE_TIMEOUT_MS) {
             currentBackend.status.first { status ->
                 val state = status.activeTunnels[TUNNEL_ID]?.transportState
@@ -143,14 +170,15 @@ object WgTunnelEngine {
                     state is Tunnel.State.Up.HandshakeFailure ||
                     state is Tunnel.State.Down
             }
-        } ?: run {
+        }
+
+        if (finalStatus == null) {
             runCatching { currentBackend.stop(TUNNEL_ID).getOrThrow() }
             isActive = false
             return false to "WireGuard did not receive a healthy handshake within 45 seconds."
         }
 
-        val finalState = finalStatus.activeTunnels[TUNNEL_ID]?.transportState
-        return when (finalState) {
+        return when (val finalState = finalStatus.activeTunnels[TUNNEL_ID]?.transportState) {
             is Tunnel.State.Up.HandshakeFailure -> {
                 runCatching { currentBackend.stop(TUNNEL_ID).getOrThrow() }
                 isActive = false
@@ -158,12 +186,11 @@ object WgTunnelEngine {
             }
             is Tunnel.State.Up -> {
                 isActive = true
-                val okMsg = if (amnezia) {
+                true to if (amnezia) {
                     "AmneziaWG connected. Handshake confirmed."
                 } else {
                     "WireGuard connected. Handshake confirmed."
                 }
-                true to okMsg
             }
             else -> {
                 runCatching { currentBackend.stop(TUNNEL_ID).getOrThrow() }
@@ -179,44 +206,43 @@ object WgTunnelEngine {
         amnezia: Boolean,
         callback: (String, Boolean) -> Unit
     ) {
+        val app = context.applicationContext
+        appContext = app
+
         scope.launch {
             operationMutex.withLock {
+                var lastThrowable: Throwable? = null
                 try {
-                    val app = context.applicationContext
                     val profileDns = ProfileSettingsStore(app).get(raw)
                     val selectedDns = (listOf(profileDns.selectedResolver) + profileDns.dnsResolvers)
                         .mapNotNull(::wireGuardDnsIp)
                         .distinct()
-                    val configuredRaw = if (selectedDns.isEmpty()) raw else applyProfileDns(raw, selectedDns)
+                    val configuredRaw =
+                        if (selectedDns.isEmpty()) raw else applyProfileDns(raw, selectedDns)
                     val parsed = buildConfig(configuredRaw, amnezia)
 
-                    val first = try {
-                        startOnce(app, parsed, amnezia)
-                    } catch (e: Throwable) {
-                        if (isAcquireServiceFailure(e)) {
-                            // Dead service binding from previous session — drop backend and retry once.
+                    var result: Pair<Boolean, String>? = null
+                    for (attempt in 1..MAX_START_ATTEMPTS) {
+                        try {
+                            result = startOnce(app, parsed, amnezia)
+                            break
+                        } catch (e: Throwable) {
+                            lastThrowable = e
                             lastError = describeFailure(e)
-                            resetBackend(ACQUIRE_RETRY_SETTLE_MS)
-                            try {
-                                startOnce(app, parsed, amnezia)
-                            } catch (e2: Throwable) {
-                                throw e2
-                            }
-                        } else {
-                            throw e
+                            // Always full teardown before retry — especially on acquire-service.
+                            teardownFully(app, if (isAcquireServiceFailure(e)) RETRY_SETTLE_MS else POST_STOP_SETTLE_MS)
+                            if (attempt == MAX_START_ATTEMPTS) throw e
                         }
                     }
 
-                    withContext(Dispatchers.Main) {
-                        callback(first.second, first.first)
-                    }
+                    val (ok, message) = result
+                        ?: (false to "WireGuard startup failed. Check the profile and try again.")
+                    withContext(Dispatchers.Main) { callback(message, ok) }
                 } catch (e: Throwable) {
-                    runCatching { backend?.stop(TUNNEL_ID)?.getOrThrow() }
-                    // Always drop a failed backend so the next user attempt is clean.
-                    backend = null
-                    isActive = false
-
+                    lastThrowable = e
                     lastError = describeFailure(e)
+                    teardownFully(app, POST_STOP_SETTLE_MS)
+
                     val root = generateSequence(e) { it.cause }.last()
                     val message = when {
                         e is SecurityException ->
@@ -224,13 +250,41 @@ object WgTunnelEngine {
                         e is UnsatisfiedLinkError || root is UnsatisfiedLinkError ->
                             "WireGuard startup failed: native tunnel library mismatch (${ConfigSanitizer.redact(root.message.orEmpty()).take(100)})."
                         isAcquireServiceFailure(e) ->
-                            "WireGuard startup failed (service busy). Wait a second and try again, or force-stop the app once."
+                            "WireGuard service was busy. Try connecting again in a moment."
                         else ->
                             "WireGuard startup failed (${lastError.take(180)}). Check the profile and try again."
                     }
+                    withContext(Dispatchers.Main) { callback(message, false) }
+                }
+            }
+        }
+    }
 
+    fun stop(callback: (String, Boolean) -> Unit) {
+        TirexNotifier.stopUpdates()
+        val app = appContext
+
+        scope.launch {
+            operationMutex.withLock {
+                try {
+                    if (app != null) {
+                        teardownFully(app, POST_STOP_SETTLE_MS)
+                    } else {
+                        runCatching { backend?.stop(TUNNEL_ID)?.getOrThrow() }
+                        backend = null
+                        isActive = false
+                    }
                     withContext(Dispatchers.Main) {
-                        callback(message, false)
+                        callback("VPN disconnected.", false)
+                    }
+                } catch (t: Throwable) {
+                    lastError = "stop: " + describeFailure(t)
+                    backend = null
+                    isActive = false
+                    app?.let { forceStopWgtunnelServices(it) }
+                    withContext(Dispatchers.Main) {
+                        // Always report disconnected so the UI can reconnect.
+                        callback("VPN disconnected.", false)
                     }
                 }
             }
@@ -239,19 +293,18 @@ object WgTunnelEngine {
 
     private fun wireGuardDnsIp(value: String): String? {
         val clean = value.trim()
-        val host = if (clean.startsWith("[")) {
-            clean.substringAfter("[").substringBefore("]")
-        } else if (clean.count { it == ':' } == 1 && clean.substringAfter(":").toIntOrNull() != null) {
-            clean.substringBefore(":")
-        } else {
-            clean
+        val host = when {
+            clean.startsWith("[") ->
+                clean.substringAfter("[").substringBefore("]")
+            clean.count { it == ':' } == 1 &&
+                clean.substringAfter(":").toIntOrNull() != null ->
+                clean.substringBefore(":")
+            else -> clean
         }
         val ipv4 = Regex("^\\d{1,3}(\\.\\d{1,3}){3}$").matches(host) &&
             host.split('.').all { it.toIntOrNull() in 0..255 }
         val ipv6 = host.contains(':') && Regex("^[0-9a-fA-F:]+$").matches(host)
-        if (!ipv4 && !ipv6) return null
-        // Reject hostnames; WireGuard DNS must be an IP.
-        return host
+        return if (ipv4 || ipv6) host else null
     }
 
     private fun applyProfileDns(raw: String, dns: List<String>): String {
@@ -261,23 +314,15 @@ object WgTunnelEngine {
         val header = Regex("(?im)^\\s*\\[Interface]\\s*$")
         return if (header.containsMatchIn(raw)) {
             header.replaceFirst(raw, "[Interface]\n$line")
-        } else {
-            raw
-        }
+        } else raw
     }
 
-    private fun buildConfig(
-        raw: String,
-        amnezia: Boolean
-    ): Config {
+    private fun buildConfig(raw: String, amnezia: Boolean): Config {
         require(raw.isNotBlank()) { "Configuration is empty" }
-
         if (!amnezia) {
             return Config.parseQuickString(raw).also { it.validate() }
         }
-
         val clean = ConfigSanitizer.sanitizeAmnezia(raw).text
-
         return try {
             AmneziaConfigNormalizer
                 .ensureAmneziaCompatibility(Config.parseQuickString(clean))
@@ -285,33 +330,7 @@ object WgTunnelEngine {
         } catch (e: Throwable) {
             if (e.message.orEmpty().contains("INVALID_SIGNATURE_FORMAT", ignoreCase = true)) {
                 Config.parseQuickString(clean).also { it.validate() }
-            } else {
-                throw e
-            }
-        }
-    }
-
-    fun stop(callback: (String, Boolean) -> Unit) {
-        TirexNotifier.stopUpdates()
-
-        scope.launch {
-            operationMutex.withLock {
-                try {
-                    // Full teardown: stop tunnel AND drop backend so reconnect is clean.
-                    resetBackend(POST_STOP_SETTLE_MS)
-                    withContext(Dispatchers.Main) {
-                        callback("VPN disconnected.", false)
-                    }
-                } catch (t: Throwable) {
-                    lastError = "stop: " + describeFailure(t)
-                    // Still drop backend; a half-dead instance is worse than recreating.
-                    backend = null
-                    isActive = false
-                    withContext(Dispatchers.Main) {
-                        callback("VPN disconnected.", false)
-                    }
-                }
-            }
+            } else throw e
         }
     }
 }
