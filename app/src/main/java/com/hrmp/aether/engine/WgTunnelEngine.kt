@@ -1,7 +1,6 @@
 package com.tirexnet.app.engine
 
 import android.content.Context
-import android.content.Intent
 import com.wgtunnel.backend.Tunnel
 import com.wgtunnel.backend.TunnelBackend
 import com.wgtunnel.backend.model.BackendMode
@@ -21,30 +20,25 @@ import kotlinx.coroutines.withTimeoutOrNull
 /**
  * WireGuard / AmneziaWG engine (wgtunnel).
  *
- * "Failed to acquire service" after disconnect happens when wgtunnel's
- * VpnService / CompanionService stay half-registered in the process.
+ * IMPORTANT — do NOT call Context.stopService() on
+ * com.wgtunnel.backend.service.VpnService. Android then runs onDestroy →
+ * stopHevSocks5Bridge → TProxyStopService() JNI. If the hev native lib is
+ * not loaded on that path, the main thread throws UnsatisfiedLinkError and
+ * the whole process dies. Teardown must go only through TunnelBackend.stop().
  *
- * Strategy:
- * - Normal stop: only official backend.stop(tunnel) — never reflect suspend APIs.
- * - Before each start (and on acquire-service retry): soft-stop the three
- *   wgtunnel services, drop the TunnelBackend instance, wait, then create fresh.
- * - Never call stopAllActiveTunnels via Java reflection (it is a suspend
- *   function; invoke() crashes the process).
+ * Reconnect strategy:
+ * - stop(): backend.stop(tunnel) + drop the TunnelBackend reference
+ * - start(): always create a fresh TunnelBackend; retry on "acquire service"
+ *   with delays (no stopService)
  */
 object WgTunnelEngine {
 
     private const val TUNNEL_ID = 1
     private const val HANDSHAKE_TIMEOUT_MS = 45_000L
-    private const val POST_STOP_SETTLE_MS = 500L
-    private const val PRE_START_SETTLE_MS = 400L
-    private const val RETRY_SETTLE_MS = 1000L
+    private const val POST_STOP_SETTLE_MS = 700L
+    private const val PRE_START_SETTLE_MS = 300L
+    private const val RETRY_SETTLE_MS = 1200L
     private const val MAX_START_ATTEMPTS = 3
-
-    private val WG_SERVICE_CLASSES = listOf(
-        "com.wgtunnel.backend.service.VpnCompanionService",
-        "com.wgtunnel.backend.service.TunnelService",
-        "com.wgtunnel.backend.service.VpnService"
-    )
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val operationMutex = Mutex()
@@ -82,39 +76,26 @@ object WgTunnelEngine {
         }
     }
 
-    /**
-     * Ask Android to stop wgtunnel services. Safe: wrapped in runCatching,
-     * never throws into the caller. Companion first, then tunnel, then VPN.
-     */
-    private fun softStopWgtunnelServices(app: Context) {
-        for (name in WG_SERVICE_CLASSES) {
-            try {
-                val cls = Class.forName(name)
-                // stopService is the supported way to request a started service to stop.
-                app.stopService(Intent(app, cls))
-            } catch (_: Throwable) {
-                // Class not found / security — ignore; backend.stop already ran.
-            }
+    private fun isNativeLinkFailure(e: Throwable): Boolean {
+        return generateSequence(e) { it.cause }.any {
+            it is UnsatisfiedLinkError ||
+                it.message.orEmpty().contains("No implementation found", ignoreCase = true) ||
+                it.message.orEmpty().contains("TProxyStopService", ignoreCase = true)
         }
     }
 
-    /** Official tunnel stop only. No reflection of suspend APIs. */
+    /** Official tunnel stop only. Never Context.stopService on VpnService. */
     private suspend fun stopTunnelQuietly() {
         val current = backend ?: return
         runCatching { current.stop(TUNNEL_ID).getOrThrow() }
+            .onFailure { t ->
+                lastError = "stop: " + describeFailure(t)
+            }
     }
 
-    /**
-     * Full cleanup used before a new start / after failures.
-     * Does NOT run on the user "Disconnect" path beyond stopTunnelQuietly + null backend,
-     * so the UI never dies from aggressive service kills during disconnect.
-     */
-    private suspend fun prepareCleanBackend(app: Context, settleMs: Long) {
-        stopTunnelQuietly()
+    private fun dropBackend() {
         backend = null
         isActive = false
-        softStopWgtunnelServices(app)
-        if (settleMs > 0) delay(settleMs)
     }
 
     private fun ensureBackend(app: Context): TunnelBackend {
@@ -143,8 +124,10 @@ object WgTunnelEngine {
         parsed: Config,
         amnezia: Boolean
     ): Pair<Boolean, String> {
-        // Clean slate so RuntimeManager can register a new VpnService.
-        prepareCleanBackend(app, PRE_START_SETTLE_MS)
+        // Drop any previous backend instance so RuntimeManager is recreated.
+        stopTunnelQuietly()
+        dropBackend()
+        delay(PRE_START_SETTLE_MS)
 
         val currentBackend = ensureBackend(app)
         isActive = false
@@ -212,18 +195,21 @@ object WgTunnelEngine {
                     val parsed = buildConfig(configuredRaw, amnezia)
 
                     var result: Pair<Boolean, String>? = null
-                    var last: Throwable? = null
                     for (attempt in 1..MAX_START_ATTEMPTS) {
                         try {
                             result = startOnce(app, parsed, amnezia)
                             break
                         } catch (e: Throwable) {
-                            last = e
                             lastError = describeFailure(e)
-                            // Extra settle on acquire-service failures.
-                            prepareCleanBackend(
-                                app,
-                                if (isAcquireServiceFailure(e)) RETRY_SETTLE_MS else POST_STOP_SETTLE_MS
+                            stopTunnelQuietly()
+                            dropBackend()
+                            // Wait longer when the VPN service binding is still settling.
+                            delay(
+                                when {
+                                    isAcquireServiceFailure(e) -> RETRY_SETTLE_MS
+                                    isNativeLinkFailure(e) -> RETRY_SETTLE_MS
+                                    else -> POST_STOP_SETTLE_MS
+                                }
                             )
                             if (attempt == MAX_START_ATTEMPTS) throw e
                         }
@@ -234,17 +220,15 @@ object WgTunnelEngine {
                     withContext(Dispatchers.Main) { callback(message, ok) }
                 } catch (e: Throwable) {
                     lastError = describeFailure(e)
-                    // Keep process alive: only quiet stop + null backend.
                     runCatching { stopTunnelQuietly() }
-                    backend = null
-                    isActive = false
+                    dropBackend()
 
                     val root = generateSequence(e) { it.cause }.last()
                     val message = when {
                         e is SecurityException ->
                             "Android VPN permission is required."
-                        e is UnsatisfiedLinkError || root is UnsatisfiedLinkError ->
-                            "WireGuard startup failed: native tunnel library mismatch (${ConfigSanitizer.redact(root.message.orEmpty()).take(100)})."
+                        isNativeLinkFailure(e) || e is UnsatisfiedLinkError || root is UnsatisfiedLinkError ->
+                            "WireGuard native library error. Force-stop the app once, then try again."
                         isAcquireServiceFailure(e) ->
                             "WireGuard service was busy. Try connecting again in a moment."
                         else ->
@@ -257,9 +241,8 @@ object WgTunnelEngine {
     }
 
     /**
-     * Disconnect path — must never kill the process.
-     * Only official stop + drop backend reference. Service soft-stop is deferred
-     * to the next start() so reconnect still works without a force-close.
+     * Disconnect. Must never kill the process.
+     * Only TunnelBackend.stop — never Context.stopService(VpnService).
      */
     fun stop(callback: (String, Boolean) -> Unit) {
         TirexNotifier.stopUpdates()
@@ -268,18 +251,11 @@ object WgTunnelEngine {
             operationMutex.withLock {
                 try {
                     stopTunnelQuietly()
+                    delay(POST_STOP_SETTLE_MS)
                 } catch (t: Throwable) {
                     lastError = "stop: " + describeFailure(t)
                 } finally {
-                    backend = null
-                    isActive = false
-                    // Gentle request only — do not crash if services are already gone.
-                    appContext?.let { ctx ->
-                        try {
-                            softStopWgtunnelServices(ctx)
-                        } catch (_: Throwable) {
-                        }
-                    }
+                    dropBackend()
                     withContext(Dispatchers.Main) {
                         callback("VPN disconnected.", false)
                     }
