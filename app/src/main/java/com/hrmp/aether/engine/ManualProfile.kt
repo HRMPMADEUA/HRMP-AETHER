@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets
 enum class ManualProtocol(val label: String, val group: String) {
     VLESS("VLESS", "Xray"), VMESS("VMess", "Xray"), TROJAN("Trojan", "Xray"), SHADOWSOCKS("Shadowsocks", "Xray"),
     WIREGUARD("WireGuard", "VPN"), AMNEZIAWG("AmneziaWG", "VPN"),
+    SLIPNET_SS("Slipstream", "SlipNet"), SLIPNET_SS_SSH("Slipstream + SSH", "SlipNet"),
     SLIPNET_DNSTT("DNSTT", "SlipNet"), SLIPNET_DNSTT_SSH("DNSTT + SSH", "SlipNet"),
     SLIPNET_VAYDNS("VayDNS", "SlipNet"), SLIPNET_VAYDNS_SSH("VayDNS + SSH", "SlipNet"),
     SLIPNET_SOAR("Soar", "SlipNet"), SLIPNET_SOAR_SSH("Soar + SSH", "SlipNet"),
@@ -87,6 +88,7 @@ object ManualProfile {
                 FieldSpec("method", "Encryption method", FieldKind.CHOICE, required = true,
                     choices = listOf("aes-256-gcm", "aes-128-gcm", "chacha20-ietf-poly1305", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305"), default = "aes-256-gcm"),
                 FieldSpec("password", "Password", FieldKind.SECRET, required = true))
+            ManualProtocol.SLIPNET_SS, ManualProtocol.SLIPNET_SS_SSH,
             ManualProtocol.SLIPNET_DNSTT, ManualProtocol.SLIPNET_DNSTT_SSH,
             ManualProtocol.SLIPNET_VAYDNS, ManualProtocol.SLIPNET_VAYDNS_SSH,
             ManualProtocol.SLIPNET_SOAR, ManualProtocol.SLIPNET_SOAR_SSH ->
