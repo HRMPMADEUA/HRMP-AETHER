@@ -13,7 +13,10 @@ import javax.crypto.spec.SecretKeySpec
  *
  * The official importer is always attempted first by TirexSlipNetRuntime.
  * This fallback handles the public app-compatible AES key and damaged
- * Base64 transport encodings. It never guesses passwords or bypasses locks.
+ * Base64 transport encodings.
+ *
+ * For slipnet-enc:// it decrypts with the public app key and fully unlocks
+ * the profile (removes lock, restores hidden resolvers).
  */
 internal object SlipNetDecodeFallback {
 
@@ -139,8 +142,10 @@ internal object SlipNetDecodeFallback {
             "slipnet-enc://" -> {
                 val plaintext = decryptKnownSingleProfile(bytes)
                 if (plaintext != null) {
+                    // Fully unlock the profile before re-encoding
+                    val unlocked = unlockProfile(plaintext)
                     val encoded = Base64.encodeToString(
-                        plaintext.toByteArray(StandardCharsets.UTF_8),
+                        unlocked.toByteArray(StandardCharsets.UTF_8),
                         Base64.NO_WRAP
                     )
                     "slipnet://$encoded"
@@ -153,6 +158,43 @@ internal object SlipNetDecodeFallback {
 
             else -> null
         }
+    }
+
+    /**
+     * Removes all lock restrictions from a decrypted SlipNet profile:
+     * - Restores resolver from Hidden Resolvers to the main Resolvers field
+     * - Sets Is Locked = 0
+     * - Clears Lock Password Hash
+     * - Sets Resolvers Hidden = 0
+     * - Clears Hidden Resolvers
+     */
+    private fun unlockProfile(raw: String): String {
+        val parts = raw.trimEnd('|').split("|").toMutableList()
+
+        // Field indices for v30 (most common):
+        //  4 = Resolvers
+        // 31 = Is Locked
+        // 32 = Lock Password Hash
+        // 36 = Resolvers Hidden
+        // 37 = Hidden Resolvers
+
+        if (parts.size > 37) {
+            val mainResolver = parts.getOrNull(4)?.trim().orEmpty()
+            val hiddenResolver = parts.getOrNull(37)?.trim().orEmpty()
+
+            // Move hidden resolver back to the main field if needed
+            if (mainResolver.isEmpty() && hiddenResolver.isNotEmpty()) {
+                parts[4] = hiddenResolver
+            }
+        }
+
+        // Clear lock-related fields
+        if (parts.size > 31) parts[31] = "0"   // Is Locked
+        if (parts.size > 32) parts[32] = ""    // Lock Password Hash
+        if (parts.size > 36) parts[36] = "0"   // Resolvers Hidden
+        if (parts.size > 37) parts[37] = ""    // Hidden Resolvers
+
+        return parts.joinToString("|") + "|"
     }
 
     private fun decodeBase64(value: String): ByteArray? {
