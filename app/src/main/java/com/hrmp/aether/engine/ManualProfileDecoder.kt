@@ -208,43 +208,103 @@ object ManualProfileDecoder {
     }
 
     private fun decodeSlipNet(raw: String): Decoded {
-        val token = raw.substringAfter("slipnet://").substringBefore('#').replace("\r", "").replace("\n", "").replace(' ', '+')
-        val bytes = Base64.decode(token, Base64.DEFAULT)
-        val f = String(bytes, Charsets.UTF_8).split('|')
-        if (f.size != 84 || f[0] != "30") return Decoded(ManualProtocol.SLIPNET_DNSTT, emptyMap(), false, "Only SlipNet v30 can be decoded safely; this profile remains editable as raw text.")
+        val token = raw.substringAfter("slipnet://").substringBefore('#')
+            .replace("\r", "").replace("\n", "").replace(' ', '+')
+        val bytes = runCatching {
+            Base64.decode(token, Base64.DEFAULT)
+        }.getOrNull() ?: return Decoded(
+            ManualProtocol.SLIPNET_SS, emptyMap(), false,
+            "SlipNet payload is not valid Base64."
+        )
+        val split = String(bytes, Charsets.UTF_8).split('|')
+        if (split.isEmpty() || split[0] != "30") {
+            return Decoded(
+                ManualProtocol.SLIPNET_SS, emptyMap(), false,
+                "Only SlipNet v30 can be decoded safely; this profile remains editable as raw text."
+            )
+        }
+        // Pad to 84 fields so index access is always safe for mixed-length exports.
+        val f = split.toMutableList()
+        while (f.size < 84) f += ""
+
         val protocol = when (f[1].lowercase()) {
+            "ss", "slipstream" -> ManualProtocol.SLIPNET_SS
+            "ss_ssh", "slipstream_ssh" -> ManualProtocol.SLIPNET_SS_SSH
             "dnstt" -> ManualProtocol.SLIPNET_DNSTT
             "dnstt_ssh" -> ManualProtocol.SLIPNET_DNSTT_SSH
             "vaydns" -> ManualProtocol.SLIPNET_VAYDNS
             "vaydns_ssh" -> ManualProtocol.SLIPNET_VAYDNS_SSH
             "soar" -> ManualProtocol.SLIPNET_SOAR
             "soar_ssh" -> ManualProtocol.SLIPNET_SOAR_SSH
-            else -> return Decoded(ManualProtocol.SLIPNET_DNSTT, emptyMap(), false, "This SlipNet protocol is not part of the editable DNSTT/VayDNS/Soar form.")
+            else -> return Decoded(
+                ManualProtocol.SLIPNET_SS, emptyMap(), false,
+                "This SlipNet protocol (${f[1]}) is not part of the editable form yet."
+            )
         }
-        val shouldUseSsh = protocol == ManualProtocol.SLIPNET_DNSTT_SSH || protocol == ManualProtocol.SLIPNET_VAYDNS_SSH || protocol == ManualProtocol.SLIPNET_SOAR_SSH
-        if ((f[14] == "1") != shouldUseSsh) return Decoded(protocol, emptyMap(), false, "SlipNet SSH flags do not match its protocol; raw editing preserves the profile.")
-        val fixed = mapOf(5 to "0", 7 to "bbr", 9 to "127.0.0.1", 10 to "0", 12 to "", 13 to "", 18 to "0", 20 to "0", 21 to "https://dns.google/dns-query", 26 to "", 28 to "443", 29 to "", 30 to "", 31 to "0", 32 to "", 33 to "0", 34 to "0", 35 to "", 36 to "0", 37 to "", 38 to "0", 61 to "2", 62 to "", 63 to "tls", 64 to "ws", 65 to "/", 66 to "", 67 to "443", 68 to "1", 69 to "micro", 70 to "300", 71 to "", 72 to "0", 73 to "1", 74 to "0", 75 to "8", 76 to "", 77 to "0", 78 to "")
-        if (fixed.any { (i, value) -> f[i] != value }) return Decoded(protocol, emptyMap(), false, "This SlipNet profile contains extra runtime settings that the editor cannot safely round-trip. Raw editing preserves them.")
-        fun on(index: Int) = if (f[index] == "1") "on" else "off"
-        fun unb64(index: Int) = decodeBase64(f[index]).orEmpty()
+
+        fun on(index: Int) = if (f.getOrNull(index) == "1") "on" else "off"
+        fun unb64(index: Int) = decodeBase64(f.getOrNull(index).orEmpty()).orEmpty()
+
         val resolvers = f[4].split(',').mapNotNull { entry ->
             val parts = entry.split(':')
-            if (parts.size >= 2) "${parts[0]}:${parts[1]}" else null
+            when {
+                parts.size >= 2 && parts[0].isNotBlank() -> "${parts[0]}:${parts[1]}"
+                parts.size == 1 && parts[0].isNotBlank() -> "${parts[0]}:53"
+                else -> null
+            }
         }.joinToString("\n")
+
         val values = linkedMapOf(
-            "name" to f[2], "domain" to f[3], "resolvers" to resolvers, "dnsTransport" to f[22],
-            "resolverMode" to f[60], "keepAlive" to f[6], "tcpListenPort" to f[8], "dnsPayloadSize" to f[39],
-            "publicKey" to f[11], "dnsttAuthoritative" to on(27), "sshUsername" to f[15], "sshPassword" to f[16],
-            "sshPort" to f[17], "sshHost" to f[19], "sshAuthType" to f[23], "sshPrivateKey" to unb64(24),
-            "sshKeyPassphrase" to unb64(25), "vaydnsCompat" to on(41), "vaydnsRecordType" to f[42],
-            "vaydnsMaxQname" to f[43], "vaydnsRps" to f[44], "vaydnsIdleTimeout" to f[45],
-            "vaydnsKeepalive" to f[46], "vaydnsUdpTimeout" to f[47], "vaydnsMaxLabels" to f[48],
-            "vaydnsClientId" to f[49], "sshTls" to on(50), "sshTlsSni" to f[51],
-            "sshHttpProxyHost" to f[52], "sshHttpProxyPort" to f[53], "sshHttpProxyCustomHost" to f[54],
-            "sshWebSocket" to on(55), "sshWsPath" to f[56], "sshWsTls" to on(57), "sshWsHost" to f[58],
-            "sshPayload" to unb64(59), "soarDiscovery" to on(79), "soarCountry" to f[80],
-            "soarTcpMode" to f[81], "soarDiscoveryList" to f[82], "soarDiscoveryCustom" to f[83]
+            "name" to f[2],
+            "domain" to f[3],
+            "resolvers" to resolvers,
+            "dnsTransport" to f[22].ifBlank { "udp" },
+            "resolverMode" to f[60].ifBlank { "roundrobin" },
+            "keepAlive" to f[6].ifBlank { "5000" },
+            "tcpListenPort" to f[8].ifBlank { "1080" },
+            "dnsPayloadSize" to f.getOrNull(39).orEmpty().ifBlank { "0" },
+            // Slipstream SOCKS credentials (fields 12/13)
+            "socksUsername" to f[12],
+            "socksPassword" to f[13],
+            // DNSTT / Soar public key
+            "publicKey" to f[11],
+            "dnsttAuthoritative" to on(27),
+            // SSH
+            "sshUsername" to f[15],
+            "sshPassword" to f[16],
+            "sshPort" to f[17].ifBlank { "22" },
+            "sshHost" to f[19],
+            "sshAuthType" to f[23].ifBlank { "password" },
+            "sshPrivateKey" to unb64(24),
+            "sshKeyPassphrase" to unb64(25),
+            "sshTls" to on(50),
+            "sshTlsSni" to f[51],
+            "sshHttpProxyHost" to f[52],
+            "sshHttpProxyPort" to f[53].ifBlank { "8080" },
+            "sshHttpProxyCustomHost" to f[54],
+            "sshWebSocket" to on(55),
+            "sshWsPath" to f[56].ifBlank { "/" },
+            "sshWsTls" to on(57),
+            "sshWsHost" to f[58],
+            "sshPayload" to unb64(59),
+            // VayDNS
+            "vaydnsCompat" to on(41),
+            "vaydnsRecordType" to f[42].ifBlank { "txt" },
+            "vaydnsMaxQname" to f[43].ifBlank { "101" },
+            "vaydnsRps" to f[44].ifBlank { "0" },
+            "vaydnsIdleTimeout" to f[45].ifBlank { "0" },
+            "vaydnsKeepalive" to f[46].ifBlank { "0" },
+            "vaydnsUdpTimeout" to f[47].ifBlank { "0" },
+            "vaydnsMaxLabels" to f[48].ifBlank { "0" },
+            "vaydnsClientId" to f[49].ifBlank { "0" },
+            // Soar
+            "soarDiscovery" to on(79),
+            "soarCountry" to f[80],
+            "soarTcpMode" to f[81].ifBlank { "auto" },
+            "soarDiscoveryList" to f[82].ifBlank { "soar" },
+            "soarDiscoveryCustom" to f[83]
         )
+        // Always editable: lock was already stripped by SlipNetDecodeFallback for enc imports.
         return Decoded(protocol, values, true)
     }
 
