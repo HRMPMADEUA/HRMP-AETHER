@@ -37,11 +37,11 @@ function Get-Sha([string]$Path) { (Get-FileHash -Path $Path -Algorithm SHA256).H
 function Confirm-Hash([string]$Name, [string]$File, [string]$Pinned, [string]$Upstream) {
   $actual = Get-Sha $File
   if ($Pinned) {
-    if ($actual -ne $Pinned.ToLowerInvariant()) { throw "$Name: SHA-256 mismatch. expected(pinned)=$Pinned actual=$actual" }
+    if ($actual -ne $Pinned.ToLowerInvariant()) { throw "${Name}: SHA-256 mismatch. expected(pinned)=$Pinned actual=$actual" }
     $report.Add("- $Name: SHA-256 verified against the pinned value ($actual)")
   }
   elseif ($Upstream) {
-    if ($actual -ne $Upstream.ToLowerInvariant()) { throw "$Name: SHA-256 mismatch. expected(upstream)=$Upstream actual=$actual" }
+    if ($actual -ne $Upstream.ToLowerInvariant()) { throw "${Name}: SHA-256 mismatch. expected(upstream)=$Upstream actual=$actual" }
     $report.Add("- $Name: SHA-256 verified against the checksum published by the upstream project ($actual)")
   }
   else {
