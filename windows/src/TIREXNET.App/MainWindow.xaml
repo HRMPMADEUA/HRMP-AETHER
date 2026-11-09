@@ -1,0 +1,258 @@
+<Window x:Class="TIREXNET.UI.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="TIREXNET" Width="1040" Height="700" MinWidth="920" MinHeight="620"
+        WindowStartupLocation="CenterScreen" FontFamily="Segoe UI" Foreground="{StaticResource TextBrush}"
+        Closing="OnClosing" StateChanged="OnStateChanged" SourceInitialized="OnSourceInitialized">
+  <Window.Background>
+    <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+      <GradientStop Color="#071120" Offset="0" />
+      <GradientStop Color="#0A1D34" Offset="0.6" />
+      <GradientStop Color="#0B2440" Offset="1" />
+    </LinearGradientBrush>
+  </Window.Background>
+  <Grid>
+    <Grid.ColumnDefinitions>
+      <ColumnDefinition Width="214" />
+      <ColumnDefinition Width="*" />
+    </Grid.ColumnDefinitions>
+
+    <!-- Navigation -->
+    <Border Grid.Column="0" Background="#66040F1D" BorderBrush="{StaticResource StrokeBrush}" BorderThickness="0,0,1,0">
+      <DockPanel Margin="16,22,16,16">
+        <StackPanel DockPanel.Dock="Top" Margin="6,0,0,22">
+          <TextBlock Text="TIREXNET" FontSize="26" FontWeight="Bold" Foreground="{StaticResource CyanBrush}">
+            <TextBlock.Effect>
+              <DropShadowEffect Color="#3797F4" BlurRadius="18" ShadowDepth="0" Opacity="0.8" />
+            </TextBlock.Effect>
+          </TextBlock>
+          <TextBlock Text="Windows" Style="{StaticResource Caption}" />
+        </StackPanel>
+        <StackPanel DockPanel.Dock="Bottom">
+          <TextBlock x:Name="AdminBadge" Style="{StaticResource Caption}" Margin="6,0,0,4" />
+          <TextBlock x:Name="VersionText" Style="{StaticResource Caption}" Foreground="{StaticResource DimBrush}" Margin="6,0,0,0" />
+        </StackPanel>
+        <StackPanel>
+          <RadioButton x:Name="NavDashboard" Content="Dashboard" Style="{StaticResource NavButton}" GroupName="nav" IsChecked="True" Checked="OnNavChecked" Tag="Dashboard" />
+          <RadioButton x:Name="NavProfiles" Content="Profiles" Style="{StaticResource NavButton}" GroupName="nav" Checked="OnNavChecked" Tag="Profiles" />
+          <RadioButton x:Name="NavAccount" Content="Account" Style="{StaticResource NavButton}" GroupName="nav" Checked="OnNavChecked" Tag="Account" />
+          <RadioButton x:Name="NavSettings" Content="Settings" Style="{StaticResource NavButton}" GroupName="nav" Checked="OnNavChecked" Tag="Settings" />
+          <RadioButton x:Name="NavLogs" Content="Logs &amp; diagnostics" Style="{StaticResource NavButton}" GroupName="nav" Checked="OnNavChecked" Tag="Logs" />
+        </StackPanel>
+      </DockPanel>
+    </Border>
+
+    <!-- Pages -->
+    <Grid Grid.Column="1" Margin="28,24,28,20">
+
+      <!-- Dashboard -->
+      <Grid x:Name="PageDashboard">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="*" />
+          <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="300" />
+        </Grid.ColumnDefinitions>
+
+        <StackPanel Grid.Row="0" Grid.Column="0" HorizontalAlignment="Center" VerticalAlignment="Center">
+          <TextBlock x:Name="StatusText" Text="DISCONNECTED" FontSize="28" FontWeight="Bold" HorizontalAlignment="Center" Foreground="{StaticResource DimBrush}" />
+          <TextBlock x:Name="StatusDetail" Text="Select a profile and press Connect." TextWrapping="Wrap" TextAlignment="Center" MaxWidth="440" Margin="0,6,0,0" Foreground="{StaticResource MutedBrush}" />
+          <Button x:Name="ConnectButton" Style="{StaticResource ConnectOrb}" Click="OnConnectClick" Margin="0,34,0,30" HorizontalAlignment="Center">
+            <TextBlock x:Name="ConnectLabel" Text="CONNECT" FontSize="20" FontWeight="Bold" />
+          </Button>
+          <Button x:Name="AdminButton" Content="Restart as administrator" Style="{StaticResource GhostButton}" Click="OnRestartAdmin" Visibility="Collapsed" HorizontalAlignment="Center" />
+        </StackPanel>
+
+        <Border Grid.Row="0" Grid.Column="1" Style="{StaticResource GlassCard}" Margin="16,0,0,16">
+          <DockPanel>
+            <StackPanel DockPanel.Dock="Top">
+              <TextBlock Text="Server" FontSize="16" FontWeight="SemiBold" />
+              <TextBlock x:Name="SelectedName" Text="No profile selected" Margin="0,8,0,0" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+              <TextBlock x:Name="SelectedInfo" Style="{StaticResource Caption}" Margin="0,2,0,12" />
+            </StackPanel>
+            <StackPanel DockPanel.Dock="Bottom" Margin="0,10,0,0">
+              <TextBlock Text="Connection mode" Style="{StaticResource Caption}" Margin="0,0,0,4" />
+              <StackPanel Orientation="Horizontal">
+                <RadioButton x:Name="ModeProxy" Content="Proxy" GroupName="mode" Checked="OnModeChanged" />
+                <RadioButton x:Name="ModeVpn" Content="VPN" GroupName="mode" Checked="OnModeChanged" />
+              </StackPanel>
+              <TextBlock x:Name="ModeHint" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,4,0,0" />
+            </StackPanel>
+            <ListBox x:Name="DashProfileList" ItemTemplate="{StaticResource ProfileTemplate}" SelectionChanged="OnDashSelectionChanged" />
+          </DockPanel>
+        </Border>
+
+        <UniformGrid Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Columns="4">
+          <Border Style="{StaticResource GlassCard}" Margin="0,0,10,0">
+            <StackPanel>
+              <TextBlock Text="Session" Style="{StaticResource Caption}" />
+              <TextBlock x:Name="DurationText" Text="00:00:00" FontSize="22" FontWeight="SemiBold" />
+            </StackPanel>
+          </Border>
+          <Border Style="{StaticResource GlassCard}" Margin="0,0,10,0">
+            <StackPanel>
+              <TextBlock Text="Download" Style="{StaticResource Caption}" />
+              <TextBlock x:Name="DownText" Text="0 B/s" FontSize="22" FontWeight="SemiBold" Foreground="{StaticResource MintBrush}" />
+            </StackPanel>
+          </Border>
+          <Border Style="{StaticResource GlassCard}" Margin="0,0,10,0">
+            <StackPanel>
+              <TextBlock Text="Upload" Style="{StaticResource Caption}" />
+              <TextBlock x:Name="UpText" Text="0 B/s" FontSize="22" FontWeight="SemiBold" Foreground="{StaticResource CyanBrush}" />
+            </StackPanel>
+          </Border>
+          <Border Style="{StaticResource GlassCard}">
+            <StackPanel>
+              <TextBlock Text="Total (down / up)" Style="{StaticResource Caption}" />
+              <TextBlock x:Name="TotalText" Text="0 B / 0 B" FontSize="18" FontWeight="SemiBold" />
+            </StackPanel>
+          </Border>
+        </UniformGrid>
+      </Grid>
+
+      <!-- Profiles -->
+      <Grid x:Name="PageProfiles" Visibility="Collapsed">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="*" />
+          <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <TextBlock Text="Profiles" FontSize="24" FontWeight="Bold" />
+        <WrapPanel Grid.Row="1" Margin="0,12,0,8">
+          <Button Content="Paste from clipboard" Style="{StaticResource NeonButton}" Click="OnImportClipboard" />
+          <Button Content="Add link…" Style="{StaticResource GhostButton}" Click="OnImportUri" />
+          <Button Content="Import file…" Style="{StaticResource GhostButton}" Click="OnImportFile" />
+          <Button Content="Rename" Style="{StaticResource GhostButton}" Click="OnRename" />
+          <Button Content="Edit" Style="{StaticResource GhostButton}" Click="OnEdit" />
+          <Button Content="Export" Style="{StaticResource GhostButton}" Click="OnExport" />
+          <Button Content="Delete" Style="{StaticResource GhostButton}" Click="OnDelete" />
+        </WrapPanel>
+        <Border Grid.Row="2" Style="{StaticResource GlassCard}">
+          <ListBox x:Name="ProfilesList" ItemTemplate="{StaticResource ProfileTemplate}" SelectionChanged="OnProfilesSelectionChanged" />
+        </Border>
+        <TextBlock Grid.Row="3" x:Name="ProfileDetail" Style="{StaticResource Caption}" Margin="2,10,0,0" TextWrapping="Wrap" />
+      </Grid>
+
+      <!-- Account -->
+      <ScrollViewer x:Name="PageAccount" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
+        <StackPanel MaxWidth="560" HorizontalAlignment="Left">
+          <TextBlock Text="Account" FontSize="24" FontWeight="Bold" />
+          <TextBlock Text="Sign in to your TIREXNET subscription to load your servers automatically." Style="{StaticResource Caption}" Margin="0,4,0,14" TextWrapping="Wrap" />
+          <Border Style="{StaticResource GlassCard}">
+            <StackPanel>
+              <TextBlock Text="Panel" Style="{StaticResource Caption}" />
+              <StackPanel Orientation="Horizontal" Margin="0,4,0,10">
+                <RadioButton x:Name="PanelPasarGuard" Content="PasarGuard · Xray" GroupName="panel" IsChecked="True" Checked="OnPanelChanged" />
+                <RadioButton x:Name="PanelAli" Content="AliPanel · WireGuard" GroupName="panel" Checked="OnPanelChanged" />
+              </StackPanel>
+              <TextBlock x:Name="PanelStatus" Margin="0,0,0,10" />
+              <StackPanel x:Name="LoginForm">
+                <TextBlock Text="Username" Style="{StaticResource Caption}" />
+                <TextBox x:Name="LoginUser" Margin="0,4,0,10" />
+                <TextBlock Text="Password" Style="{StaticResource Caption}" />
+                <PasswordBox x:Name="LoginPass" Margin="0,4,0,12" KeyDown="OnLoginKeyDown" />
+                <Button x:Name="SignInButton" Content="Sign in" Style="{StaticResource NeonButton}" Click="OnSignIn" HorizontalAlignment="Left" />
+              </StackPanel>
+              <StackPanel x:Name="AccountInfoPanel" Visibility="Collapsed">
+                <TextBlock x:Name="AccountText" TextWrapping="Wrap" Margin="0,0,0,12" />
+                <WrapPanel>
+                  <Button Content="Refresh &amp; sync servers" Style="{StaticResource NeonButton}" Click="OnSync" />
+                  <Button Content="Sign out" Style="{StaticResource GhostButton}" Click="OnSignOut" />
+                </WrapPanel>
+              </StackPanel>
+              <TextBlock x:Name="AccountMessage" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,8,0,0" />
+            </StackPanel>
+          </Border>
+          <TextBlock Text="Account creation is not available in the Windows app yet. Sessions are stored encrypted for your Windows user." Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="2,10,0,0" />
+        </StackPanel>
+      </ScrollViewer>
+
+      <!-- Settings -->
+      <ScrollViewer x:Name="PageSettings" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
+        <StackPanel MaxWidth="620" HorizontalAlignment="Left">
+          <TextBlock Text="Settings" FontSize="24" FontWeight="Bold" Margin="0,0,0,12" />
+
+          <Border Style="{StaticResource GlassCard}" Margin="0,0,0,12">
+            <StackPanel>
+              <TextBlock Text="Local proxy" FontWeight="SemiBold" />
+              <TextBlock Text="Listeners are bound to 127.0.0.1 only and are never reachable from other devices." Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,2,0,8" />
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Margin="0,0,8,0">
+                  <TextBlock Text="SOCKS5 port" Style="{StaticResource Caption}" />
+                  <TextBox x:Name="SetSocks" Margin="0,4,0,0" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Margin="8,0,0,0">
+                  <TextBlock Text="HTTP proxy port" Style="{StaticResource Caption}" />
+                  <TextBox x:Name="SetHttp" Margin="0,4,0,0" />
+                </StackPanel>
+              </Grid>
+              <CheckBox x:Name="SetEnableHttp" Content="Enable the HTTP proxy" Margin="0,10,0,0" />
+              <CheckBox x:Name="SetSysProxy" Content="Set the Windows system proxy while connected (proxy mode, restored on disconnect)" />
+            </StackPanel>
+          </Border>
+
+          <Border Style="{StaticResource GlassCard}" Margin="0,0,0,12">
+            <StackPanel>
+              <TextBlock Text="DNS &amp; network" FontWeight="SemiBold" />
+              <TextBlock Text="DNS servers (comma separated, empty = profile / system default)" Style="{StaticResource Caption}" Margin="0,8,0,0" />
+              <TextBox x:Name="SetDns" Margin="0,4,0,6" />
+              <WrapPanel>
+                <Button Content="Cloudflare" Style="{StaticResource GhostButton}" Click="OnDnsPreset" Tag="1.1.1.1, 1.0.0.1" />
+                <Button Content="Google" Style="{StaticResource GhostButton}" Click="OnDnsPreset" Tag="8.8.8.8, 8.8.4.4" />
+                <Button Content="Quad9" Style="{StaticResource GhostButton}" Click="OnDnsPreset" Tag="9.9.9.9, 149.112.112.112" />
+                <Button Content="Default" Style="{StaticResource GhostButton}" Click="OnDnsPreset" Tag="" />
+              </WrapPanel>
+              <TextBlock Text="MTU (0 = default)" Style="{StaticResource Caption}" />
+              <TextBox x:Name="SetMtu" Margin="0,4,0,10" Width="120" HorizontalAlignment="Left" />
+              <TextBlock Text="Networks that bypass the VPN (IPv4 CIDR, one per line) — VPN mode with Xray" Style="{StaticResource Caption}" />
+              <TextBox x:Name="SetBypass" AcceptsReturn="True" Height="70" Margin="0,4,0,0" VerticalScrollBarVisibility="Auto" />
+            </StackPanel>
+          </Border>
+
+          <Border Style="{StaticResource GlassCard}" Margin="0,0,0,12">
+            <StackPanel>
+              <TextBlock Text="Application" FontWeight="SemiBold" />
+              <CheckBox x:Name="SetCloseToTray" Content="Keep running in the system tray when the window is closed" Margin="0,8,0,0" />
+              <CheckBox x:Name="SetStartMin" Content="Start minimized to the tray" />
+            </StackPanel>
+          </Border>
+
+          <Border Style="{StaticResource GlassCard}" Margin="0,0,0,12">
+            <StackPanel>
+              <TextBlock Text="Engines" FontWeight="SemiBold" />
+              <TextBlock x:Name="EngineStatus" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,6,0,0" />
+            </StackPanel>
+          </Border>
+
+          <TextBlock x:Name="SettingsMessage" TextWrapping="Wrap" Margin="2,0,0,8" />
+          <Button Content="Save settings" Style="{StaticResource NeonButton}" Click="OnSaveSettings" HorizontalAlignment="Left" />
+        </StackPanel>
+      </ScrollViewer>
+
+      <!-- Logs -->
+      <Grid x:Name="PageLogs" Visibility="Collapsed">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <TextBlock Text="Logs &amp; diagnostics" FontSize="24" FontWeight="Bold" />
+        <WrapPanel Grid.Row="1" Margin="0,12,0,8">
+          <Button Content="Run diagnostics" Style="{StaticResource NeonButton}" Click="OnDiagnostics" />
+          <Button Content="Copy" Style="{StaticResource GhostButton}" Click="OnCopyLogs" />
+          <Button Content="Clear" Style="{StaticResource GhostButton}" Click="OnClearLogs" />
+          <Button Content="Open log folder" Style="{StaticResource GhostButton}" Click="OnOpenLogFolder" />
+        </WrapPanel>
+        <TextBox Grid.Row="2" x:Name="LogBox" IsReadOnly="True" FontFamily="Consolas" FontSize="12" TextWrapping="NoWrap"
+                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" />
+      </Grid>
+    </Grid>
+  </Grid>
+</Window>

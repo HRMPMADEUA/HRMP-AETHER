@@ -1,0 +1,9 @@
+# Build output and downloaded third-party runtimes are never committed.
+bin/
+obj/
+dist/
+.deps/
+third_party/downloads/
+src/TIREXNET.App/Assets/tirexnet.ico
+*.user
+TestResults/

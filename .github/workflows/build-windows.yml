@@ -1,0 +1,205 @@
+name: TIREXNET Windows x64 Build
+
+on:
+  push:
+    paths:
+      - 'windows/**'
+      - '.github/workflows/build-windows.yml'
+  pull_request:
+    paths:
+      - 'windows/**'
+      - '.github/workflows/build-windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tirexnet-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+      APP_VERSION: '1.0.0'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify that no Android or backend file was touched
+        shell: bash
+        run: |
+          set -euo pipefail
+          before="${{ github.event.before }}"
+          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$before^{commit}" 2>/dev/null; then
+            before="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
+          fi
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            before="${{ github.event.pull_request.base.sha }}"
+          fi
+          echo "Comparing $before..HEAD"
+          bad=0
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              windows/*|.github/workflows/build-windows.yml) ;;
+              *) echo "::error::Unexpected change outside windows/: $f"; bad=1 ;;
+            esac
+          done < <(git diff --name-only "$before" HEAD)
+          if [ "$bad" -ne 0 ]; then
+            echo "This commit range changes files outside the Windows project. Android files must stay untouched."
+            exit 1
+          fi
+          git diff --quiet "$before" HEAD -- .github/workflows/build-apk.yml app gradle gradlew gradlew.bat settings.gradle build.gradle gradle.properties scripts \
+            || { echo "::error::A protected Android path changed"; exit 1; }
+          echo "OK: only windows/ and the Windows workflow changed."
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        shell: pwsh
+        working-directory: windows
+        run: dotnet restore TIREXNET.sln
+
+      - name: Unit tests (parsers, validation, process lifecycle)
+        shell: pwsh
+        working-directory: windows
+        run: dotnet test tests/TIREXNET.Tests/TIREXNET.Tests.csproj -c Release --no-restore --logger "trx;LogFileName=tests.trx" --results-directory ../test-results
+
+      - name: Generate application icon
+        shell: pwsh
+        working-directory: windows
+        run: ./scripts/make-icon.ps1 -Out src/TIREXNET.App/Assets/tirexnet.ico
+
+      - name: Publish TIREXNET.exe (win-x64, self-contained)
+        shell: pwsh
+        working-directory: windows
+        run: |
+          dotnet publish src/TIREXNET.App/TIREXNET.App.csproj -c Release -r win-x64 --self-contained true `
+            -p:Version=$env:APP_VERSION -p:PlatformTarget=x64 -o ../dist/stage/app
+          if (-not (Test-Path ../dist/stage/app/TIREXNET.exe)) { throw 'TIREXNET.exe was not produced.' }
+
+      - name: Fetch, verify and stage engine runtimes
+        shell: pwsh
+        working-directory: windows
+        run: ./scripts/fetch-engines.ps1 -Stage ../dist/stage
+
+      - name: Add notices, icon and documentation
+        shell: pwsh
+        working-directory: windows
+        run: |
+          Copy-Item THIRD_PARTY_NOTICES.md ../dist/stage/ -Force
+          Copy-Item README.md ../dist/stage/ -Force
+          Copy-Item src/TIREXNET.App/Assets/tirexnet.ico ../dist/stage/ -Force
+
+      - name: Verify the staged package
+        shell: pwsh
+        run: |
+          $s = 'dist/stage'
+          $required = @(
+            'app/TIREXNET.exe', 'app/TIREXNET.Core.dll',
+            'engines/xray/xray.exe',
+            'engines/tun2socks/tun2socks.exe', 'engines/tun2socks/wintun.dll',
+            'engines/wireguard/wireguard.exe',
+            'THIRD_PARTY_NOTICES.md'
+          )
+          foreach ($r in $required) {
+            $p = Join-Path $s $r
+            if (-not (Test-Path $p)) { throw "Missing from package: $r" }
+            if ((Get-Item $p).Length -lt 1024) { throw "Suspiciously small file: $r" }
+          }
+          $lic = @(Get-ChildItem (Join-Path $s 'licenses') -File -ErrorAction SilentlyContinue)
+          if ($lic.Count -lt 3) { throw "Expected at least 3 license files, found $($lic.Count)." }
+          $pe = [System.IO.File]::ReadAllBytes((Resolve-Path "$s/app/TIREXNET.exe"))
+          $peOffset = [BitConverter]::ToInt32($pe, 0x3C)
+          $machine = [BitConverter]::ToUInt16($pe, $peOffset + 4)
+          if ($machine -ne 0x8664) { throw ('TIREXNET.exe is not x64 (machine type 0x{0:X})' -f $machine) }
+          Write-Host 'TIREXNET.exe is a genuine x64 PE executable.'
+          & "$s/engines/xray/xray.exe" version
+          if ($LASTEXITCODE -ne 0) { throw 'xray.exe did not run.' }
+          Write-Host "Licenses: $($lic.Name -join ', ')"
+
+      - name: Build portable ZIP
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/out | Out-Null
+          $portable = 'dist/portable/TIREXNET'
+          New-Item -ItemType Directory -Force -Path $portable | Out-Null
+          Copy-Item dist/stage/app/* $portable -Recurse -Force
+          Copy-Item dist/stage/engines $portable -Recurse -Force
+          Copy-Item dist/stage/licenses $portable -Recurse -Force
+          Copy-Item dist/stage/THIRD_PARTY_NOTICES.md, dist/stage/README.md $portable -Force
+          Compress-Archive -Path "$portable" -DestinationPath dist/out/TIREXNET-Windows-x64-Portable.zip -Force
+          Copy-Item dist/stage/app/TIREXNET.exe dist/out/TIREXNET.exe -Force
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup --version=6.2.2 --no-progress -y
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw 'ISCC.exe not found after installing Inno Setup.' }
+          $src = (Resolve-Path dist/stage).Path
+          $out = (Resolve-Path dist/out).Path
+          & $iscc "/DSourceDir=$src" "/DOutputDir=$out" "/DAppVersion=$env:APP_VERSION" windows/installer/TIREXNET.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup failed.' }
+          if (-not (Test-Path "$out/TIREXNET-Windows-x64-Setup.exe")) { throw 'The installer was not produced.' }
+
+      - name: Smoke-test installer (silent install, check files, silent uninstall)
+        shell: pwsh
+        run: |
+          $setup = (Resolve-Path dist/out/TIREXNET-Windows-x64-Setup.exe).Path
+          $dir = Join-Path $env:RUNNER_TEMP 'TIREXNET-install-test'
+          $p = Start-Process $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=`"$dir`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Silent install failed with exit code $($p.ExitCode)" }
+          foreach ($f in 'TIREXNET.exe', 'engines\xray\xray.exe', 'engines\wireguard\wireguard.exe', 'engines\tun2socks\wintun.dll', 'licenses') {
+            if (-not (Test-Path (Join-Path $dir $f))) { throw "Installed package is missing $f" }
+          }
+          $un = Get-ChildItem $dir -Filter 'unins*.exe' | Select-Object -First 1
+          if (-not $un) { throw 'Uninstaller not found.' }
+          $u = Start-Process $un.FullName -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
+          if ($u.ExitCode -ne 0) { throw "Silent uninstall failed with exit code $($u.ExitCode)" }
+          Start-Sleep -Seconds 3
+          if (Test-Path (Join-Path $dir 'TIREXNET.exe')) { throw 'TIREXNET.exe still present after uninstall.' }
+          Write-Host 'Installer smoke test passed (install + clean uninstall).'
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem dist/out -File | ForEach-Object {
+            $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$h  $($_.Name)"
+          } | Tee-Object -FilePath dist/out/SHA256SUMS.txt
+          Get-Content dist/out/SHA256SUMS.txt | Add-Content $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload portable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: TIREXNET-Windows-x64-Portable.zip
+          path: dist/out/TIREXNET-Windows-x64-Portable.zip
+          if-no-files-found: error
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: TIREXNET-Windows-x64-Setup.exe
+          path: dist/out/TIREXNET-Windows-x64-Setup.exe
+          if-no-files-found: error
+
+      - name: Upload full build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: TIREXNET-Windows-x64-Build
+          path: |
+            dist/out/*
+            dist/stage/engines-verification.txt
+            test-results/*.trx
+          if-no-files-found: error
