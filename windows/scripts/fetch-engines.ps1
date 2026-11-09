@@ -28,8 +28,28 @@ $report = New-Object System.Collections.Generic.List[string]
 
 function Get-Remote([string]$Url, [string]$Out) {
   Write-Host "Downloading $Url"
-  Invoke-WebRequest -Uri $Url -OutFile $Out -UseBasicParsing -MaximumRetryCount 4 -RetryIntervalSec 3
-  if (-not (Test-Path $Out) -or (Get-Item $Out).Length -lt 1024) { throw "Download failed or file is empty: $Url" }
+  $maxAttempts = 8
+  $delaySec = 5
+  $lastError = $null
+  for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+    try {
+      if (Test-Path $Out) { Remove-Item -Force $Out -ErrorAction SilentlyContinue }
+      Invoke-WebRequest -Uri $Url -OutFile $Out -UseBasicParsing -TimeoutSec 180
+      if ((Test-Path $Out) -and ((Get-Item $Out).Length -ge 1024)) {
+        Write-Host "Download OK (attempt $attempt): $((Get-Item $Out).Length) bytes"
+        return
+      }
+      $lastError = "File missing or too small after download"
+    } catch {
+      $lastError = $_.Exception.Message
+      Write-Warning "Attempt $attempt/$maxAttempts failed: $lastError"
+    }
+    if ($attempt -lt $maxAttempts) {
+      Start-Sleep -Seconds $delaySec
+      $delaySec = [Math]::Min(60, $delaySec * 2)
+    }
+  }
+  throw "Download failed after $maxAttempts attempts: $Url — $lastError"
 }
 
 function Get-Sha([string]$Path) { (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
