@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.Win32;
 using TIREXNET.Core.Models;
+using TIREXNET.Core.Models;
 
 namespace TIREXNET.Core.Engines;
 
