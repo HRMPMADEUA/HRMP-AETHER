@@ -83,7 +83,24 @@ jobs:
       - name: Generate application icon
         shell: pwsh
         working-directory: windows
-        run: ./scripts/make-icon.ps1 -Out src/TIREXNET.App/Assets/tirexnet.ico
+        run: |
+          $assetsDir = Join-Path (Get-Location) 'src/TIREXNET.App/Assets'
+          [System.IO.Directory]::CreateDirectory($assetsDir) | Out-Null
+          $out = [System.IO.Path]::GetFullPath((Join-Path $assetsDir 'tirexnet.ico'))
+          Write-Host "Icon output path: $out"
+          & ./scripts/make-icon.ps1 -Out $out
+          if ($LASTEXITCODE -ne 0) { throw "make-icon.ps1 failed with exit code $LASTEXITCODE" }
+          if (-not (Test-Path $out)) { throw "Icon file was not created: $out" }
+          $len = (Get-Item $out).Length
+          if ($len -lt 1000) { throw "Icon file is suspiciously small ($len bytes)" }
+          $bytes = [System.IO.File]::ReadAllBytes($out)
+          $reserved = [BitConverter]::ToUInt16($bytes, 0)
+          $type     = [BitConverter]::ToUInt16($bytes, 2)
+          $count    = [BitConverter]::ToUInt16($bytes, 4)
+          if ($reserved -ne 0) { throw "Invalid ICO: Reserved=$reserved (expected 0)" }
+          if ($type -ne 1)     { throw "Invalid ICO: Type=$type (expected 1)" }
+          if ($count -ne 6)    { throw "Invalid ICO: ImageCount=$count (expected 6)" }
+          Write-Host "Valid ICO written ($len bytes, $count images)."
 
       - name: Build WPF application (Release, x64)
         shell: pwsh
