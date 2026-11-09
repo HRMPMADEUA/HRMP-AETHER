@@ -189,10 +189,29 @@ jobs:
       - name: Build installer (Inno Setup)
         shell: pwsh
         run: |
-          choco install innosetup --version=6.2.2 --no-progress -y
-          if ($LASTEXITCODE -ne 0) { throw 'Installing Inno Setup failed.' }
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) { throw 'ISCC.exe not found after installing Inno Setup.' }
+          # Prefer an already-installed Inno Setup (runners often ship a newer version).
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles(x86)}\Inno Setup 5\ISCC.exe"
+          )
+          $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            Write-Host 'ISCC.exe not found; installing Inno Setup via Chocolatey...'
+            choco install innosetup --no-progress -y
+            if ($LASTEXITCODE -ne 0) {
+              choco install innosetup --no-progress -y --force
+              if ($LASTEXITCODE -ne 0) { throw 'Installing Inno Setup failed.' }
+            }
+            $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $iscc) {
+            \( found = Get-ChildItem -Path " \){env:ProgramFiles(x86)}","${env:ProgramFiles}" -Filter ISCC.exe -Recurse -ErrorAction SilentlyContinue |
+              Select-Object -First 1 -ExpandProperty FullName
+            if ($found) { $iscc = $found }
+          }
+          if (-not $iscc) { throw 'ISCC.exe not found after install attempt.' }
+          Write-Host "Using ISCC: $iscc"
           $src = (Resolve-Path dist/stage).Path
           $out = (Resolve-Path dist/out).Path
           & $iscc "/DSourceDir=$src" "/DOutputDir=$out" "/DAppVersion=$env:APP_VERSION" windows/installer/TIREXNET.iss
