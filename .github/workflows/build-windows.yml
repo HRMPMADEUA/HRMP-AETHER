@@ -48,7 +48,7 @@ jobs:
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             case "$f" in
-              windows/*|.github/workflows/build-windows.yml|test.txt|test.txt.) ;;
+              windows/*|.github/workflows/build-windows.yml) ;;
               *) echo "::error::Unexpected change outside windows/: $f"; bad=1 ;;
             esac
           done < <(git diff --name-only "$before" HEAD)
