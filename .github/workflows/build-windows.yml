@@ -32,33 +32,36 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify that no Android or backend file was touched
+      - name: Verify that Windows commits do not touch Android or backend files
+        if: github.event_name != 'workflow_dispatch'
         shell: bash
         run: |
           set -euo pipefail
           before="${{ github.event.before }}"
-          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$before^{commit}" 2>/dev/null; then
-            before="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
-          fi
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             before="${{ github.event.pull_request.base.sha }}"
           fi
-          echo "Comparing $before..HEAD"
-          bad=0
-          while IFS= read -r f; do
-            [ -z "$f" ] && continue
-            case "$f" in
-              windows/*|.github/workflows/build-windows.yml) ;;
-              *) echo "::error::Unexpected change outside windows/: $f"; bad=1 ;;
-            esac
-          done < <(git diff --name-only "$before" HEAD)
-          if [ "$bad" -ne 0 ]; then
-            echo "This commit range changes files outside the Windows project. Android files must stay untouched."
-            exit 1
+          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$before^{commit}" 2>/dev/null; then
+            before="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
           fi
-          git diff --quiet "$before" HEAD -- .github/workflows/build-apk.yml app gradle gradlew gradlew.bat settings.gradle build.gradle gradle.properties scripts \
-            || { echo "::error::A protected Android path changed"; exit 1; }
-          echo "OK: only windows/ and the Windows workflow changed."
+          echo "Inspecting commits in $before..HEAD"
+          bad=0
+          for c in $(git rev-list "$before..HEAD"); do
+            win=0; prot=0
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              case "$f" in
+                windows/*|.github/workflows/build-windows.yml) win=1 ;;
+                app/*|gradle/*|gradlew|gradlew.bat|settings.gradle|build.gradle|gradle.properties|scripts/*|.github/workflows/build-apk.yml) prot=1; echo "  protected path in $c: $f" ;;
+              esac
+            done < <(git diff-tree --no-commit-id --name-only -r -m "$c")
+            if [ "$win" -eq 1 ] && [ "$prot" -eq 1 ]; then
+              echo "::error::Commit $c changes both the Windows project and protected Android/backend files."
+              bad=1
+            fi
+          done
+          if [ "$bad" -ne 0 ]; then exit 1; fi
+          echo "OK: no commit mixes Windows changes with Android/backend changes."
 
       - name: Setup .NET 8
         uses: actions/setup-dotnet@v4
@@ -70,15 +73,39 @@ jobs:
         working-directory: windows
         run: dotnet restore TIREXNET.sln
 
-      - name: Unit tests (parsers, validation, process lifecycle)
+      - name: Build Core library (Release)
         shell: pwsh
         working-directory: windows
-        run: dotnet test tests/TIREXNET.Tests/TIREXNET.Tests.csproj -c Release --no-restore --logger "trx;LogFileName=tests.trx" --results-directory ../test-results
+        run: |
+          dotnet build src/TIREXNET.Core/TIREXNET.Core.csproj -c Release --no-restore
+          if ($LASTEXITCODE -ne 0) { throw 'Core build failed.' }
 
       - name: Generate application icon
         shell: pwsh
         working-directory: windows
         run: ./scripts/make-icon.ps1 -Out src/TIREXNET.App/Assets/tirexnet.ico
+
+      - name: Build WPF application (Release, x64)
+        shell: pwsh
+        working-directory: windows
+        run: |
+          dotnet build src/TIREXNET.App/TIREXNET.App.csproj -c Release --no-restore
+          if ($LASTEXITCODE -ne 0) { throw 'WPF application build failed.' }
+
+      - name: Unit tests (parsers, validation, process lifecycle)
+        shell: pwsh
+        working-directory: windows
+        run: |
+          dotnet test tests/TIREXNET.Tests/TIREXNET.Tests.csproj -c Release --no-restore --logger "trx;LogFileName=tests.trx" --results-directory ../test-results
+          if ($LASTEXITCODE -ne 0) { throw "Tests failed (exit code $LASTEXITCODE)." }
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TIREXNET-Windows-x64-TestResults
+          path: test-results/*.trx
+          if-no-files-found: ignore
 
       - name: Publish TIREXNET.exe (win-x64, self-contained)
         shell: pwsh
@@ -86,6 +113,7 @@ jobs:
         run: |
           dotnet publish src/TIREXNET.App/TIREXNET.App.csproj -c Release -r win-x64 --self-contained true `
             -p:Version=$env:APP_VERSION -p:PlatformTarget=x64 -o ../dist/stage/app
+          if ($LASTEXITCODE -ne 0) { throw 'dotnet publish failed.' }
           if (-not (Test-Path ../dist/stage/app/TIREXNET.exe)) { throw 'TIREXNET.exe was not produced.' }
 
       - name: Fetch, verify and stage engine runtimes
@@ -145,6 +173,7 @@ jobs:
         shell: pwsh
         run: |
           choco install innosetup --version=6.2.2 --no-progress -y
+          if ($LASTEXITCODE -ne 0) { throw 'Installing Inno Setup failed.' }
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { throw 'ISCC.exe not found after installing Inno Setup.' }
           $src = (Resolve-Path dist/stage).Path
@@ -201,5 +230,4 @@ jobs:
           path: |
             dist/out/*
             dist/stage/engines-verification.txt
-            test-results/*.trx
           if-no-files-found: error

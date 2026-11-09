@@ -12,11 +12,32 @@ public class ValidationTests
 {
     private static Profile Wg(string conf) => ProfileParser.ParseText(conf).Profiles.Single();
 
+    /// <summary>
+    /// Removes every line whose trimmed text starts with <paramref name="prefix"/>. Works line by line, so it does not
+    /// depend on LF / CRLF, and re-joins the remaining lines with <see cref="Environment.NewLine"/>.
+    /// </summary>
+    private static string RemoveLine(string text, string prefix)
+    {
+        var kept = text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None)
+            .Where(l => !l.Trim().StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+        return string.Join(Environment.NewLine, kept);
+    }
+
     [Fact]
     public void WireGuard_MissingPrivateKey_IsInvalid()
     {
-        var conf = ProfileParserTests.WgConf.Replace("PrivateKey = YAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\n", "");
-        Assert.Contains(ConfigValidator.Validate(Wg(conf)), e => e.Contains("PrivateKey"));
+        // Sanity check: the unmodified configuration is valid, so the failure below is caused by the missing key only.
+        Assert.Empty(ConfigValidator.Validate(Wg(ProfileParserTests.WgConf)));
+
+        var withoutKey = RemoveLine(ProfileParserTests.WgConf, "PrivateKey");
+        Assert.DoesNotContain("PrivateKey", withoutKey);
+
+        // Same result with the platform line ending, LF and CRLF.
+        foreach (var conf in new[] { withoutKey, withoutKey.Replace("\r\n", "\n").Replace("\n", "\r\n"), withoutKey.Replace("\r\n", "\n") })
+        {
+            var errors = ConfigValidator.Validate(Wg(conf));
+            Assert.Contains(errors, e => e.Contains("PrivateKey"));
+        }
     }
 
     [Fact]
@@ -211,5 +232,158 @@ public class ValidationTests
     public void ApiClient_Rejects_NonHttps_BaseUrl()
     {
         Assert.Throws<ArgumentException>(() => new TIREXNET.Core.Services.ApiClient(null, "http://insecure.example.com"));
+    }
+
+    [Fact]
+    public void WireGuard_InvalidAddress_And_Dns_AreRejected()
+    {
+        var bad = ProfileParserTests.WgConf.Replace("Address = 10.0.0.2/32, fd00::2/128", "Address = 10.0.0.2/99").Replace("DNS = 1.1.1.1, 1.0.0.1", "DNS = bad dns!");
+        var errors = ConfigValidator.Validate(Wg(bad));
+        Assert.Contains(errors, e => e.Contains("address"));
+        Assert.Contains(errors, e => e.Contains("DNS"));
+    }
+
+    [Fact]
+    public void WireGuard_MissingAddress_AndAllowedIps_AreRejected()
+    {
+        var conf = RemoveLine(RemoveLine(ProfileParserTests.WgConf, "Address"), "AllowedIPs");
+        var errors = ConfigValidator.Validate(Wg(conf));
+        Assert.Contains(errors, e => e.Contains("Address"));
+        Assert.Contains(errors, e => e.Contains("AllowedIPs"));
+    }
+
+    [Fact]
+    public void WireGuard_WithoutPeerSection_IsNotImported()
+    {
+        var r = ProfileParser.ParseText("[Interface]\nPrivateKey = YAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\nAddress = 10.0.0.2/32\n[Peer");
+        Assert.Empty(r.Profiles);
+    }
+
+    [Fact]
+    public void XrayJson_WithOnlyDirectOutbound_IsInvalid()
+    {
+        var p = ProfileParser.ParseText("{\"outbounds\":[{\"protocol\":\"freedom\"}]}").Profiles.Single();
+        Assert.Contains(ConfigValidator.Validate(p), e => e.Contains("server address"));
+    }
+
+    [Fact]
+    public void Profile_WithoutRawData_Or_Name_IsInvalid()
+    {
+        Assert.NotEmpty(ConfigValidator.Validate(new Profile { Name = "x", Raw = "" }));
+        var p = ProfileParser.ParseText("trojan://pw@t.example.com:443#t").Profiles.Single();
+        p.Name = "  ";
+        Assert.Contains(ConfigValidator.Validate(p), e => e.Contains("name"));
+    }
+
+    [Fact]
+    public void SettingsStore_Roundtrips_And_RecoversFromCorruptFile()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "tirex-set-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var store = new TIREXNET.Core.Services.SettingsStore(dir);
+            Assert.Equal(10880, store.Current.SocksPort);
+            store.Save(new AppSettings { SocksPort = 12000, Dns = "9.9.9.9", Mode = ConnectionMode.Vpn });
+            var again = new TIREXNET.Core.Services.SettingsStore(dir);
+            Assert.Equal(12000, again.Current.SocksPort);
+            Assert.Equal("9.9.9.9", again.Current.Dns);
+            Assert.Equal(ConnectionMode.Vpn, again.Current.Mode);
+
+            File.WriteAllText(Path.Combine(dir, "settings.json"), "{ this is not json");
+            Assert.Equal(10880, new TIREXNET.Core.Services.SettingsStore(dir).Current.SocksPort);
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public void ProfileStore_UndecryptableFile_IsMovedAside_NotCrashing()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "tirex-bad-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllBytes(Path.Combine(dir, "profiles.dat"), new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
+            var store = new TIREXNET.Core.Services.ProfileStore(dir);
+            Assert.True(store.LoadFailed);
+            Assert.Empty(store.All());
+            Assert.True(File.Exists(Path.Combine(dir, "profiles.dat.unreadable")));
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public void ExportFileName_IsSafe_ForWindows()
+    {
+        var p = new Profile { Name = "a/b:c*?\"<>|d", Engine = EngineKind.WireGuard };
+        var name = TIREXNET.Core.Services.ProfileStore.ExportFileName(p);
+        Assert.EndsWith(".conf", name);
+        Assert.Empty(name.Intersect(Path.GetInvalidFileNameChars()));
+    }
+
+    [Fact]
+    public async Task ApiClient_ParsesLoginMeAndConfigs_FromRealContractShapes()
+    {
+        var handler = new FakeHandler(req => req.RequestUri!.AbsolutePath switch
+        {
+            "/api/login" => (200, "{\"token\":\"tok-123456\"}"),
+            "/api/me" => (200, "{\"username\":\"u\",\"subscription\":{\"username\":\"pu\",\"status\":\"active\",\"usedTraffic\":10,\"dataLimit\":100,\"expire\":null}}"),
+            "/api/me/configs" => (200, "{\"configs\":[\"trojan://pw@t.example.com:443#t\",{\"config\":\"vless://11111111-2222-3333-4444-555555555555@h.example.com:443#v\",\"name\":\"Named\"},{\"config\":\"\"}]}"),
+            "/api/logout" => (200, "{}"),
+            _ => (404, "{}"),
+        });
+        using var api = new TIREXNET.Core.Services.ApiClient(handler);
+        var token = await api.LoginAsync("u", "p", "pasarguard");
+        Assert.Equal("tok-123456", token);
+        Assert.Null(handler.LastAuthScheme); // the login request carries no bearer token
+        var me = await api.GetAccountAsync(token);
+        Assert.Equal(100, me.LimitBytes);
+        Assert.Equal("", me.Expire); // "expire": null means no expiry date
+        Assert.Equal("Bearer", handler.LastAuthScheme);
+        var cfgs = await api.GetConfigsAsync(token, "pasarguard");
+        Assert.Equal(2, cfgs.Count);
+        Assert.Equal("Bearer", handler.LastAuthScheme);
+        await api.LogoutAsync(token);
+    }
+
+    [Fact]
+    public async Task ApiClient_Http401_IsReportedWithStatusCode()
+    {
+        var handler = new FakeHandler(_ => (401, "{\"error\":\"bad\"}"));
+        using var api = new TIREXNET.Core.Services.ApiClient(handler);
+        var ex = await Assert.ThrowsAsync<TIREXNET.Core.Services.ApiException>(() => api.LoginAsync("u", "p", "pasarguard"));
+        Assert.Equal(401, ex.StatusCode);
+    }
+
+    [Fact]
+    public async Task ApiClient_LoginWithoutToken_Fails()
+    {
+        var handler = new FakeHandler(_ => (200, "{\"error\":\"nope\"}"));
+        using var api = new TIREXNET.Core.Services.ApiClient(handler);
+        await Assert.ThrowsAsync<TIREXNET.Core.Services.ApiException>(() => api.LoginAsync("u", "p", "pasarguard"));
+    }
+
+    private sealed class FakeHandler : HttpMessageHandler
+    {
+        private readonly Func<HttpRequestMessage, (int Status, string Body)> _respond;
+        public string? LastAuthScheme { get; private set; }
+
+        public FakeHandler(Func<HttpRequestMessage, (int, string)> respond) => _respond = respond;
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            LastAuthScheme = request.Headers.Authorization?.Scheme;
+            var (status, body) = _respond(request);
+            return Task.FromResult(new HttpResponseMessage((System.Net.HttpStatusCode)status)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json"),
+            });
+        }
     }
 }

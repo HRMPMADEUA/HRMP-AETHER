@@ -23,7 +23,6 @@ internal sealed class VpnTunnel
 
     private ManagedProcess? _tun;
     private readonly List<RouteEntry> _routes = new();
-    private List<uint> _bypassNetworks = new();
     private List<(uint Net, int Prefix)> _bypassCidrs = new();
     private List<IPAddress> _serverIps = new();
     private Physical? _physical;

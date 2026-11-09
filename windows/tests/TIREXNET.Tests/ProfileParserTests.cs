@@ -141,18 +141,22 @@ public class ProfileParserTests
         Assert.NotEmpty(r.Errors);
     }
 
-    internal const string WgConf = @"[Interface]
-PrivateKey = YAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=
-Address = 10.0.0.2/32, fd00::2/128
-DNS = 1.1.1.1, 1.0.0.1
-MTU = 1380
-
-[Peer]
-PublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=
-AllowedIPs = 0.0.0.0/0, ::/0
-Endpoint = vpn.example.com:51820
-PersistentKeepalive = 25
-";
+    /// <summary>Always LF-joined, so tests behave the same with LF or CRLF checkouts.</summary>
+    internal static string WgConf { get; } = string.Join("\n", new[]
+    {
+        "[Interface]",
+        "PrivateKey = YAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=",
+        "Address = 10.0.0.2/32, fd00::2/128",
+        "DNS = 1.1.1.1, 1.0.0.1",
+        "MTU = 1380",
+        "",
+        "[Peer]",
+        "PublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=",
+        "AllowedIPs = 0.0.0.0/0, ::/0",
+        "Endpoint = vpn.example.com:51820",
+        "PersistentKeepalive = 25",
+        "",
+    });
 
     [Fact]
     public void WireGuard_Conf_IsParsed()
@@ -195,5 +199,55 @@ PersistentKeepalive = 25
         var list = TIREXNET.Core.Services.ApiClient.ToProfiles(configs, "alipanel", skipped);
         Assert.Empty(list);
         Assert.Single(skipped);
+    }
+
+    [Fact]
+    public void WireGuard_Conf_WithCrLf_IsParsed()
+    {
+        var crlf = WgConf.Replace("\n", "\r\n");
+        var p = Assert.Single(ProfileParser.ParseText(crlf, "crlf.conf").Profiles);
+        Assert.Equal("vpn.example.com", p.Server);
+        Assert.Empty(ConfigValidator.Validate(p));
+    }
+
+    [Theory]
+    [InlineData("vless://11111111-2222-3333-4444-555555555555@h.example.com:70000#x")]
+    [InlineData("vless://11111111-2222-3333-4444-555555555555@h.example.com:0#x")]
+    [InlineData("vless://11111111-2222-3333-4444-555555555555@h.example.com#x")]
+    [InlineData("vless://@h.example.com:443#x")]
+    [InlineData("trojan://h.example.com:443")]
+    [InlineData("vmess://!!!not-base64!!!")]
+    [InlineData("ss://")]
+    public void Malformed_Links_AreRejected(string uri)
+    {
+        var r = ProfileParser.ParseText(uri);
+        Assert.Empty(r.Profiles);
+        Assert.NotEmpty(r.Errors);
+    }
+
+    [Fact]
+    public void Vless_WithIPv6Server_IsParsed()
+    {
+        var p = Assert.Single(ProfileParser.ParseText("vless://11111111-2222-3333-4444-555555555555@[2001:db8::1]:443?security=tls#v6").Profiles);
+        Assert.Equal("2001:db8::1", p.Server);
+        Assert.Equal(443, p.Port);
+        Assert.Empty(ConfigValidator.Validate(p));
+    }
+
+    [Fact]
+    public void Unsupported_Transport_IsReportedNotImported()
+    {
+        var r = ProfileParser.ParseText("vless://11111111-2222-3333-4444-555555555555@h.example.com:443?type=quic#q");
+        Assert.Empty(r.Profiles);
+        Assert.Contains(r.Errors, e => e.Contains("quic"));
+    }
+
+    [Fact]
+    public void XrayJsonArray_YieldsOneProfilePerObject()
+    {
+        const string one = "{\"outbounds\":[{\"protocol\":\"trojan\",\"settings\":{\"servers\":[{\"address\":\"a.example.com\",\"port\":443,\"password\":\"pw\"}]}}]}";
+        var r = ProfileParser.ParseText("[" + one + "," + one.Replace("a.example", "b.example") + "]", "multi.json");
+        Assert.Equal(2, r.Profiles.Count);
+        Assert.Equal(new[] { "a.example.com", "b.example.com" }, r.Profiles.Select(p => p.Server).ToArray());
     }
 }

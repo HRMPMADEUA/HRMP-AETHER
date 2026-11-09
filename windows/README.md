@@ -78,3 +78,19 @@ Engine versions are pinned in `scripts/engines.lock.json`. Binaries are download
 CI proves: compilation for x64, parser/validator/config-builder/process-lifecycle tests, package contents, installer
 install + uninstall. CI **cannot** prove: a real tunnel to a real server, UAC flows, route/DNS behaviour on a real
 network, or any specific protocol against a live server. Those paths are implemented but untested against live servers.
+
+## Audit notes (build-readiness pass)
+
+* Fixed: `SystemProxy.cs` missing `using TIREXNET.Core.Models;`.
+* Tests no longer depend on line endings (WireGuard fixtures are LF-joined in code; CRLF variants are tested explicitly).
+* `Cmd.RunAsync` / `ManagedProcess` always use `ProcessStartInfo.ArgumentList` (no shell). The argument test now uses `findstr.exe`
+  with a literal `a&b` argument and a path containing spaces; `cmd.exe` is only used to produce an exit code / output.
+* Async tests use `await` instead of `.Result`; tests run serially because they share process-wide state.
+* Added tests: malformed links, IPv6 servers, CRLF WireGuard files, WireGuard address/DNS/AllowedIPs failures, Xray JSON arrays,
+  settings and profile-store recovery, safe export names, API client against the real response shapes (fake HTTP handler),
+  connection manager failure paths (missing runtime, invalid profile, WireGuard).
+* Workflow: explicit Core and WPF Release builds, exit-code checks after every native command, test results always uploaded,
+  Android-guard step skipped for manual runs.
+
+Status: these changes were made without access to a Windows machine or to GitHub from the authoring environment, so they are
+**unverified until the Windows workflow has run**.
