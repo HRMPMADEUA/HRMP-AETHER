@@ -38,14 +38,14 @@ function Confirm-Hash([string]$Name, [string]$File, [string]$Pinned, [string]$Up
   $actual = Get-Sha $File
   if ($Pinned) {
     if ($actual -ne $Pinned.ToLowerInvariant()) { throw "${Name}: SHA-256 mismatch. expected(pinned)=$Pinned actual=$actual" }
-    $report.Add("- $Name: SHA-256 verified against the pinned value ($actual)")
+    $report.Add("- ${Name}: SHA-256 verified against the pinned value ($actual)")
   }
   elseif ($Upstream) {
     if ($actual -ne $Upstream.ToLowerInvariant()) { throw "${Name}: SHA-256 mismatch. expected(upstream)=$Upstream actual=$actual" }
-    $report.Add("- $Name: SHA-256 verified against the checksum published by the upstream project ($actual)")
+    $report.Add("- ${Name}: SHA-256 verified against the checksum published by the upstream project ($actual)")
   }
   else {
-    $report.Add("- $Name: **UNPINNED** - no checksum available to compare; computed SHA-256 = ``$actual`` (add it to engines.lock.json to pin it)")
+    $report.Add("- ${Name}: **UNPINNED** - no checksum available to compare; computed SHA-256 = ``$actual`` (add it to engines.lock.json to pin it)")
     Write-Warning "$Name is unpinned. SHA-256 = $actual"
   }
 }
