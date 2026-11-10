@@ -26,6 +26,8 @@ public sealed class XrayEndpoint
     public string HeaderType { get; set; } = "none";
     public string Mode { get; set; } = "";
     public string Seed { get; set; } = "";
+    /// <summary>xhttp "extra" JSON object from share links (optional).</summary>
+    public string Extra { get; set; } = "";
     public bool AllowInsecure { get; set; }
     public string Name { get; set; } = "";
 }

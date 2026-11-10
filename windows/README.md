@@ -8,7 +8,7 @@ backend contract, the profile formats and the visual identity.
 
 | Area | Status |
 |---|---|
-| Xray (VLESS, VMess, Trojan, Shadowsocks, Xray JSON) | Real: official Xray-core binary is started with a generated config (passed on stdin, never written to disk) |
+| Xray (VLESS, VMess, Trojan, Shadowsocks, Xray JSON; TCP, WS, gRPC, HTTP/2, HTTPUpgrade, **xhttp** incl. path/host/mode/extra, mKCP; TLS and Reality) | Real: official Xray-core binary is started with a generated config (passed on stdin, never written to disk) |
 | Proxy mode | Real: SOCKS5 `127.0.0.1:10880` and HTTP `127.0.0.1:10881` (loopback only). **Not** a full-device VPN. Optional Windows system proxy, restored on disconnect |
 | VPN mode (Xray) | Real: tun2socks + Wintun adapter `TIREXNET`, routes via two `/1` routes, server and bypass routes pinned to the physical gateway. Needs administrator rights |
 | WireGuard | Real: official `wireguard.exe` tunnel service (`/installtunnelservice`). Standard `.conf` files. Needs administrator rights |
@@ -40,7 +40,7 @@ list cache, ping tests.
 | AmneziaWG | No official, redistributable Windows backend was integrated. AmneziaWG configs are detected and rejected with a clear message instead of being run as plain WireGuard |
 | OpenVPN | Not integrated (would need OpenVPN + the Windows TAP/wintun driver package and its own service handling) |
 | SlipNet | The Android runtime is JNI/Android-specific; no Windows runtime exists in the repository |
-| Xray `xhttp` transport | Depends on the pinned Xray-core version (`engines.lock.json`); bump it to use xhttp |
+| VPN mode for IPv6 | The tunnel is IPv4 only (IPv6 traffic is not routed through it) |
 
 The UI never shows an engine whose runtime is missing as available (Settings → Engines, Diagnostics).
 
@@ -94,3 +94,18 @@ network, or any specific protocol against a live server. Those paths are impleme
 
 Status: these changes were made without access to a Windows machine or to GitHub from the authoring environment, so they are
 **unverified until the Windows workflow has run**.
+
+## Engine integrity
+
+`scripts/engines.lock.json` pins every downloaded runtime. `scripts/fetch-engines.ps1` refuses (fails the build) to use a
+binary that has neither a pinned SHA-256 nor an upstream checksum. The WireGuard MSI is accepted only with a valid
+WireGuard Authenticode signature; Wintun additionally needs a valid signed `wintun.dll`.
+
+* Xray-core v26.10.21: pinned to the SHA-256 published in the official `Xray-windows-64.zip.dgst` of that release.
+* tun2socks v2.5.2 publishes no checksum file; the pinned value was measured from the official release asset.
+
+## Look and feel
+
+The interface follows the Android app: same palette (`Palette.kt`), glass cards, blue→cyan primary gradient, pastel
+connect orb with per-state colours, drifting ambient background, round protocol badges, switches and segmented
+Proxy/VPN control. Desktop layout: navigation sidebar, hero orb, server column, live statistics.

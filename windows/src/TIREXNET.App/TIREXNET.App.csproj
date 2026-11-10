@@ -16,7 +16,8 @@
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <PublishReadyToRun>false</PublishReadyToRun>
     <PublishSingleFile>false</PublishSingleFile>
-    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Must stay false: WPF text input creates CultureInfo objects from the keyboard layout (e.g. 1033). -->
+    <InvariantGlobalization>false</InvariantGlobalization>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\TIREXNET.Core\TIREXNET.Core.csproj" />

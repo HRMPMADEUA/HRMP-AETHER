@@ -24,6 +24,19 @@ public sealed class Profile
     public string Raw { get; set; } = "";
     public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
 
+    /// <summary>Two-letter protocol code shown in the round badge of profile lists.</summary>
+    [JsonIgnore]
+    public string ProtocolCode => (Engine == EngineKind.WireGuard ? "wireguard" : Protocol) switch
+    {
+        "vless" => "VL",
+        "vmess" => "VM",
+        "trojan" => "TR",
+        "shadowsocks" => "SS",
+        "xray-json" => "XJ",
+        "wireguard" => "WG",
+        _ => "TX",
+    };
+
     [JsonIgnore] public string Badge => Engine == EngineKind.WireGuard ? "WireGuard" : "Xray";
 
     [JsonIgnore]

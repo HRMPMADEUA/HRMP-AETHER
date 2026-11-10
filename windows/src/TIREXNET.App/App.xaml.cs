@@ -42,7 +42,7 @@ namespace TIREXNET.UI
             DispatcherUnhandledException += (_, ev) =>
             {
                 Log.Error("Unhandled error: " + ev.Exception);
-                System.Windows.MessageBox.Show("Something went wrong: " + ev.Exception.Message + "\n\nDetails were written to the log.", "TIREXNET", MessageBoxButton.OK, MessageBoxImage.Error);
+                System.Windows.MessageBox.Show("Something went wrong: " + Redactor.Redact(ev.Exception.Message) + "\n\nDetails were written to the log.", "TIREXNET", MessageBoxButton.OK, MessageBoxImage.Error);
                 ev.Handled = true;
             };
             AppDomain.CurrentDomain.UnhandledException += (_, ev) =>

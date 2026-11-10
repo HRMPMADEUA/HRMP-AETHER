@@ -39,7 +39,7 @@ public sealed class WireGuardEngine : IEngine
         foreach (var k in new[] { "FwMark", "Table", "SaveConfig" }) WgConfig.Remove(cfg.Interface, k); // not meaningful on Windows
         var dns = ConfigValidator.SplitList(settings.Dns);
         if (dns.Count > 0) WgConfig.Set(cfg.Interface, "DNS", string.Join(", ", dns));
-        if (settings.Mtu > 0) WgConfig.Set(cfg.Interface, "MTU", settings.Mtu.ToString());
+        if (settings.Mtu > 0) WgConfig.Set(cfg.Interface, "MTU", settings.Mtu.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
         // A leftover tunnel from a previous crash would clash with ours.
         await RemoveTunnelServiceAsync().ConfigureAwait(false);

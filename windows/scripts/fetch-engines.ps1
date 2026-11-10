@@ -6,8 +6,9 @@
     1. sha256 pinned in engines.lock.json (when not empty)  -> must match
     2. checksum published by the upstream project           -> must match
     3. Authenticode signature (WireGuard MSI)               -> must be valid and signed by WireGuard
-  A runtime that could only be verified by a hash computed at download time is reported as UNPINNED
-  in the build summary so that the hash can be added to engines.lock.json.
+  FAIL SAFE: a runtime with neither a pinned SHA-256 nor an upstream checksum is NOT accepted (the build stops),
+  unless it is explicitly marked -SignatureOnly and its Authenticode signature is verified afterwards (WireGuard MSI).
+  A hash computed from the download itself is never treated as verification.
 #>
 param(
   [Parameter(Mandatory = $true)][string]$Stage
@@ -54,7 +55,7 @@ function Get-Remote([string]$Url, [string]$Out) {
 
 function Get-Sha([string]$Path) { (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
 
-function Confirm-Hash([string]$Name, [string]$File, [string]$Pinned, [string]$Upstream) {
+function Confirm-Hash([string]$Name, [string]$File, [string]$Pinned, [string]$Upstream, [switch]$SignatureOnly) {
   $actual = Get-Sha $File
   if ($Pinned) {
     if ($actual -ne $Pinned.ToLowerInvariant()) { throw "${Name}: SHA-256 mismatch. expected(pinned)=$Pinned actual=$actual" }
@@ -64,9 +65,11 @@ function Confirm-Hash([string]$Name, [string]$File, [string]$Pinned, [string]$Up
     if ($actual -ne $Upstream.ToLowerInvariant()) { throw "${Name}: SHA-256 mismatch. expected(upstream)=$Upstream actual=$actual" }
     $report.Add("- ${Name}: SHA-256 verified against the checksum published by the upstream project ($actual)")
   }
+  elseif ($SignatureOnly) {
+    $report.Add("- ${Name}: no checksum available; integrity is checked by the Authenticode signature below (SHA-256 seen: $actual)")
+  }
   else {
-    $report.Add("- ${Name}: **UNPINNED** - no checksum available to compare; computed SHA-256 = ``$actual`` (add it to engines.lock.json to pin it)")
-    Write-Warning "$Name is unpinned. SHA-256 = $actual"
+    throw "${Name}: no pinned SHA-256 and no upstream checksum are available. Refusing to use an unverified binary. Add the verified sha256 to engines.lock.json. (SHA-256 of the download: $actual)"
   }
 }
 
@@ -153,7 +156,7 @@ $gDir = Join-Path $engines 'wireguard'
 New-Item -ItemType Directory -Force -Path $gDir | Out-Null
 $gMsi = Join-Path $work $g.asset
 Get-Remote "https://download.wireguard.com/windows-client/$($g.asset)" $gMsi
-Confirm-Hash "WireGuard $($g.version)" $gMsi $g.sha256 ''
+Confirm-Hash "WireGuard $($g.version)" $gMsi $g.sha256 '' -SignatureOnly
 $gsig = Get-AuthenticodeSignature $gMsi
 if ($gsig.Status -ne 'Valid' -or $gsig.SignerCertificate.Subject -notmatch 'WireGuard') {
   throw "The WireGuard installer signature is not valid (status: $($gsig.Status), signer: $($gsig.SignerCertificate.Subject))."

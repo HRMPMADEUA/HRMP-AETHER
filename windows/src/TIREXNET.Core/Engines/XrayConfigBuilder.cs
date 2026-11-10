@@ -210,6 +210,20 @@ public static class XrayConfigBuilder
                 var xh = new JsonObject { ["path"] = string.IsNullOrEmpty(ep.Path) ? "/" : ep.Path };
                 if (!string.IsNullOrEmpty(ep.HostHeader)) xh["host"] = ep.HostHeader;
                 if (!string.IsNullOrEmpty(ep.Mode)) xh["mode"] = ep.Mode;
+                if (!string.IsNullOrWhiteSpace(ep.Extra))
+                {
+                    // Invalid data is reported, never silently dropped.
+                    try
+                    {
+                        if (JsonNode.Parse(ep.Extra) is not JsonObject extra)
+                            throw new EngineException("The xhttp \"extra\" setting must be a JSON object.");
+                        xh["extra"] = extra;
+                    }
+                    catch (JsonException ex)
+                    {
+                        throw new EngineException("The xhttp \"extra\" setting is not valid JSON: " + ex.Message, ex);
+                    }
+                }
                 ss["xhttpSettings"] = xh;
                 break;
             case "kcp":

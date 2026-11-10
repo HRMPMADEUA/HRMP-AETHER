@@ -1,6 +1,7 @@
 {
-  "xray":      { "version": "v1.8.24", "asset": "Xray-windows-64.zip", "sha256": "f932f83870bb539b9bd075540142c7a9e1a8ababb4fc1460fd2098fa491b89dc" },
-  "tun2socks": { "version": "v2.5.2",  "asset": "tun2socks-windows-amd64.zip", "sha256": "" },
+  "_note": "xray: sha256 equals the official upstream Xray-windows-64.zip.dgst of the release (SHA2-256). tun2socks: upstream publishes no checksum file, so the value is the SHA-256 measured from the official GitHub release asset (trust-on-first-use pin). wintun/wireguard: wintun pinned, wireguard verified by Authenticode signature only.",
+  "xray":      { "version": "v26.10.21", "asset": "Xray-windows-64.zip", "sha256": "fc58c39ee2f2717b4c54d28d374362389e5319b20ae44aea76ea45a5243ec827" },
+  "tun2socks": { "version": "v2.5.2",  "asset": "tun2socks-windows-amd64.zip", "sha256": "06c71bc30e557ceab6964543bd0d68e1b9dfefa272b51a46f60171af621b5f42" },
   "wintun":    { "version": "0.14.1",  "asset": "wintun-0.14.1.zip", "sha256": "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51" },
   "wireguard": { "version": "0.5.3",   "asset": "wireguard-amd64-0.5.3.msi", "sha256": "" }
 }

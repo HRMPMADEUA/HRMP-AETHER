@@ -11,6 +11,8 @@ public static class ConfigValidator
         "xchacha20-poly1305", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305", "none", "plain",
     };
 
+    private static readonly HashSet<string> XhttpModes = new(StringComparer.OrdinalIgnoreCase) { "auto", "packet-up", "stream-up", "stream-one" };
+
     private static readonly HashSet<string> VmessSecurities = new(StringComparer.OrdinalIgnoreCase)
     {
         "auto", "aes-128-gcm", "chacha20-poly1305", "none", "zero",
@@ -53,6 +55,22 @@ public static class ConfigValidator
             if (string.IsNullOrWhiteSpace(ep.PublicKey)) errors.Add("Reality profiles need a public key (pbk).");
             if (ep.ShortId.Length > 16 || ep.ShortId.Length % 2 != 0 || !ep.ShortId.All(Uri.IsHexDigit))
                 errors.Add("The Reality short ID must be an even-length hex string of at most 16 characters.");
+        }
+        if (ep.Network == "xhttp")
+        {
+            if (!string.IsNullOrEmpty(ep.Mode) && !XhttpModes.Contains(ep.Mode))
+                errors.Add($"The xhttp mode \"{ep.Mode}\" is not supported (use auto, packet-up, stream-up or stream-one).");
+            if (!string.IsNullOrWhiteSpace(ep.Extra))
+            {
+                try
+                {
+                    if (JsonNode.Parse(ep.Extra) is not JsonObject) errors.Add("The xhttp \"extra\" setting must be a JSON object.");
+                }
+                catch (System.Text.Json.JsonException ex)
+                {
+                    errors.Add("The xhttp \"extra\" setting is not valid JSON: " + ex.Message);
+                }
+            }
         }
         if (ep.Network == "grpc" && string.IsNullOrEmpty(ep.ServiceName) && string.IsNullOrEmpty(ep.Path))
         {

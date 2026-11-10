@@ -386,4 +386,196 @@ public class ValidationTests
             });
         }
     }
+
+    [Fact]
+    public void Tun2Socks_LogLevel_IsAValueTun2SocksAccepts()
+    {
+        // tun2socks v2.x rejects "warn" with: not a valid logrus Level. Accepted: debug|info|warning|error|silent.
+        var args = TIREXNET.Core.Engines.VpnTunnel.BuildTun2SocksArgs(10880, 1500);
+        var level = args[Array.IndexOf(args, "-loglevel") + 1];
+        Assert.Contains(level, new[] { "debug", "info", "warning", "error", "silent" });
+        Assert.Equal("wintun://TIREXNET", args[Array.IndexOf(args, "-device") + 1]);
+        Assert.Equal("socks5://127.0.0.1:10880", args[Array.IndexOf(args, "-proxy") + 1]);
+        Assert.Equal("1500", args[Array.IndexOf(args, "-mtu") + 1]);
+    }
+
+    [Fact]
+    public void Xhttp_Vless_Link_BuildsXhttpSettings_WithModeAndExtra()
+    {
+        var extra = Uri.EscapeDataString("{\"xPaddingBytes\":\"100-1000\"}");
+        var cfg = Build("vless://11111111-2222-3333-4444-555555555555@x.example.com:443?type=xhttp&security=tls&path=%2Fx&host=x.example.com&mode=auto&extra=" + extra + "#xh");
+        var ss = cfg["outbounds"]![0]!["streamSettings"]!;
+        Assert.Equal("xhttp", ss["network"]!.GetValue<string>());
+        Assert.Equal("/x", ss["xhttpSettings"]!["path"]!.GetValue<string>());
+        Assert.Equal("auto", ss["xhttpSettings"]!["mode"]!.GetValue<string>());
+        Assert.Equal("100-1000", ss["xhttpSettings"]!["extra"]!["xPaddingBytes"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void Xhttp_Vmess_Base64_IsAccepted()
+    {
+        var json = "{\"v\":\"2\",\"ps\":\"xh\",\"add\":\"x.example.com\",\"port\":\"443\",\"id\":\"11111111-2222-3333-4444-555555555555\",\"aid\":\"0\",\"net\":\"xhttp\",\"host\":\"x.example.com\",\"path\":\"/p\",\"tls\":\"tls\"}";
+        var p = ProfileParser.ParseText("vmess://" + Convert.ToBase64String(Encoding.UTF8.GetBytes(json))).Profiles.Single();
+        Assert.Empty(ConfigValidator.Validate(p));
+        var cfg = JsonNode.Parse(XrayConfigBuilder.Build(p, new AppSettings(), 12345))!;
+        Assert.Equal("xhttp", cfg["outbounds"]![0]!["streamSettings"]!["network"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void WpfApp_MustNotUse_InvariantGlobalization()
+    {
+        // InvariantGlobalization=true makes WPF text boxes crash with "1033 (0x0409) is an invalid culture identifier".
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        string? csproj = null;
+        while (dir != null && csproj == null)
+        {
+            var candidate = Path.Combine(dir.FullName, "src", "TIREXNET.App", "TIREXNET.App.csproj");
+            if (File.Exists(candidate)) csproj = candidate;
+            dir = dir.Parent;
+        }
+        Assert.NotNull(csproj);
+        var text = File.ReadAllText(csproj!);
+        Assert.DoesNotContain("<InvariantGlobalization>true</InvariantGlobalization>", text);
+    }
+
+    private const string XhId = "11111111-2222-3333-4444-555555555555";
+
+    [Fact]
+    public void Xhttp_InvalidExtra_IsRejected_NotSilentlyDropped()
+    {
+        var bad = "vless://" + XhId + "@x.example.com:443?type=xhttp&security=tls&extra=" + Uri.EscapeDataString("{not json") + "#x";
+        var p = ProfileParser.ParseText(bad).Profiles.Single();
+        Assert.Contains(ConfigValidator.Validate(p), e => e.Contains("extra"));
+        Assert.Throws<EngineException>(() => XrayConfigBuilder.Build(p, new AppSettings(), 12345));
+
+        var notObject = "vless://" + XhId + "@x.example.com:443?type=xhttp&security=tls&extra=" + Uri.EscapeDataString("[1,2]") + "#x";
+        Assert.Contains(ConfigValidator.Validate(ProfileParser.ParseText(notObject).Profiles.Single()), e => e.Contains("extra"));
+    }
+
+    [Fact]
+    public void Xhttp_UnknownMode_IsRejected()
+    {
+        var p = ProfileParser.ParseText("vless://" + XhId + "@x.example.com:443?type=xhttp&mode=bogus#x").Profiles.Single();
+        Assert.Contains(ConfigValidator.Validate(p), e => e.Contains("mode"));
+    }
+
+    [Fact]
+    public void Xhttp_QueryValues_ArePercentDecoded_AndPlusIsKept()
+    {
+        var cfg = Build("vless://" + XhId + "@x.example.com:443?type=splithttp&security=tls&path=%2Fa%2Bb%20c&host=h.example.com&mode=stream-up#x");
+        var xh = cfg["outbounds"]![0]!["streamSettings"]!["xhttpSettings"]!;
+        Assert.Equal("/a+b c", xh["path"]!.GetValue<string>());
+        Assert.Equal("h.example.com", xh["host"]!.GetValue<string>());
+        Assert.Equal("stream-up", xh["mode"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void Xhttp_Reality_KeepsRealitySettings()
+    {
+        var cfg = Build("vless://" + XhId + "@x.example.com:443?type=xhttp&security=reality&pbk=abc&sid=1a2b&sni=s.example.com&fp=firefox&path=%2F#x");
+        var ss = cfg["outbounds"]![0]!["streamSettings"]!;
+        Assert.Equal("reality", ss["security"]!.GetValue<string>());
+        Assert.Equal("abc", ss["realitySettings"]!["publicKey"]!.GetValue<string>());
+        Assert.NotNull(ss["xhttpSettings"]);
+    }
+
+    [Fact]
+    public void Xhttp_Vmess_ModeAndExtra_Preserved()
+    {
+        var json = "{\"v\":\"2\",\"ps\":\"xh\",\"add\":\"x.example.com\",\"port\":\"443\",\"id\":\"" + XhId + "\",\"aid\":\"0\",\"net\":\"xhttp\",\"type\":\"packet-up\",\"host\":\"x.example.com\",\"path\":\"/p\",\"tls\":\"tls\",\"extra\":{\"xPaddingBytes\":\"10-20\"}}";
+        var p = ProfileParser.ParseText("vmess://" + Convert.ToBase64String(Encoding.UTF8.GetBytes(json))).Profiles.Single();
+        Assert.Empty(ConfigValidator.Validate(p));
+        var xh = JsonNode.Parse(XrayConfigBuilder.Build(p, new AppSettings(), 12345))!["outbounds"]![0]!["streamSettings"]!["xhttpSettings"]!;
+        Assert.Equal("packet-up", xh["mode"]!.GetValue<string>());
+        Assert.Equal("10-20", xh["extra"]!["xPaddingBytes"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void EnginesLock_PinsXrayThatSupportsXhttp()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        string? lockFile = null;
+        while (dir != null && lockFile == null)
+        {
+            var c = Path.Combine(dir.FullName, "scripts", "engines.lock.json");
+            if (File.Exists(c)) lockFile = c;
+            dir = dir.Parent;
+        }
+        Assert.NotNull(lockFile);
+        var xray = JsonNode.Parse(File.ReadAllText(lockFile!))!["xray"]!;
+        var v = xray["version"]!.GetValue<string>().TrimStart('v').Split('.');
+        Assert.True(int.Parse(v[0]) >= 24, "Xray must be a release with xhttp support (calendar versions, 24+).");
+        Assert.NotEqual("v1.8.24", xray["version"]!.GetValue<string>());
+        Assert.Matches("^[0-9a-f]{64}$", xray["sha256"]!.GetValue<string>());
+    }
+
+    private static string FindUp(params string[] parts)
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null)
+        {
+            var c = Path.Combine(new[] { dir.FullName }.Concat(parts).ToArray());
+            if (File.Exists(c)) return c;
+            dir = dir.Parent;
+        }
+        throw new FileNotFoundException(string.Join("/", parts));
+    }
+
+    [Fact]
+    public async Task Diagnostics_RunAsync_NeverThrows_AndReturnsReadableReport()
+    {
+        var report = await TIREXNET.Core.Services.Diagnostics.RunAsync().WaitAsync(TimeSpan.FromSeconds(60));
+        Assert.StartsWith("TIREXNET diagnostics", report);
+        Assert.Contains("Xray runtime", report);
+    }
+
+    [Fact]
+    public async Task Diagnostics_Report_IsRedacted()
+    {
+        Redactor.AddSecret("s3cr3t-diag-token");
+        try
+        {
+            var report = await TIREXNET.Core.Services.Diagnostics.RunAsync().WaitAsync(TimeSpan.FromSeconds(60));
+            Assert.DoesNotContain("s3cr3t-diag-token", report);
+            Assert.Equal("a ***", Redactor.Redact("a s3cr3t-diag-token"));
+        }
+        finally { Redactor.Clear(); }
+    }
+
+    [Fact]
+    public void ProfileLists_UseExplicitReadableForeground()
+    {
+        // A ListBoxItem falls back to the default black foreground: unreadable on the dark surfaces.
+        var xaml = File.ReadAllText(FindUp("src", "TIREXNET.App", "App.xaml"));
+        var item = xaml.Substring(xaml.IndexOf("x:Key=\"DarkItem\"", StringComparison.Ordinal));
+        item = item.Substring(0, item.IndexOf("</Style>", StringComparison.Ordinal));
+        Assert.Contains("<Setter Property=\"Foreground\" Value=\"{StaticResource TextBrush}\" />", item);
+        Assert.Contains("TextElement.Foreground=\"{StaticResource TextBrush}\"", item);
+
+        var tpl = xaml.Substring(xaml.IndexOf("x:Key=\"ProfileTemplate\"", StringComparison.Ordinal));
+        foreach (var field in new[] { "{Binding Name}", "{Binding Summary}", "{Binding Endpoint}" })
+        {
+            var i = tpl.IndexOf(field, StringComparison.Ordinal);
+            Assert.True(i > 0, field);
+            var tag = tpl.Substring(i, tpl.IndexOf("/>", i, StringComparison.Ordinal) - i);
+            Assert.Contains("Foreground=", tag);
+        }
+
+        // Both lists (Dashboard and Profiles) share the implicit ListBox style, so neither can be left unreadable.
+        var win = File.ReadAllText(FindUp("src", "TIREXNET.App", "MainWindow.xaml"));
+        Assert.Contains("x:Name=\"DashProfileList\" ItemTemplate=\"{StaticResource ProfileTemplate}\"", win);
+        Assert.Contains("x:Name=\"ProfilesList\" ItemTemplate=\"{StaticResource ProfileTemplate}\"", win);
+        Assert.DoesNotContain("ItemContainerStyle", win);
+    }
+
+    [Fact]
+    public void Profile_ProtocolCode_CoversEveryProtocol()
+    {
+        Assert.Equal("VL", new Profile { Protocol = "vless" }.ProtocolCode);
+        Assert.Equal("VM", new Profile { Protocol = "vmess" }.ProtocolCode);
+        Assert.Equal("TR", new Profile { Protocol = "trojan" }.ProtocolCode);
+        Assert.Equal("SS", new Profile { Protocol = "shadowsocks" }.ProtocolCode);
+        Assert.Equal("XJ", new Profile { Protocol = "xray-json" }.ProtocolCode);
+        Assert.Equal("WG", new Profile { Engine = EngineKind.WireGuard, Protocol = "wireguard" }.ProtocolCode);
+    }
 }

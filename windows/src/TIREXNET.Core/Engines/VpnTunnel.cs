@@ -32,6 +32,19 @@ internal sealed class VpnTunnel
 
     public event Action<string>? Failed;
 
+    /// <summary>
+    /// tun2socks accepts: debug | info | warning | error | silent  ("warn" is rejected: "not a valid logrus Level").
+    /// </summary>
+    internal const string Tun2SocksLogLevel = "warning";
+
+    internal static string[] BuildTun2SocksArgs(int socksPort, int mtu) => new[]
+    {
+        "-device", $"wintun://{AdapterName}",
+        "-proxy", $"socks5://127.0.0.1:{socksPort}",
+        "-loglevel", Tun2SocksLogLevel,
+        "-mtu", mtu.ToString(System.Globalization.CultureInfo.InvariantCulture),
+    };
+
     [DllImport("iphlpapi.dll")]
     private static extern int GetBestInterface(uint destAddr, out uint bestIfIndex);
 
@@ -53,13 +66,7 @@ internal sealed class VpnTunnel
         try
         {
             var mtu = settings.Mtu > 0 ? settings.Mtu : 1500;
-            _tun = ManagedProcess.Start("tun2socks", AppPaths.Tun2SocksExe, new[]
-            {
-                "-device", $"wintun://{AdapterName}",
-                "-proxy", $"socks5://127.0.0.1:{settings.SocksPort}",
-                "-loglevel", "warn",
-                "-mtu", mtu.ToString(),
-            }, AppPaths.Tun2SocksDir);
+            _tun = ManagedProcess.Start("tun2socks", AppPaths.Tun2SocksExe, BuildTun2SocksArgs(settings.SocksPort, mtu), AppPaths.Tun2SocksDir);
             _tun.OutputLine += l => Log.Info("[tun2socks] " + l);
             _tun.UnexpectedExit += code => RaiseFailed($"The tunnel process stopped unexpectedly (exit code {code}). {_tun?.LastLines()}");
 

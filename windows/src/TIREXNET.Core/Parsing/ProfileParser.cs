@@ -134,7 +134,7 @@ public static class ProfileParser
                 var eq = pair.IndexOf('=');
                 var k = eq < 0 ? pair : pair[..eq];
                 var v = eq < 0 ? "" : pair[(eq + 1)..];
-                query[Uri.UnescapeDataString(k)] = Uri.UnescapeDataString(v.Replace('+', ' ').Replace("%2B", "+"));
+                query[Uri.UnescapeDataString(k)] = Uri.UnescapeDataString(v);
             }
             rest = rest[..q];
         }
@@ -204,6 +204,7 @@ public static class ProfileParser
         ep.HeaderType = q.GetValueOrDefault("headerType", "none");
         ep.Mode = q.GetValueOrDefault("mode", "");
         ep.Seed = q.GetValueOrDefault("seed", "");
+        ep.Extra = q.GetValueOrDefault("extra", "");
         var insecure = q.GetValueOrDefault("allowInsecure", q.GetValueOrDefault("insecure", ""));
         ep.AllowInsecure = insecure == "1" || insecure.Equals("true", StringComparison.OrdinalIgnoreCase);
     }
@@ -285,6 +286,15 @@ public static class ProfileParser
         ep.Security = tls is "tls" or "reality" ? tls : "none";
         if (ep.Network == "grpc") ep.ServiceName = ep.Path;
         if (ep.Network == "kcp") ep.Seed = ep.Path;
+        if (ep.Network == "xhttp")
+        {
+            // v2rayN style: "type" carries the xhttp mode, "extra" the extra JSON object.
+            var mode = S("mode");
+            if (string.IsNullOrWhiteSpace(mode) && !string.Equals(ep.HeaderType, "none", StringComparison.OrdinalIgnoreCase)) mode = ep.HeaderType;
+            ep.Mode = mode;
+            ep.HeaderType = "none";
+            ep.Extra = S("extra");
+        }
         return FinishTransport(ep, ref error) ? ep : null;
     }
 
