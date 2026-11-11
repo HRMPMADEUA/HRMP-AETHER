@@ -470,9 +470,6 @@
                 <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource StrokeActiveBrush}" />
                 <Setter TargetName="check" Property="Visibility" Value="Visible" />
               </Trigger>
-              <Trigger Property="IsEnabled" Value="False">
-                <Setter Property="Opacity" Value="0.55" />
-              </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
         </Setter.Value>
@@ -480,6 +477,23 @@
     </Style>
 
     <Style TargetType="ListBox">
+      <Setter Property="Template">
+        <Setter.Value>
+          <!-- Own template: the default one paints a white panel when the list is disabled (while connected). -->
+          <ControlTemplate TargetType="ListBox">
+            <Border Background="Transparent" BorderThickness="0">
+              <ScrollViewer Focusable="False" Padding="{TemplateBinding Padding}" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+                <ItemsPresenter SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}" />
+              </ScrollViewer>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.6" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
       <Setter Property="Background" Value="Transparent" />
       <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
       <Setter Property="BorderThickness" Value="0" />

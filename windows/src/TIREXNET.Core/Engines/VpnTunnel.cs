@@ -37,9 +37,15 @@ internal sealed class VpnTunnel
     /// </summary>
     internal const string Tun2SocksLogLevel = "warning";
 
+    /// <summary>
+    /// tun2socks v2.5.x device driver. The accepted drivers are "tun" (on Windows this is implemented with Wintun) and "fd";
+    /// "wintun://" is rejected with "unsupported driver: wintun".
+    /// </summary>
+    internal const string Tun2SocksDriver = "tun";
+
     internal static string[] BuildTun2SocksArgs(int socksPort, int mtu) => new[]
     {
-        "-device", $"wintun://{AdapterName}",
+        "-device", $"{Tun2SocksDriver}://{AdapterName}",
         "-proxy", $"socks5://127.0.0.1:{socksPort}",
         "-loglevel", Tun2SocksLogLevel,
         "-mtu", mtu.ToString(System.Globalization.CultureInfo.InvariantCulture),

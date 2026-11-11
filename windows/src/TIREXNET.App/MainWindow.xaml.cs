@@ -296,7 +296,9 @@ namespace TIREXNET.UI
                     break;
             }
             StatusText.Text = headline;
-            StatusDetail.Text = detail;
+            // Engine errors can be several lines long: keep the card readable, the full text stays in the tooltip and the log.
+            StatusDetail.ToolTip = detail;
+            StatusDetail.Text = detail.Length > 260 ? detail[..260].TrimEnd() + "…" : detail;
             ConnectLabel.Text = label;
             var chipColor = ResColor(chipBrush);
             StatusChipText.Text = chip;

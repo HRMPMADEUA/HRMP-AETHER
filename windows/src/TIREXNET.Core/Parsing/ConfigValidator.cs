@@ -30,6 +30,40 @@ public static class ConfigValidator
         return errors;
     }
 
+    /// <summary>
+    /// Xray 26.x refuses to start VLESS or Trojan without TLS/Reality (and without VLESS encryption) towards anything but a
+    /// private IP address. Returns a readable explanation, or null when the profile is fine for the engine.
+    /// </summary>
+    public static string? PlaintextRejectedByXray(Profile p)
+    {
+        if (p.Engine != EngineKind.Xray || p.Protocol == "xray-json" || string.IsNullOrWhiteSpace(p.Raw)) return null;
+        if (!ProfileParser.TryParseEndpoint(p.Raw, out var ep, out _) || ep == null) return null;
+        var noSecurity = string.IsNullOrEmpty(ep.Security) || ep.Security == "none";
+        var plain = ep.Protocol switch
+        {
+            "vless" => noSecurity && (string.IsNullOrEmpty(ep.Encryption) || ep.Encryption == "none"),
+            "trojan" => noSecurity,
+            _ => false,
+        };
+        if (!plain || IsPrivateAddress(ep.Host)) return null;
+        return $"This {ep.Protocol.ToUpperInvariant()} server sends data without any encryption (no TLS and no Reality). " +
+               "The bundled Xray engine refuses to run such profiles for safety, so it cannot be connected. " +
+               "Use a profile with TLS or Reality, or ask your provider for one.";
+    }
+
+    private static bool IsPrivateAddress(string host)
+    {
+        if (!NetUtil.TryParseIp(host, out var ip)) return false;
+        if (System.Net.IPAddress.IsLoopback(ip)) return true;
+        if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+        {
+            var b = ip.GetAddressBytes();
+            return b[0] == 10 || (b[0] == 172 && b[1] >= 16 && b[1] <= 31) || (b[0] == 192 && b[1] == 168) || (b[0] == 169 && b[1] == 254);
+        }
+        var v6 = ip.GetAddressBytes();
+        return (v6[0] & 0xFE) == 0xFC || (v6[0] == 0xFE && (v6[1] & 0xC0) == 0x80);
+    }
+
     private static void ValidateUri(string raw, List<string> errors)
     {
         if (!ProfileParser.TryParseEndpoint(raw, out var ep, out var err) || ep == null)

@@ -27,6 +27,8 @@ public sealed class XrayEngine : IEngine
         _stopping = false;
         var problems = ConfigValidator.Validate(profile);
         if (problems.Count > 0) throw new EngineException("The profile is not valid: " + problems[0]);
+        var plaintext = ConfigValidator.PlaintextRejectedByXray(profile);
+        if (plaintext != null) throw new EngineException(plaintext);
         var settingProblems = ConfigValidator.ValidateSettings(settings);
         if (settingProblems.Count > 0) throw new EngineException("Settings are not valid: " + settingProblems[0]);
 
@@ -112,10 +114,10 @@ public sealed class XrayEngine : IEngine
             }
             catch (System.Net.Sockets.SocketException ex)
             {
-                throw new EngineException($"Could not resolve the server address \"{host}\": {ex.Message}. Check your internet connection.");
+                throw new EngineException($"Could not resolve an IPv4 address for \"{host}\" ({ex.Message.TrimEnd('.')}). The name may be IPv6-only or your DNS is not answering. VPN mode supports IPv4 only: use Proxy mode, another server, or check your connection.");
             }
         }
-        if (ips.Count == 0) throw new EngineException("VPN mode needs an IPv4 server address; none could be resolved.");
+        if (ips.Count == 0) throw new EngineException("VPN mode needs an IPv4 server address; this server has none (it may be IPv6-only). Use Proxy mode or another server.");
         return ips.Distinct().ToList();
     }
 

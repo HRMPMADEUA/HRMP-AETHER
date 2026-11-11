@@ -394,7 +394,7 @@ public class ValidationTests
         var args = TIREXNET.Core.Engines.VpnTunnel.BuildTun2SocksArgs(10880, 1500);
         var level = args[Array.IndexOf(args, "-loglevel") + 1];
         Assert.Contains(level, new[] { "debug", "info", "warning", "error", "silent" });
-        Assert.Equal("wintun://TIREXNET", args[Array.IndexOf(args, "-device") + 1]);
+        Assert.Equal("tun://TIREXNET", args[Array.IndexOf(args, "-device") + 1]);
         Assert.Equal("socks5://127.0.0.1:10880", args[Array.IndexOf(args, "-proxy") + 1]);
         Assert.Equal("1500", args[Array.IndexOf(args, "-mtu") + 1]);
     }
@@ -577,5 +577,40 @@ public class ValidationTests
         Assert.Equal("SS", new Profile { Protocol = "shadowsocks" }.ProtocolCode);
         Assert.Equal("XJ", new Profile { Protocol = "xray-json" }.ProtocolCode);
         Assert.Equal("WG", new Profile { Engine = EngineKind.WireGuard, Protocol = "wireguard" }.ProtocolCode);
+    }
+
+    [Fact]
+    public void Tun2Socks_Device_UsesTunDriver_NotWintunScheme()
+    {
+        var args = VpnTunnel.BuildTun2SocksArgs(10880, 1500);
+        var device = args[Array.IndexOf(args, "-device") + 1];
+        Assert.StartsWith("tun://", device);          // "wintun://" => "unsupported driver: wintun"
+        Assert.DoesNotContain("wintun", device);
+    }
+
+    [Theory]
+    [InlineData("vless://11111111-2222-3333-4444-555555555555@example.com:80?type=tcp&security=none#x", true)]
+    [InlineData("vless://11111111-2222-3333-4444-555555555555@203.0.113.9:80?type=ws&security=none#x", true)]
+    [InlineData("trojan://pw@example.com:80?security=none#x", true)]
+    [InlineData("vless://11111111-2222-3333-4444-555555555555@10.0.0.5:80?type=tcp&security=none#x", false)]
+    [InlineData("vless://11111111-2222-3333-4444-555555555555@example.com:443?type=tcp&security=tls#x", false)]
+    [InlineData("vless://11111111-2222-3333-4444-555555555555@example.com:443?type=tcp&security=reality&pbk=abc&sid=1a#x", false)]
+    [InlineData("vmess://eyJ2IjoiMiJ9", false)]
+    public void PlaintextVless_IsExplainedBeforeXrayIsStarted(string uri, bool rejected)
+    {
+        var p = ProfileParser.ParseText(uri).Profiles.FirstOrDefault();
+        if (p == null) { Assert.False(rejected); return; }
+        Assert.Equal(rejected, ConfigValidator.PlaintextRejectedByXray(p) != null);
+    }
+
+    [Fact]
+    public void ListBoxStyle_HasOwnTemplate_SoDisabledListIsNotWhite()
+    {
+        var xaml = File.ReadAllText(FindUp("src", "TIREXNET.App", "App.xaml"));
+        var i = xaml.IndexOf("<Style TargetType=\"ListBox\">", StringComparison.Ordinal);
+        Assert.True(i > 0);
+        var style = xaml.Substring(i, xaml.IndexOf("</Style>", i, StringComparison.Ordinal) - i);
+        Assert.Contains("<ControlTemplate TargetType=\"ListBox\">", style);
+        Assert.Contains("<ScrollViewer", style);
     }
 }
