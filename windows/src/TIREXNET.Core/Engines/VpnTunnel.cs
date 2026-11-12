@@ -216,7 +216,7 @@ internal sealed class VpnTunnel
         var nics = NetworkInterface.GetAllNetworkInterfaces()
             .Where(n => n.OperationalStatus == OperationalStatus.Up
                 && n.NetworkInterfaceType is not (NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel)
-                && n.Name != excludeName && n.Name != WireGuardEngine.TunnelName)
+                && n.Name != excludeName && n.Name != WireGuardEngine.TunnelName && n.Name != AmneziaWgEngine.TunnelName)
             .ToList();
 
         Physical? Make(NetworkInterface n)

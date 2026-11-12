@@ -39,6 +39,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Shortcuts:"
 Name: "startupicon"; Description: "Start TIREXNET minimized to the tray when I sign in to Windows"; GroupDescription: "Startup:"; Flags: unchecked
+#if DirExists(SourceDir + "\openvpn")
+Name: "openvpn"; Description: "Install the official OpenVPN Community build (required for OpenVPN profiles; includes its signed Wintun / DCO drivers and stays installed when TIREXNET is removed)"; GroupDescription: "Engines:"
+#endif
 
 [Files]
 Source: "{#SourceDir}\app\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -46,6 +49,9 @@ Source: "{#SourceDir}\engines\*"; DestDir: "{app}\engines"; Flags: ignoreversion
 Source: "{#SourceDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceDir}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
+#if DirExists(SourceDir + "\openvpn")
+Source: "{#SourceDir}\openvpn\OpenVPN.msi"; DestDir: "{tmp}"; Flags: deleteafterinstall; Tasks: openvpn
+#endif
 
 [Icons]
 Name: "{group}\TIREXNET"; Filename: "{app}\TIREXNET.exe"
@@ -56,6 +62,10 @@ Name: "{autodesktop}\TIREXNET"; Filename: "{app}\TIREXNET.exe"; Tasks: desktopic
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "TIREXNET"; ValueData: """{app}\TIREXNET.exe"""; Tasks: startupicon; Flags: uninsdeletevalue
 
 [Run]
+#if DirExists(SourceDir + "\openvpn")
+; Official, Authenticode-verified OpenVPN Community MSI (verified at build time). Installed system-wide with its own signed drivers.
+Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\OpenVPN.msi"" /qn /norestart"; StatusMsg: "Installing OpenVPN Community (official signed build)..."; Flags: waituntilterminated; Tasks: openvpn
+#endif
 Filename: "{app}\TIREXNET.exe"; Description: "Launch TIREXNET"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]

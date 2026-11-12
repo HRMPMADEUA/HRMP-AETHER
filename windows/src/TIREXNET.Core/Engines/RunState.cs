@@ -15,6 +15,10 @@ public sealed class RunStateData
 {
     public List<RouteEntry> Routes { get; set; } = new();
     public string WireGuardTunnel { get; set; } = "";
+    public string AmneziaTunnel { get; set; } = "";
+    /// <summary>PID and start time (ticks) of the openvpn.exe TIREXNET launched, so recovery never kills somebody else's OpenVPN.</summary>
+    public int OpenVpnPid { get; set; }
+    public long OpenVpnStartTicks { get; set; }
     public bool TunActive { get; set; }
 }
 
@@ -68,7 +72,7 @@ public static class RunState
     public static bool HasPending()
     {
         var s = Load();
-        return s.Routes.Count > 0 || s.TunActive || !string.IsNullOrEmpty(s.WireGuardTunnel);
+        return s.Routes.Count > 0 || s.TunActive || !string.IsNullOrEmpty(s.WireGuardTunnel) || !string.IsNullOrEmpty(s.AmneziaTunnel) || s.OpenVpnPid != 0;
     }
 }
 
@@ -88,8 +92,12 @@ public static class Recovery
 
         await WireGuardEngine.RemoveTunnelServiceAsync().ConfigureAwait(false);
         WireGuardEngine.DeleteRuntimeConfig();
+        await AmneziaWgEngine.RemoveTunnelServiceAsync().ConfigureAwait(false);
+        AmneziaWgEngine.DeleteRuntimeConfig();
+        if (OpenVpnEngine.KillRecorded(state)) notes.Add("Stopped a leftover OpenVPN process started by TIREXNET");
+        OpenVpnEngine.DeleteRuntimeConfig();
 
-        foreach (var name in new[] { "tun2socks", "xray" })
+        foreach (var name in new[] { "tun2socks", "xray", "slipnet" })
         {
             foreach (var p in Process.GetProcessesByName(name))
             {

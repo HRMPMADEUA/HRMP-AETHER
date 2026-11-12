@@ -24,7 +24,10 @@ public static class ConfigValidator
         var errors = new List<string>();
         if (string.IsNullOrWhiteSpace(p.Name)) errors.Add("The profile needs a name.");
         if (string.IsNullOrWhiteSpace(p.Raw)) { errors.Add("The profile has no configuration data."); return errors; }
-        if (p.Engine == EngineKind.WireGuard) ValidateWireGuard(p.Raw, errors);
+        if (p.Engine == EngineKind.WireGuard) ValidateWireGuard(p.Raw, errors, amnezia: false);
+        else if (p.Engine == EngineKind.AmneziaWG) ValidateWireGuard(p.Raw, errors, amnezia: true);
+        else if (p.Engine == EngineKind.OpenVpn) errors.AddRange(OpenVpnConfig.Validate(p.Raw));
+        else if (p.Engine == EngineKind.SlipNet) errors.AddRange(SlipNetProfile.Validate(p.Raw));
         else if (p.Protocol == "xray-json") ValidateXrayJson(p.Raw, errors);
         else ValidateUri(p.Raw, errors);
         return errors;
@@ -133,17 +136,18 @@ public static class ConfigValidator
             if (!NetUtil.IsValidHostName(h)) errors.Add($"Invalid server address in the JSON: {h}");
     }
 
-    private static void ValidateWireGuard(string raw, List<string> errors)
+    internal static void ValidateWireGuard(string raw, List<string> errors, bool amnezia)
     {
         if (!WgConfig.TryParse(raw, out var cfg, out var err)) { errors.Add(err); return; }
 
-        foreach (var key in WgConfig.AmneziaKeys)
+        if (amnezia)
         {
-            if (cfg.Interface.Any(kv => kv.Key.Equals(key, StringComparison.Ordinal)))
-            {
-                errors.Add("This is an AmneziaWG configuration. This build only supports standard WireGuard.");
-                return;
-            }
+            errors.AddRange(AmneziaConfig.Validate(cfg));
+        }
+        else if (AmneziaConfig.HasObfuscation(cfg))
+        {
+            errors.Add("This configuration contains AmneziaWG obfuscation parameters (Jc, S1, H1 …). Import it as AmneziaWG so that they are applied.");
+            return;
         }
         foreach (var key in WgConfig.ScriptKeys)
         {

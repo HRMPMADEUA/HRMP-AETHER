@@ -237,12 +237,18 @@ namespace TIREXNET.UI
                 return;
             }
             var settings = AppServices.Settings.Current;
-            var needsAdmin = profile.Engine == EngineKind.WireGuard || settings.Mode == ConnectionMode.Vpn;
+            var unavailable = EngineCatalog.UnavailableReason(profile, settings);
+            if (unavailable != null)
+            {
+                Dialogs.Error(OwnerOrNull, unavailable);
+                return;
+            }
+            var needsAdmin = EngineCatalog.NeedsAdmin(profile, settings);
             if (needsAdmin && !Elevation.IsAdministrator())
             {
-                var why = profile.Engine == EngineKind.WireGuard
-                    ? "WireGuard needs administrator rights to install its tunnel service and network adapter."
-                    : "VPN mode needs administrator rights to create the TIREXNET network adapter and change routes.";
+                var why = profile.Engine is EngineKind.Xray or EngineKind.SlipNet
+                    ? "VPN mode needs administrator rights to create the TIREXNET network adapter and change routes."
+                    : $"{EngineCatalog.Get(profile.Engine).Name} needs administrator rights to create its network adapter and routes.";
                 if (Dialogs.Confirm(OwnerOrNull, why + "\n\nThe adapter, service and routes exist only while you are connected and are removed when you disconnect.\n\nRestart TIREXNET as administrator now?"))
                     RestartAsAdmin(true);
                 return;
@@ -465,8 +471,8 @@ namespace TIREXNET.UI
         private void UpdateModeHint()
         {
             var p = AppServices.Profiles.Selected;
-            if (p?.Engine == EngineKind.WireGuard)
-                ModeHint.Text = "WireGuard profiles always run as a full-device VPN (administrator required).";
+            if (p != null && p.Engine is not (EngineKind.Xray or EngineKind.SlipNet))
+                ModeHint.Text = $"{EngineCatalog.Get(p.Engine).Name} profiles always run as a full-device VPN with their own tunnel (administrator required).";
             else if (ModeVpn.IsChecked == true)
                 ModeHint.Text = "Full-device VPN: all IPv4 traffic goes through the tunnel (administrator required).";
             else
@@ -546,7 +552,7 @@ namespace TIREXNET.UI
             var dlg = new Microsoft.Win32.OpenFileDialog
             {
                 Title = "Import profile",
-                Filter = "Profiles (*.conf;*.json;*.txt)|*.conf;*.json;*.txt|All files (*.*)|*.*",
+                Filter = "Profiles (*.conf;*.ovpn;*.json;*.txt)|*.conf;*.ovpn;*.json;*.txt|All files (*.*)|*.*",
             };
             if (dlg.ShowDialog(this) != true) return;
             try
@@ -594,6 +600,63 @@ namespace TIREXNET.UI
             if (p.ReadOnly) { Dialogs.Info(this, "Profiles synced from your account are read-only."); return; }
             var name = Dialogs.Prompt(this, "Rename profile", "Profile name:", p.Name);
             if (!string.IsNullOrWhiteSpace(name)) AppServices.Profiles.Rename(p.Id, name!);
+        }
+
+        private bool _pinging;
+
+        /// <summary>Measures every profile (TCP connect or ICMP, see PingService), refreshes the list and returns the best connectable one.</summary>
+        private async Task<Profile?> RunPingAsync()
+        {
+            var all = AppServices.Profiles.All().ToList();
+            if (all.Count == 0)
+            {
+                Dialogs.Info(this, "There are no profiles to test.");
+                return null;
+            }
+            _pinging = true;
+            PingAllButton.IsEnabled = false;
+            SmartConnectButton.IsEnabled = false;
+            ProfileDetail.Text = $"Testing {all.Count} profile(s)…";
+            try
+            {
+                var results = await PingService.TestAllAsync(all);
+                var best = PingService.Best(results, AppServices.Settings.Current);
+                RefreshProfiles();
+                var ok = results.Count(r => r.Result.Kind == PingKind.Ok);
+                ProfileDetail.Text = $"Ping finished: {ok} of {results.Count} reachable." +
+                    (best == null ? " No connectable profile responded." : $" Fastest: {best.Name} ({best.PingMs} ms). Measured by TCP connect or ICMP; this does not prove the proxy or tunnel works.");
+                return best;
+            }
+            finally
+            {
+                _pinging = false;
+                PingAllButton.IsEnabled = true;
+                SmartConnectButton.IsEnabled = true;
+            }
+        }
+
+        private async void OnPingAll(object sender, RoutedEventArgs e)
+        {
+            if (_pinging) return;
+            await RunPingAsync();
+        }
+
+        private async void OnSmartConnect(object sender, RoutedEventArgs e)
+        {
+            if (_pinging) return;
+            if (AppServices.Manager.State is ConnectionState.Connected or ConnectionState.Connecting)
+            {
+                Dialogs.Info(this, "Disconnect first, then use Smart connect to pick the fastest profile.");
+                return;
+            }
+            var best = await RunPingAsync();
+            if (best == null)
+            {
+                Dialogs.Error(this, "Smart connect found no reachable profile that this installation can run.");
+                return;
+            }
+            AppServices.Profiles.SelectedId = best.Id;
+            await ConnectSelectedAsync();
         }
 
         private void OnEdit(object sender, RoutedEventArgs e)
@@ -789,12 +852,7 @@ namespace TIREXNET.UI
 
         private void RefreshEngineStatus()
         {
-            string Mark(bool ok) => ok ? "available" : "not installed";
-            EngineStatus.Text =
-                $"• Xray (VLESS, VMess, Trojan, Shadowsocks, Xray JSON): {Mark(XrayEngine.IsRuntimeAvailable)}\n" +
-                $"• VPN mode for Xray (tun2socks + Wintun): {Mark(XrayEngine.IsVpnRuntimeAvailable)}\n" +
-                $"• WireGuard: {Mark(WireGuardEngine.IsRuntimeAvailable)}\n" +
-                "• AmneziaWG, OpenVPN, SlipNet: not supported in this Windows build";
+            EngineStatus.Text = string.Join("\n", EngineCatalog.StatusLines());
         }
 
         private void OnDnsPreset(object sender, RoutedEventArgs e)

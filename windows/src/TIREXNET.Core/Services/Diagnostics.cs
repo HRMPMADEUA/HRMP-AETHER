@@ -45,7 +45,9 @@ public static class Diagnostics
         await Section("VPN runtime", () =>
         {
             Line($"VPN mode runtime (tun2socks + Wintun): {Mark(XrayEngine.IsVpnRuntimeAvailable)}");
-            Line($"WireGuard runtime: {Mark(WireGuardEngine.IsRuntimeAvailable)}");
+            foreach (var l in EngineCatalog.StatusLines()) Line(l.TrimStart('•', ' '));
+            var ovpn = OpenVpnEngine.FindExe();
+            Line("OpenVPN executable: " + (ovpn == null ? "not found" : Path.GetFileName(Path.GetDirectoryName(ovpn)) + "\\" + Path.GetFileName(ovpn)));
             return Task.CompletedTask;
         }).ConfigureAwait(false);
 

@@ -150,8 +150,8 @@ public sealed class ApiClient : IDisposable
     }
 
     /// <summary>
-    /// Turns the API list into profiles. AliPanel entries are always classic WireGuard (same rule as the Android app).
-    /// Entries this build cannot run (for example AmneziaWG) are reported in <paramref name="skipped"/>.
+    /// Turns the API list into profiles. AliPanel entries are always WireGuard-family (WireGuard, or AmneziaWG when the config carries obfuscation parameters).
+    /// Entries this build cannot parse are reported in <paramref name="skipped"/>.
     /// </summary>
     public static List<Profile> ToProfiles(IEnumerable<RemoteConfig> configs, string panel, List<string> skipped)
     {
@@ -161,14 +161,9 @@ public sealed class ApiClient : IDisposable
         {
             index++;
             var engineHint = c.Engine.Trim().ToUpperInvariant().Replace('-', '_').Replace(' ', '_');
-            if (engineHint is "AMNEZIAWG" or "AMNEZIA_WG" or "AWG")
-            {
-                skipped.Add($"{(string.IsNullOrEmpty(c.Name) ? $"Config {index}" : c.Name)}: AmneziaWG is not supported on Windows in this build.");
-                continue;
-            }
             var asWg = panel == PanelAliPanel || c.PanelId.Equals("ali", StringComparison.OrdinalIgnoreCase)
                 || c.PanelId.Equals("alipanel", StringComparison.OrdinalIgnoreCase)
-                || engineHint is "WIREGUARD" or "WIRE_GUARD" or "WG" or "WIREGUARD_TUNNEL"
+                || engineHint is "WIREGUARD" or "WIRE_GUARD" or "WG" or "WIREGUARD_TUNNEL" or "AMNEZIAWG" or "AMNEZIA_WG" or "AWG"
                 || WgConfig.LooksLikeWireGuard(c.Raw);
             var parsed = ProfileParser.ParseText(c.Raw, null);
             if (parsed.Profiles.Count == 0)
@@ -178,7 +173,7 @@ public sealed class ApiClient : IDisposable
             }
             foreach (var p in parsed.Profiles)
             {
-                if (asWg && p.Engine != EngineKind.WireGuard)
+                if (asWg && p.Engine is not (EngineKind.WireGuard or EngineKind.AmneziaWG))
                 {
                     skipped.Add($"{p.Name}: expected a WireGuard configuration.");
                     continue;

@@ -39,12 +39,19 @@ public sealed class ConnectionManager : IDisposable
         {
             ElevationNeeded = false;
             ActiveProfile = profile;
-            ActiveMode = profile.Engine == EngineKind.WireGuard ? ConnectionMode.Vpn : settings.Mode;
+            ActiveMode = EngineCatalog.EffectiveMode(profile, settings);
             Traffic = new TrafficSnapshot();
             ConnectedSinceUtc = null;
+            var unavailable = EngineCatalog.UnavailableReason(profile, settings);
+            if (unavailable != null)
+            {
+                _engine = null;
+                Set(ConnectionState.Error, unavailable);
+                return;
+            }
             Set(ConnectionState.Connecting, $"Connecting to {profile.Name}…");
             _connectCts = new CancellationTokenSource();
-            IEngine engine = profile.Engine == EngineKind.WireGuard ? new WireGuardEngine() : new XrayEngine();
+            IEngine engine = EngineCatalog.Create(profile.Engine);
             _engine = engine;
             engine.Failed += msg => _ = OnEngineFailedAsync(engine, msg);
             try
@@ -75,8 +82,7 @@ public sealed class ConnectionManager : IDisposable
                 return;
             }
             ConnectedSinceUtc = DateTime.UtcNow;
-            var what = profile.Engine == EngineKind.WireGuard ? "WireGuard VPN"
-                : settings.Mode == ConnectionMode.Vpn ? "VPN mode" : $"Proxy mode · SOCKS5 127.0.0.1:{settings.SocksPort}";
+            var what = EngineCatalog.Describe(profile, settings);
             Set(ConnectionState.Connected, $"{profile.Name} · {what}");
             StartStatsLoop(engine);
         }

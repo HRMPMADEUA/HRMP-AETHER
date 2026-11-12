@@ -8,7 +8,7 @@ public static class Redactor
     private static readonly object Gate = new();
     private static readonly HashSet<string> Secrets = new(StringComparer.Ordinal);
 
-    private static readonly Regex UriRx = new(@"\b(vless|vmess|trojan|ss|wireguard)://\S+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex UriRx = new(@"\b(vless|vmess|trojan|ss|wireguard|slipnet-enc|slipnet)://\S+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex BearerRx = new(@"(Bearer\s+)[A-Za-z0-9\-\._~\+/]+=*", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex UuidRx = new(@"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", RegexOptions.Compiled);
     private static readonly Regex KeyRx = new(@"(?i)\b(PrivateKey|PresharedKey|password|passwd|token|secret)(\s*[=:]\s*)\S+", RegexOptions.Compiled);

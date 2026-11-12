@@ -205,7 +205,7 @@ public sealed class ProfileStore
     {
         var safe = new string(p.Name.Select(c => char.IsLetterOrDigit(c) || c is '-' or '_' or ' ' ? c : '_').ToArray()).Trim();
         if (safe.Length == 0) safe = "profile";
-        var ext = p.Engine == EngineKind.WireGuard ? ".conf" : (p.Protocol == "xray-json" ? ".json" : ".txt");
+        var ext = p.Engine is EngineKind.WireGuard or EngineKind.AmneziaWG ? ".conf" : p.Engine == EngineKind.OpenVpn ? ".ovpn" : (p.Protocol == "xray-json" ? ".json" : ".txt");
         return safe + ext;
     }
 }

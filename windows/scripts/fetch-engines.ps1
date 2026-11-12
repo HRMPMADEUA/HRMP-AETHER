@@ -5,7 +5,7 @@
   Verification order for every archive:
     1. sha256 pinned in engines.lock.json (when not empty)  -> must match
     2. checksum published by the upstream project           -> must match
-    3. Authenticode signature (WireGuard MSI)               -> must be valid and signed by WireGuard
+    3. Authenticode signature (WireGuard / OpenVPN MSI)     -> must be valid and signed by the expected publisher
   FAIL SAFE: a runtime with neither a pinned SHA-256 nor an upstream checksum is NOT accepted (the build stops),
   unless it is explicitly marked -SignatureOnly and its Authenticode signature is verified afterwards (WireGuard MSI).
   A hash computed from the download itself is never treated as verification.
@@ -173,6 +173,85 @@ $exeSig = Get-AuthenticodeSignature $wg.FullName
 if ($exeSig.Status -ne 'Valid') { throw "wireguard.exe has no valid signature (status: $($exeSig.Status))." }
 Copy-Item $wg.FullName (Join-Path $gDir 'wireguard.exe') -Force
 Get-License "https://raw.githubusercontent.com/WireGuard/wireguard-windows/v$($g.version)/COPYING" 'WireGuard-windows-MIT.txt'
+
+# ------------------------------------------------------------------ AmneziaWG (required)
+$a = $lock.amneziawg
+$aDir = Join-Path $engines 'amneziawg'
+New-Item -ItemType Directory -Force -Path $aDir | Out-Null
+$aMsi = Join-Path $work $a.asset
+Get-Remote "https://github.com/amnezia-vpn/amneziawg-windows-client/releases/download/$($a.version)/$($a.asset)" $aMsi
+Confirm-Hash "AmneziaWG $($a.version)" $aMsi $a.sha256 ''
+$asig = Get-AuthenticodeSignature $aMsi
+if ($asig.Status -ne 'Valid') { throw "The AmneziaWG installer signature is not valid (status: $($asig.Status))." }
+$report.Add("- AmneziaWG MSI: Authenticode signature valid ($($asig.SignerCertificate.Subject))")
+$aTmp = Join-Path $work 'amneziawg'
+if (Test-Path $aTmp) { Remove-Item $aTmp -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $aTmp | Out-Null
+$ap = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/a', "`"$aMsi`"", '/qn', "TARGETDIR=`"$aTmp`"") -Wait -PassThru
+if ($ap.ExitCode -ne 0) { throw "Extracting the AmneziaWG MSI failed (msiexec exit code $($ap.ExitCode))." }
+foreach ($f in 'amneziawg.exe', 'awg.exe', 'wintun.dll') {
+  $found = Get-ChildItem $aTmp -Recurse -Filter $f | Select-Object -First 1
+  if (-not $found) { throw "$f was not found in the AmneziaWG MSI." }
+  if ($f -like '*.exe') {
+    $fs = Get-AuthenticodeSignature $found.FullName
+    if ($fs.Status -ne 'Valid') { throw "$f has no valid signature (status: $($fs.Status))." }
+  }
+  Copy-Item $found.FullName (Join-Path $aDir $f) -Force
+}
+Get-License "https://raw.githubusercontent.com/amnezia-vpn/amneziawg-windows-client/$($a.version)/COPYING" 'AmneziaWG-windows-MIT.txt'
+
+# ------------------------------------------------------------------ OpenVPN Community installer (optional: staged for the installer)
+$o = $lock.openvpn
+$oDir = Join-Path $Stage 'openvpn'
+try {
+  New-Item -ItemType Directory -Force -Path $oDir | Out-Null
+  $oMsi = Join-Path $work $o.asset
+  Get-Remote "https://swupdate.openvpn.org/community/releases/$($o.asset)" $oMsi
+  Confirm-Hash "OpenVPN $($o.version)" $oMsi $o.sha256 '' -SignatureOnly
+  $osig = Get-AuthenticodeSignature $oMsi
+  if ($osig.Status -ne 'Valid' -or $osig.SignerCertificate.Subject -notmatch 'OpenVPN') {
+    throw "The OpenVPN installer signature is not valid (status: $($osig.Status), signer: $($osig.SignerCertificate.Subject))."
+  }
+  Copy-Item $oMsi (Join-Path $oDir 'OpenVPN.msi') -Force
+  $report.Add("- OpenVPN $($o.version) MSI: Authenticode signature valid ($($osig.SignerCertificate.Subject)); installed by the TIREXNET installer")
+  Get-License 'https://raw.githubusercontent.com/OpenVPN/openvpn/master/COPYING' 'OpenVPN-GPL-2.0.txt'
+} catch {
+  if (Test-Path $oDir) { Remove-Item $oDir -Recurse -Force -ErrorAction SilentlyContinue }
+  Write-Warning "OpenVPN was NOT bundled: $_"
+  $report.Add("- OpenVPN: NOT bundled in this build ($($_.Exception.Message)). OpenVPN profiles will report that OpenVPN is not installed.")
+}
+
+# ------------------------------------------------------------------ SlipNet (optional: built from the pinned upstream commit)
+$sn = $lock.slipnet
+$snDir = Join-Path $engines 'slipnet'
+try {
+  $src = Join-Path $work 'slipnet-src'
+  if (Test-Path $src) { Remove-Item $src -Recurse -Force }
+  git clone --quiet $sn.repo $src
+  if ($LASTEXITCODE -ne 0) { throw 'git clone of SlipNet failed.' }
+  git -C $src checkout --quiet $sn.commit
+  if ($LASTEXITCODE -ne 0) { throw 'git checkout of the pinned SlipNet commit failed.' }
+  $head = (git -C $src rev-parse HEAD).Trim()
+  if ($head -ne $sn.commit) { throw "SlipNet commit mismatch: expected $($sn.commit), got $head" }
+  Copy-Item (Join-Path $src 'app\src\main\res\raw\resolvers.txt') (Join-Path $src 'cli\resolvers.txt') -Force
+  New-Item -ItemType Directory -Force -Path $snDir | Out-Null
+  Push-Location (Join-Path $src 'cli')
+  try {
+    $env:CGO_ENABLED = '0'; $env:GOOS = 'windows'; $env:GOARCH = 'amd64'
+    go build -trimpath -ldflags "-s -w -X main.version=$($sn.commit.Substring(0, 8))" -o (Join-Path $snDir 'slipnet.exe') .
+    if ($LASTEXITCODE -ne 0) { throw 'go build of SlipNet failed.' }
+  } finally {
+    Pop-Location
+    Remove-Item Env:\GOOS, Env:\GOARCH, Env:\CGO_ENABLED -ErrorAction SilentlyContinue
+  }
+  if (-not (Test-Path (Join-Path $snDir 'slipnet.exe'))) { throw 'slipnet.exe was not produced.' }
+  Copy-Item (Join-Path $src 'LICENSE') (Join-Path $licenses 'SlipNet-AGPL-3.0.txt') -Force
+  $report.Add("- SlipNet: built from $($sn.repo) at commit $($sn.commit) (AGPL-3.0; source offer in THIRD_PARTY_NOTICES.md)")
+} catch {
+  if (Test-Path $snDir) { Remove-Item $snDir -Recurse -Force -ErrorAction SilentlyContinue }
+  Write-Warning "SlipNet was NOT built: $_"
+  $report.Add("- SlipNet: NOT built in this build ($($_.Exception.Message)). SlipNet profiles will report that the runtime is not installed.")
+}
 
 # ------------------------------------------------------------------ report
 $summary = @("### Third-party runtimes", "") + $report

@@ -12,6 +12,9 @@ backend contract, the profile formats and the visual identity.
 | Proxy mode | Real: SOCKS5 `127.0.0.1:10880` and HTTP `127.0.0.1:10881` (loopback only). **Not** a full-device VPN. Optional Windows system proxy, restored on disconnect |
 | VPN mode (Xray) | Real: tun2socks + Wintun adapter `TIREXNET`, routes via two `/1` routes, server and bypass routes pinned to the physical gateway. Needs administrator rights |
 | WireGuard | Real: official `wireguard.exe` tunnel service (`/installtunnelservice`). Standard `.conf` files. Needs administrator rights |
+| AmneziaWG | Real: official `amneziawg.exe` tunnel service with Jc/Jmin/Jmax, S1-S4, H1-H4, I1-I5. Needs administrator rights |
+| OpenVPN | Real: official signed `openvpn.exe` supervised through its management interface. Needs administrator rights |
+| SlipNet | Real: upstream CLI (DNSTT, NoizDNS, VayDNS, SSH, SOCKS5, VLESS, DoH) as local SOCKS5, optionally full VPN via tun2socks |
 | Profiles | Import from clipboard, link, file (`.conf`, `.json`, `.txt`, subscription bodies); rename, edit, export, delete, select. Stored with Windows DPAPI (current user) |
 | Account | Login / account / subscription / config sync with the existing backend (see below) |
 | DNS, MTU, bypass networks | DNS (Xray resolver, WireGuard `DNS`, tunnel adapter DNS), MTU (tun2socks adapter, WireGuard `MTU`), bypass IPv4 CIDRs in Xray VPN mode |
@@ -31,18 +34,19 @@ Same rules as Android: AliPanel entries are classic WireGuard; PasarGuard entrie
 tokens are hard-coded; tokens are stored with DPAPI and redacted in logs.
 
 **Not implemented (no verified contract was needed or available):** account registration (`/api/register`), the server
-list cache, ping tests.
+list cache.
 
-## Engines that are NOT available on Windows in this build
+## Engines
 
-| Engine | Reason |
-|---|---|
-| AmneziaWG | No official, redistributable Windows backend was integrated. AmneziaWG configs are detected and rejected with a clear message instead of being run as plain WireGuard |
-| OpenVPN | Not integrated (would need OpenVPN + the Windows TAP/wintun driver package and its own service handling) |
-| SlipNet | The Android runtime is JNI/Android-specific; no Windows runtime exists in the repository |
-| VPN mode for IPv6 | The tunnel is IPv4 only (IPv6 traffic is not routed through it) |
+All five Android engines have a Windows runtime: **Xray, WireGuard, AmneziaWG, OpenVPN and SlipNet**. Details (runtime, driver,
+protocols, modes, permissions, limits) are in [`docs/ENGINES.md`](docs/ENGINES.md); the Android feature comparison is in
+[`docs/ANDROID_PARITY.md`](docs/ANDROID_PARITY.md).
 
-The UI never shows an engine whose runtime is missing as available (Settings → Engines, Diagnostics).
+Genuine limits: SlipNet's upstream command-line client cannot run Slipstream, Snowflake or NaiveProxy profiles; split tunneling
+by application, country flags and notifications are not implemented; the Xray/SlipNet tunnel is IPv4 only.
+
+The UI never shows an engine whose runtime is missing as available (Settings → Engines, Diagnostics). OpenVPN and SlipNet are
+optional build-time components: if their download/build fails, the build continues and the verification report says so.
 
 ## Windows 7
 
@@ -99,7 +103,8 @@ Status: these changes were made without access to a Windows machine or to GitHub
 
 `scripts/engines.lock.json` pins every downloaded runtime. `scripts/fetch-engines.ps1` refuses (fails the build) to use a
 binary that has neither a pinned SHA-256 nor an upstream checksum. The WireGuard MSI is accepted only with a valid
-WireGuard Authenticode signature; Wintun additionally needs a valid signed `wintun.dll`.
+WireGuard Authenticode signature; the AmneziaWG MSI needs its pinned SHA-256 plus a valid signature; the OpenVPN MSI needs a valid
+signature whose signer is OpenVPN; SlipNet is compiled from a pinned commit (verified with `git rev-parse`); Wintun additionally needs a valid signed `wintun.dll`.
 
 * Xray-core v26.10.21: pinned to the SHA-256 published in the official `Xray-windows-64.zip.dgst` of that release.
 * tun2socks v2.5.2 publishes no checksum file; the pinned value was measured from the official release asset.

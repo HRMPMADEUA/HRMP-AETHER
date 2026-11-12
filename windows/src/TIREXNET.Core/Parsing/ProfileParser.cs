@@ -34,6 +34,13 @@ public static class ProfileParser
             return result;
         }
 
+        if (OpenVpnConfig.LooksLikeOpenVpn(text))
+        {
+            if (TryParseOpenVpn(text, stem, out var ovpn, out var err)) result.Profiles.Add(ovpn!);
+            else result.Errors.Add(err);
+            return result;
+        }
+
         if (text.StartsWith('{') || text.StartsWith('['))
         {
             ParseJsonText(text, stem, result);
@@ -41,6 +48,24 @@ public static class ProfileParser
         }
 
         var lines = SplitLines(text);
+        if (lines.Any(SlipNetProfile.LooksLikeSlipNet))
+        {
+            foreach (var line in lines)
+            {
+                if (SlipNetProfile.LooksLikeSlipNet(line))
+                {
+                    if (TryParseSlipNet(line, out var sn, out var snErr)) result.Profiles.Add(sn!);
+                    else result.Errors.Add(snErr);
+                }
+                else if (HasKnownScheme(line))
+                {
+                    if (TryParseUri(line, out var up, out var upErr)) result.Profiles.Add(up!);
+                    else result.Errors.Add(upErr);
+                }
+                else result.Errors.Add($"Unsupported or unrecognized entry: {Truncate(line, 40)}");
+            }
+            return result;
+        }
         if (lines.Count == 1 && !HasKnownScheme(lines[0]))
         {
             // Possibly a base64 subscription body.
@@ -62,7 +87,7 @@ public static class ProfileParser
             else result.Errors.Add(error);
         }
         if (result.Profiles.Count == 0 && result.Errors.Count == 0)
-            result.Errors.Add("No supported profile found. Supported: vless://, vmess://, trojan://, ss://, Xray JSON and WireGuard .conf.");
+            result.Errors.Add("No supported profile found. Supported: vless://, vmess://, trojan://, ss://, slipnet://, Xray JSON, WireGuard/AmneziaWG .conf and OpenVPN .ovpn.");
         return result;
     }
 
@@ -433,14 +458,58 @@ public static class ProfileParser
         profile = null;
         if (!WgConfig.TryParse(text, out var cfg, out error)) return false;
         cfg.TryGetEndpoint(out var host, out var port);
+        var amnezia = AmneziaConfig.HasObfuscation(cfg);
+        var label = amnezia ? "AmneziaWG" : "WireGuard";
+        var raw = amnezia ? AmneziaConfig.Sanitize(text.Trim(), out _) : text.Trim();
         profile = new Profile
         {
-            Name = !string.IsNullOrWhiteSpace(cfg.Name) ? cfg.Name! : (!string.IsNullOrWhiteSpace(stem) ? stem! : (host.Length > 0 ? $"WireGuard {host}" : "WireGuard")),
-            Engine = EngineKind.WireGuard,
-            Protocol = "wireguard",
+            Name = !string.IsNullOrWhiteSpace(cfg.Name) ? cfg.Name! : (!string.IsNullOrWhiteSpace(stem) ? stem! : (host.Length > 0 ? $"{label} {host}" : label)),
+            Engine = amnezia ? EngineKind.AmneziaWG : EngineKind.WireGuard,
+            Protocol = amnezia ? "amneziawg" : "wireguard",
+            Server = host,
+            Port = port,
+            Raw = raw,
+        };
+        return true;
+    }
+
+    // ---------------------------------------------------------------- OpenVPN
+
+    public static bool TryParseOpenVpn(string text, string? stem, out Profile? profile, out string error)
+    {
+        profile = null;
+        error = "";
+        if (!OpenVpnConfig.TryGetFirstRemote(text, out var host, out var port))
+        {
+            error = "The OpenVPN profile has no \"remote\" line.";
+            return false;
+        }
+        profile = new Profile
+        {
+            Name = !string.IsNullOrWhiteSpace(stem) ? stem! : $"OpenVPN {host}",
+            Engine = EngineKind.OpenVpn,
+            Protocol = "openvpn",
             Server = host,
             Port = port,
             Raw = text.Trim(),
+        };
+        return true;
+    }
+
+    // ---------------------------------------------------------------- SlipNet
+
+    public static bool TryParseSlipNet(string link, out Profile? profile, out string error)
+    {
+        profile = null;
+        if (!SlipNetProfile.TryParse(link, out var sn, out error) || sn == null) return false;
+        var hosts = SlipNetProfile.ServerHosts(link);
+        profile = new Profile
+        {
+            Name = sn.Name,
+            Engine = EngineKind.SlipNet,
+            Protocol = string.IsNullOrEmpty(sn.TunnelType) ? "slipnet" : sn.TunnelType,
+            Server = hosts.FirstOrDefault() ?? "",
+            Raw = link.Trim(),
         };
         return true;
     }
@@ -473,7 +542,17 @@ public static class ProfileParser
     /// <summary>Secret strings of a profile that must never reach the logs.</summary>
     public static IEnumerable<string> CollectSecrets(Profile p)
     {
-        if (p.Engine == EngineKind.WireGuard)
+        if (p.Engine == EngineKind.OpenVpn)
+        {
+            foreach (var x in OpenVpnConfig.Secrets(p.Raw)) yield return x;
+            yield break;
+        }
+        if (p.Engine == EngineKind.SlipNet)
+        {
+            foreach (var x in SlipNetProfile.Secrets(p.Raw)) yield return x;
+            yield break;
+        }
+        if (p.Engine is EngineKind.WireGuard or EngineKind.AmneziaWG)
         {
             if (WgConfig.TryParse(p.Raw, out var cfg, out _))
             {

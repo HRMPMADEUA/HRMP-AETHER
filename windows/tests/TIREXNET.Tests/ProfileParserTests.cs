@@ -192,13 +192,13 @@ public class ProfileParserTests
     }
 
     [Fact]
-    public void ApiClient_AmneziaEntries_AreSkippedWithReason()
+    public void ApiClient_AmneziaEntries_AreAcceptedAsWireGuardFamily()
     {
         var configs = new[] { new TIREXNET.Core.Services.RemoteConfig { Raw = WgConf, Name = "AWG", Engine = "amneziawg" } };
         var skipped = new List<string>();
         var list = TIREXNET.Core.Services.ApiClient.ToProfiles(configs, "alipanel", skipped);
-        Assert.Empty(list);
-        Assert.Single(skipped);
+        Assert.Single(list);
+        Assert.Empty(skipped);
     }
 
     [Fact]

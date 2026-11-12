@@ -2,7 +2,8 @@ using System.Text.Json.Serialization;
 
 namespace TIREXNET.Core.Models;
 
-public enum EngineKind { Xray, WireGuard }
+/// <summary>Values are persisted as numbers: only ever append.</summary>
+public enum EngineKind { Xray = 0, WireGuard = 1, AmneziaWG = 2, OpenVpn = 3, SlipNet = 4 }
 
 public enum ConnectionMode { Proxy, Vpn }
 
@@ -14,7 +15,7 @@ public sealed class Profile
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Name { get; set; } = "Unnamed";
     public EngineKind Engine { get; set; } = EngineKind.Xray;
-    /// <summary>vless, vmess, trojan, shadowsocks, xray-json or wireguard.</summary>
+    /// <summary>vless, vmess, trojan, shadowsocks, xray-json, wireguard, amneziawg, openvpn or slipnet.</summary>
     public string Protocol { get; set; } = "";
     public string Server { get; set; } = "";
     public int Port { get; set; }
@@ -26,7 +27,14 @@ public sealed class Profile
 
     /// <summary>Two-letter protocol code shown in the round badge of profile lists.</summary>
     [JsonIgnore]
-    public string ProtocolCode => (Engine == EngineKind.WireGuard ? "wireguard" : Protocol) switch
+    public string ProtocolCode => (Engine switch
+    {
+        EngineKind.WireGuard => "wireguard",
+        EngineKind.AmneziaWG => "amneziawg",
+        EngineKind.OpenVpn => "openvpn",
+        EngineKind.SlipNet => "slipnet",
+        _ => Protocol,
+    }) switch
     {
         "vless" => "VL",
         "vmess" => "VM",
@@ -34,10 +42,24 @@ public sealed class Profile
         "shadowsocks" => "SS",
         "xray-json" => "XJ",
         "wireguard" => "WG",
+        "amneziawg" => "AW",
+        "openvpn" => "OV",
+        "slipnet" => "SN",
         _ => "TX",
     };
 
-    [JsonIgnore] public string Badge => Engine == EngineKind.WireGuard ? "WireGuard" : "Xray";
+    [JsonIgnore]
+    public string Badge => Engine switch
+    {
+        EngineKind.WireGuard => "WireGuard",
+        EngineKind.AmneziaWG => "AmneziaWG",
+        EngineKind.OpenVpn => "OpenVPN",
+        EngineKind.SlipNet => "SlipNet",
+        _ => "Xray",
+    };
+
+    /// <summary>Last latency measurement (not persisted): -1 unknown, -2 timeout, -3 failed, otherwise milliseconds.</summary>
+    [JsonIgnore] public int PingMs { get; set; } = -1;
 
     [JsonIgnore]
     public string SourceLabel => Source switch
@@ -53,7 +75,14 @@ public sealed class Profile
         get
         {
             var proto = string.IsNullOrEmpty(Protocol) ? "" : Protocol.ToUpperInvariant();
-            return string.IsNullOrEmpty(proto) ? $"{Badge} · {SourceLabel}" : $"{Badge} · {proto} · {SourceLabel}";
+            var text = string.IsNullOrEmpty(proto) ? $"{Badge} · {SourceLabel}" : $"{Badge} · {proto} · {SourceLabel}";
+            return PingMs switch
+            {
+                > 0 => $"{text} · {PingMs} ms",
+                -2 => text + " · timeout",
+                -3 => text + " · unreachable",
+                _ => text,
+            };
         }
     }
 

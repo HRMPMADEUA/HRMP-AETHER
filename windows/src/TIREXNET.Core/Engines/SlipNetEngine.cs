@@ -1,0 +1,153 @@
+using System.Net;
+using System.Net.NetworkInformation;
+using TIREXNET.Core.Models;
+using TIREXNET.Core.Parsing;
+
+namespace TIREXNET.Core.Engines;
+
+/// <summary>
+/// SlipNet through its upstream Go command-line client (built for Windows from a pinned commit): the client provides a local
+/// SOCKS5 proxy for the DNSTT / NoizDNS / VayDNS / SSH / SOCKS5 / VLESS / DoH tunnels. VPN mode puts tun2socks + Wintun on top.
+/// </summary>
+public sealed class SlipNetEngine : IEngine
+{
+    private ManagedProcess? _proc;
+    private VpnTunnel? _tunnel;
+    private bool _stopping;
+    private bool _vpn;
+
+    public string Name => "SlipNet";
+    public event Action<string>? Failed;
+
+    public static bool IsRuntimeAvailable => File.Exists(AppPaths.SlipNetExe);
+
+    /// <summary>The upstream client prints this when the tunnel is established and the local proxy accepts connections.</summary>
+    internal const string ReadyMarker = "Connected! SOCKS5 proxy listening";
+
+    internal static string[] BuildArgs(string link, int port) => new[] { "--host", "127.0.0.1", "--port", port.ToString(System.Globalization.CultureInfo.InvariantCulture), link };
+
+    public async Task StartAsync(Profile profile, AppSettings settings, CancellationToken ct)
+    {
+        _stopping = false;
+        var problems = ConfigValidator.Validate(profile);
+        if (problems.Count > 0) throw new EngineException(problems[0]);
+        var settingProblems = ConfigValidator.ValidateSettings(settings);
+        if (settingProblems.Count > 0) throw new EngineException("Settings are not valid: " + settingProblems[0]);
+        if (!IsRuntimeAvailable) throw new EngineException("The SlipNet runtime is missing from this installation. Reinstall TIREXNET.");
+        _vpn = settings.Mode == ConnectionMode.Vpn;
+        if (_vpn)
+        {
+            if (!XrayEngine.IsVpnRuntimeAvailable && !(File.Exists(AppPaths.Tun2SocksExe) && File.Exists(AppPaths.WintunDll)))
+                throw new EngineException("VPN mode needs tun2socks and Wintun, which are missing from this installation.");
+            if (!Elevation.IsAdministrator()) throw new ElevationRequiredException("VPN mode needs administrator rights to create the network adapter and routes.");
+        }
+        if (!NetUtil.IsPortFree(settings.SocksPort)) throw new EngineException($"Port {settings.SocksPort} is already in use. Pick another SOCKS5 port in Settings.");
+        foreach (var s in SlipNetProfile.Secrets(profile.Raw)) Redactor.AddSecret(s);
+
+        List<IPAddress> serverIps = new();
+        if (_vpn) serverIps = await ResolveAsync(SlipNetProfile.ServerHosts(profile.Raw), ct).ConfigureAwait(false);
+
+        Log.Info($"Starting SlipNet ({(_vpn ? "VPN" : "proxy")} mode).");
+        var ready = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var proc = ManagedProcess.Start("SlipNet", AppPaths.SlipNetExe, BuildArgs(profile.Raw.Trim(), settings.SocksPort), AppPaths.SlipNetDir);
+        _proc = proc;
+        proc.OutputLine += l =>
+        {
+            Log.Info("[slipnet] " + l);
+            if (l.Contains(ReadyMarker, StringComparison.Ordinal)) ready.TrySetResult(true);
+        };
+        proc.UnexpectedExit += code =>
+        {
+            var msg = $"SlipNet stopped unexpectedly (exit code {code}). {proc.LastLines()}";
+            if (!ready.TrySetException(new EngineException(msg))) RaiseFailed(msg);
+        };
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            using var r1 = ct.Register(() => ready.TrySetCanceled());
+            using var r2 = timeout.Token.Register(() => ready.TrySetException(new EngineException("SlipNet did not establish its tunnel within 60 seconds. " + proc.LastLines())));
+            await ready.Task.ConfigureAwait(false);
+            Log.Info($"SlipNet is listening on 127.0.0.1:{settings.SocksPort} (SOCKS5).");
+            if (_vpn)
+            {
+                _tunnel = new VpnTunnel();
+                _tunnel.Failed += RaiseFailed;
+                await _tunnel.StartAsync(serverIps, settings, ct).ConfigureAwait(false);
+            }
+        }
+        catch
+        {
+            await StopAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private static async Task<List<IPAddress>> ResolveAsync(List<string> hosts, CancellationToken ct)
+    {
+        var ips = new List<IPAddress>();
+        foreach (var host in hosts)
+        {
+            if (NetUtil.TryParseIp(host, out var ip))
+            {
+                if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork) ips.Add(ip);
+                continue;
+            }
+            try
+            {
+                var addrs = await Dns.GetHostAddressesAsync(host, ct).ConfigureAwait(false);
+                ips.AddRange(addrs.Where(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork));
+            }
+            catch (System.Net.Sockets.SocketException ex)
+            {
+                throw new EngineException($"Could not resolve an IPv4 address for \"{host}\" ({ex.Message.TrimEnd('.')}). Use Proxy mode or check your connection.");
+            }
+        }
+        if (ips.Count == 0) throw new EngineException("VPN mode needs at least one IPv4 server or resolver address in the SlipNet profile. Use Proxy mode instead.");
+        return ips.Distinct().ToList();
+    }
+
+    private void RaiseFailed(string message)
+    {
+        if (_stopping) return;
+        Failed?.Invoke(message);
+    }
+
+    public async Task StopAsync()
+    {
+        _stopping = true;
+        try
+        {
+            if (_tunnel != null)
+            {
+                await _tunnel.StopAsync().ConfigureAwait(false);
+                _tunnel = null;
+            }
+        }
+        finally
+        {
+            if (_proc != null)
+            {
+                await _proc.StopAsync().ConfigureAwait(false);
+                _proc.Dispose();
+                _proc = null;
+            }
+        }
+    }
+
+    /// <summary>The SlipNet client has no statistics interface: totals come from the Wintun adapter in VPN mode, and are unavailable in proxy mode.</summary>
+    public Task<(long Upload, long Download)> QueryTotalsAsync()
+    {
+        if (!_vpn) return Task.FromResult((0L, 0L));
+        try
+        {
+            var nic = NetworkInterface.GetAllNetworkInterfaces().FirstOrDefault(n => n.Name == VpnTunnel.AdapterName);
+            if (nic == null) return Task.FromResult((0L, 0L));
+            var s = nic.GetIPv4Statistics();
+            return Task.FromResult((s.BytesSent, s.BytesReceived));
+        }
+        catch (NetworkInformationException)
+        {
+            return Task.FromResult((0L, 0L));
+        }
+    }
+}

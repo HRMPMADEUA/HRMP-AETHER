@@ -241,6 +241,8 @@
             <Button Content="Paste from clipboard" Style="{StaticResource NeonButton}" Click="OnImportClipboard" />
             <Button Content="Add link…" Style="{StaticResource GhostButton}" Click="OnImportUri" />
             <Button Content="Import file…" Style="{StaticResource GhostButton}" Click="OnImportFile" />
+            <Button x:Name="PingAllButton" Content="Ping all" Style="{StaticResource GhostButton}" Click="OnPingAll" />
+            <Button x:Name="SmartConnectButton" Content="Smart connect" Style="{StaticResource GhostButton}" Click="OnSmartConnect" />
             <Button Content="Rename" Style="{StaticResource GhostButton}" Click="OnRename" />
             <Button Content="Edit" Style="{StaticResource GhostButton}" Click="OnEdit" />
             <Button Content="Export" Style="{StaticResource GhostButton}" Click="OnExport" />
@@ -249,7 +251,7 @@
           <Border Grid.Row="2" Style="{StaticResource GlassCard}">
             <Grid>
               <ListBox x:Name="ProfilesList" ItemTemplate="{StaticResource ProfileTemplate}" SelectionChanged="OnProfilesSelectionChanged" />
-              <TextBlock x:Name="ProfilesEmptyHint" Text="No profiles yet. Paste a vless://, vmess://, trojan:// or ss:// link, import a WireGuard .conf or Xray JSON file, or sign in on the Account page."
+              <TextBlock x:Name="ProfilesEmptyHint" Text="No profiles yet. Paste a vless://, vmess://, trojan://, ss:// or slipnet:// link, import a WireGuard / AmneziaWG .conf, OpenVPN .ovpn or Xray JSON file, or sign in on the Account page."
                          Style="{StaticResource Caption}" TextWrapping="Wrap" TextAlignment="Center" MaxWidth="420" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed" />
             </Grid>
           </Border>
