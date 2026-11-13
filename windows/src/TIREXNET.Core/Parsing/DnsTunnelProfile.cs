@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -211,9 +212,96 @@ public static class DnsTunnelProfile
     {
         var lines = Split(value);
         if (lines.Count == 0 || lines.Count > 100 ||
-            lines.Any(x => x.Length > 160 || x.Any(char.IsWhiteSpace)))
+            lines.Any(x => x.Length > 160 || x.Any(char.IsWhiteSpace) ||
+                           !IsResolverEndpoint(x)))
             return "";
         return string.Join("\n", lines);
+    }
+
+    // Matches Android EngineProfiles.isResolverEndpoint:
+    // IPv4 with optional port, bracketed IPv6 with optional port,
+    // or an unbracketed IPv6 literal without a port.
+    private static bool IsResolverEndpoint(string value)
+    {
+        value = value.Trim();
+        if (value.Length == 0) return false;
+
+        string host;
+        string? portText = null;
+
+        if (value.StartsWith("[", StringComparison.Ordinal))
+        {
+            int close = value.IndexOf(']');
+            if (close <= 1) return false;
+
+            host = value.Substring(1, close - 1);
+            string tail = value[(close + 1)..];
+
+            if (tail.Length > 0)
+            {
+                if (!tail.StartsWith(":", StringComparison.Ordinal) ||
+                    tail.Length == 1)
+                    return false;
+                portText = tail[1..];
+            }
+
+            if (!IPAddress.TryParse(host, out var ipv6) ||
+                ipv6.AddressFamily != AddressFamily.InterNetworkV6)
+                return false;
+        }
+        else
+        {
+            int colonCount = value.Count(c => c == ':');
+
+            if (colonCount >= 2)
+            {
+                host = value;
+                if (!IPAddress.TryParse(host, out var ipv6) ||
+                    ipv6.AddressFamily != AddressFamily.InterNetworkV6)
+                    return false;
+            }
+            else
+            {
+                if (colonCount == 1)
+                {
+                    int separator = value.IndexOf(':');
+                    host = value[..separator];
+                    portText = value[(separator + 1)..];
+                    if (portText.Length == 0) return false;
+                }
+                else
+                {
+                    host = value;
+                }
+
+                if (!IsStrictIpv4(host)) return false;
+            }
+        }
+
+        if (portText == null) return true;
+
+        return int.TryParse(
+            portText,
+            System.Globalization.NumberStyles.None,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out int port) && port is >= 1 and <= 65535;
+    }
+
+    private static bool IsStrictIpv4(string value)
+    {
+        var parts = value.Split('.');
+        if (parts.Length != 4) return false;
+
+        foreach (var part in parts)
+        {
+            if (part.Length == 0 || part.Length > 3) return false;
+            if (part.Length > 1 && part[0] == '0') return false;
+            if (!part.All(c => c >= '0' && c <= '9')) return false;
+            if (!int.TryParse(part, out int octet) || octet > 255)
+                return false;
+        }
+
+        return true;
     }
 
     private static bool ValidDomain(string value) =>
