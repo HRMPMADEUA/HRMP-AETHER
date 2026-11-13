@@ -918,6 +918,72 @@ namespace TIREXNET.UI
             AppServices.Profiles.Update(p);
         }
 
+        private void OnShareProfile(object sender, RoutedEventArgs e)
+        {
+            var p = PickedProfile();
+            if (p == null) return;
+
+            if (p.Source != "local" || p.ReadOnly ||
+                p.Protected ||
+                string.Equals(p.Origin, "PANEL", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(p.Origin, "PROTECTED_IMPORT", StringComparison.OrdinalIgnoreCase))
+            {
+                Dialogs.Info(this, "Only local, unprotected profiles can be shared. Panel-linked and protected profiles cannot be re-shared.");
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(p.Raw))
+            {
+                Dialogs.Error(this, "This profile has no configuration to share.");
+                return;
+            }
+
+            if (!Dialogs.Confirm(this,
+                "A share link will be created using TIREXNET's encrypted share format.\n\n" +
+                "Anyone who receives this link can import the connection profile. Keep it private.\n\nContinue?"))
+                return;
+
+            try
+            {
+                var androidEngine = string.IsNullOrWhiteSpace(p.AndroidEngine)
+                    ? p.Engine switch
+                    {
+                        EngineKind.Xray => "XRAY",
+                        EngineKind.WireGuard => "WIREGUARD",
+                        EngineKind.AmneziaWG => "AMNEZIAWG",
+                        EngineKind.OpenVpn => "OPENVPN",
+                        EngineKind.SlipNet => "SLIPNET",
+                        EngineKind.MasterDns => "MASTERDNS",
+                        EngineKind.CottenDns => "COTTENDNS",
+                        EngineKind.StormDns => "STORMDNS",
+                        EngineKind.Mhrv => "MHRV",
+                        _ => "UNKNOWN"
+                    }
+                    : p.AndroidEngine;
+
+                var link = TirexShare.Encode(new TirexShare.Payload
+                {
+                    Name = p.Name,
+                    Engine = androidEngine,
+                    Raw = p.Raw,
+                    Origin = string.IsNullOrWhiteSpace(p.Origin) ? "MANUAL" : p.Origin,
+                    DnsResolvers = p.DnsResolvers.ToList(),
+                    SelectedResolver = p.SelectedResolver,
+                    CustomSettings = new Dictionary<string, string>(p.CustomSettings),
+                    Country = p.Country,
+                    Protected = false
+                });
+
+                System.Windows.Clipboard.SetText(link);
+                Log.Info("Encrypted TIREXNET share link copied for a local profile.");
+                Dialogs.Info(this, "Encrypted TIREXNET share link copied to the clipboard.\n\nYou can send it to another TIREXNET user.");
+            }
+            catch (Exception ex)
+            {
+                Dialogs.Error(this, "Could not create the share link: " + Redactor.Redact(ex.Message));
+            }
+        }
+
         private void OnExport(object sender, RoutedEventArgs e)
         {
             var p = PickedProfile();

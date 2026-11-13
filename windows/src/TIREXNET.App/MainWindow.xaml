@@ -247,6 +247,7 @@
             <Button Content="Rename" Style="{StaticResource GhostButton}" Click="OnRename" />
             <Button Content="Edit" Style="{StaticResource GhostButton}" Click="OnEdit" />
             <Button Content="DNS resolvers…" Style="{StaticResource GhostButton}" Click="OnProfileDnsResolvers" />
+            <Button Content="Share link" Style="{StaticResource NeonButton}" Click="OnShareProfile" />
             <Button Content="Export" Style="{StaticResource GhostButton}" Click="OnExport" />
             <Button Content="Delete" Style="{StaticResource DangerButton}" Click="OnDelete" />
           </WrapPanel>
