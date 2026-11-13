@@ -119,6 +119,9 @@ public static class ProfileParser
                 result.Errors.Add("A share link cannot contain another share link.");
                 continue;
             }
+            // The opened configuration is secret material: from now on it is masked in every log line.
+            Redactor.AddSecret(link);
+            Redactor.AddSecret(payload.Raw);
             var inner = ParseText(payload.Raw);
             if (inner.Profiles.Count == 0)
             {

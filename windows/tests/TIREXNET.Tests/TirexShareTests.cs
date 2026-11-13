@@ -1,5 +1,6 @@
 using System.IO.Pipes;
 using System.Text;
+using TIREXNET.Core;
 using TIREXNET.Core.Models;
 using TIREXNET.Core.Parsing;
 using TIREXNET.Core.Services;

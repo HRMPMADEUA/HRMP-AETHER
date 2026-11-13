@@ -8,14 +8,17 @@ public static class Redactor
     private static readonly object Gate = new();
     private static readonly HashSet<string> Secrets = new(StringComparer.Ordinal);
 
-    private static readonly Regex UriRx = new(@"\b(vless|vmess|trojan|ss|wireguard|slipnet-enc|slipnet)://\S+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex UriRx = new(@"\b(vless|vmess|trojan|ss|hysteria2?|tuic|wireguard|slipnet-bundle-enc|slipnet-enc|slipnet|tirexnet|masterdns|cottendns|stormdns|snispoof|mhrv-rs|dnschanger|soar|slipnet)://\S+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex BearerRx = new(@"(Bearer\s+)[A-Za-z0-9\-\._~\+/]+=*", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex UuidRx = new(@"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", RegexOptions.Compiled);
-    private static readonly Regex KeyRx = new(@"(?i)\b(PrivateKey|PresharedKey|password|passwd|token|secret)(\s*[=:]\s*)\S+", RegexOptions.Compiled);
+    private static readonly Regex KeyRx = new(@"(?i)\b(PrivateKey|PresharedKey|password|passwd|token|secret|api[_-]?key|psk)(\s*[=:]\s*)\S+", RegexOptions.Compiled);
+    private static readonly Regex HeaderRx = new(@"(?i)\b(authorization|proxy-authorization|cookie|set-cookie)(\s*[=:]\s*)[^\r\n]+", RegexOptions.Compiled);
+    private static readonly Regex PemRx = new(@"-----BEGIN [A-Z0-9 ]+-----.*?(-----END [A-Z0-9 ]+-----|$)", RegexOptions.Compiled | RegexOptions.Singleline);
+    private static readonly Regex InlineKeyRx = new(@"(?is)<(key|tls-auth|tls-crypt|tls-crypt-v2|secret|pkcs12)>.*?(</\1>|$)", RegexOptions.Compiled);
 
     public static void AddSecret(string? secret)
     {
-        if (string.IsNullOrEmpty(secret) || secret.Length < 4) return;
+        if (string.IsNullOrEmpty(secret) || secret.Length < 4 || secret.Length > 400_000) return;
         lock (Gate) Secrets.Add(secret);
     }
 
@@ -30,7 +33,10 @@ public static class Redactor
         string[] secrets;
         lock (Gate) secrets = Secrets.ToArray();
         foreach (var s in secrets) text = text.Replace(s, "***", StringComparison.Ordinal);
+        text = PemRx.Replace(text, "<pem-redacted>");
+        text = InlineKeyRx.Replace(text, "<$1>redacted</$1>");
         text = UriRx.Replace(text, "$1://<redacted>");
+        text = HeaderRx.Replace(text, "$1$2***");
         text = BearerRx.Replace(text, "$1***");
         text = KeyRx.Replace(text, "$1$2***");
         text = UuidRx.Replace(text, "<id>");
