@@ -552,8 +552,59 @@ namespace TIREXNET.UI
 
         private void OnImportUri(object sender, RoutedEventArgs e)
         {
-            var text = Dialogs.Prompt(this, "Add link", "Paste a vless://, vmess://, trojan:// or ss:// link (several links, one per line, are fine):", "", true);
+            var text = Dialogs.Prompt(this, "Add link", "Paste a vless://, vmess://, trojan://, ss://, snispoof:// or mhrv:// link (several links, one per line, are fine):", "", true);
             if (text != null) ImportText(text, null);
+        }
+
+        private void OnCreateMhrv(object sender, RoutedEventArgs e)
+        {
+            var name = Dialogs.Prompt(
+                this,
+                "New MHRV profile",
+                "Profile name:",
+                "MHRV Profile");
+
+            if (name == null) return;
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                Dialogs.Error(this, "Enter a profile name.");
+                return;
+            }
+
+            var config = Dialogs.Prompt(
+                this,
+                "MHRV configuration",
+                "Paste the complete MHRV TOML configuration. It must contain [relay] and [network]. Supported modes: apps_script, direct, full.",
+                "[relay]\nmode = \"full\"\n\n[network]\nlisten_host = \"127.0.0.1\"\nlisten_port = 8085\nsocks5_port = 8086\nverify_ssl = true",
+                true);
+
+            if (config == null) return;
+            if (string.IsNullOrWhiteSpace(config))
+            {
+                Dialogs.Error(this, "MHRV configuration cannot be empty.");
+                return;
+            }
+
+            try
+            {
+                var payload = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    name = name.Trim(),
+                    config = config.Trim()
+                });
+
+                var token = Convert.ToBase64String(
+                    Encoding.UTF8.GetBytes(payload))
+                    .TrimEnd('=')
+                    .Replace('+', '-')
+                    .Replace('/', '_');
+
+                ImportText("mhrv://" + token, null);
+            }
+            catch (Exception ex)
+            {
+                Dialogs.Error(this, "Could not create the MHRV profile: " + ex.Message);
+            }
         }
 
         private void OnImportFile(object sender, RoutedEventArgs e)

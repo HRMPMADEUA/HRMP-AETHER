@@ -240,6 +240,7 @@
           <WrapPanel Grid.Row="1" Margin="0,14,0,8">
             <Button Content="Paste from clipboard" Style="{StaticResource NeonButton}" Click="OnImportClipboard" />
             <Button Content="Add link…" Style="{StaticResource GhostButton}" Click="OnImportUri" />
+            <Button Content="MHRV profile…" Style="{StaticResource GhostButton}" Click="OnCreateMhrv" />
             <Button Content="Import file…" Style="{StaticResource GhostButton}" Click="OnImportFile" />
             <Button x:Name="PingAllButton" Content="Ping all" Style="{StaticResource GhostButton}" Click="OnPingAll" />
             <Button x:Name="SmartConnectButton" Content="Smart connect" Style="{StaticResource GhostButton}" Click="OnSmartConnect" />
