@@ -139,6 +139,43 @@ public static class DnsTunnelProfile
                     !Regex.IsMatch(config, @"(?im)^\s*DATA_ENCRYPTION_METHOD\s*="))
                     return Fail("DNS tunnel config or resolver list is incomplete.", out error);
 
+                if (scheme == "cottendns://")
+                {
+                    var transportMatch = Regex.Match(
+                        config,
+                        @"(?im)^\s*RESOLVER_TRANSPORT\s*=\s*""([^""]*)""");
+
+                    var modeMatch = Regex.Match(
+                        config,
+                        @"(?im)^\s*TUNNEL_MODE\s*=\s*""([^""]*)""");
+
+                    var transport = transportMatch.Success
+                        ? transportMatch.Groups[1].Value.ToLowerInvariant()
+                        : null;
+
+                    var mode = modeMatch.Success
+                        ? modeMatch.Groups[1].Value.ToLowerInvariant()
+                        : null;
+
+                    var allowedTransports = new HashSet<string>(
+                        new[] { "auto", "udp", "tcp", "dot", "doh", "doh3", "doq" },
+                        StringComparer.OrdinalIgnoreCase);
+
+                    var allowedModes = new HashSet<string>(
+                        new[] { "legacy", "cottenmax" },
+                        StringComparer.OrdinalIgnoreCase);
+
+                    if (transport != null && !allowedTransports.Contains(transport))
+                        return Fail("CottenDNS resolver transport is unsupported.", out error);
+
+                    if (mode != null && !allowedModes.Contains(mode))
+                        return Fail("CottenDNS tunnel mode is unsupported.", out error);
+
+                    if ((transport == "doh3" || transport == "doq") &&
+                        mode != "cottenmax")
+                        return Fail("CottenDNS DoH3 and DoQ require CottenMax mode.", out error);
+                }
+
                 var match = Regex.Match(config, @"(?im)^\s*LISTEN_PORT\s*=\s*(\d+)");
                 port = match.Success && int.TryParse(match.Groups[1].Value, out var parsed) ? parsed : 18000;
                 if (port is < 1024 or > 65535) return Fail("DNS tunnel SOCKS port is invalid.", out error);
