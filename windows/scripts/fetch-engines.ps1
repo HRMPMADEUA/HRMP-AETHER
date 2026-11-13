@@ -249,25 +249,28 @@ try {
     throw "SlipNet commit mismatch: expected $($sn.commit), got $head"
   }
 
-  # IMPORTANT: initialize every nested Go module submodule.
-  git -C $src submodule sync --recursive
+  # Initialize only the four submodules required by the Windows CLI go.mod.
+  # Android-only Rust, mobile and Lyrebird submodules are intentionally excluded.
+  $requiredSubmodulePaths = @($sn.submodules | ForEach-Object { $_.path })
+
+  git -C $src submodule sync -- $requiredSubmodulePaths
   if ($LASTEXITCODE -ne 0) {
-    throw 'SlipNet recursive submodule sync failed.'
+    throw 'SlipNet required-submodule sync failed.'
   }
 
-  git -C $src submodule update --init --recursive
+  git -C $src submodule update --init -- $requiredSubmodulePaths
   if ($LASTEXITCODE -ne 0) {
-    throw 'SlipNet recursive submodule initialization failed.'
+    throw 'SlipNet required-submodule initialization failed.'
   }
 
-  $subStatus = @(git -C $src submodule status --recursive)
+  $subStatus = @(git -C $src submodule status -- $requiredSubmodulePaths)
   if ($LASTEXITCODE -ne 0) {
-    throw 'Could not verify SlipNet submodule status.'
+    throw 'Could not verify required SlipNet submodule status.'
   }
 
   $badSub = @($subStatus | Where-Object { $_ -match '^[-+U]' })
   if ($badSub.Count -gt 0) {
-    throw ("SlipNet has uninitialized/mismatched submodules: " + ($badSub -join '; '))
+    throw ("SlipNet has uninitialized/mismatched required submodules: " + ($badSub -join '; '))
   }
 
   # Verify every nested dependency against the exact commit in engines.lock.json.
