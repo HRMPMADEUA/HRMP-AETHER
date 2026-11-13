@@ -15,6 +15,9 @@ public sealed class DnsTunnelEngine : IEngine
     private string? _configPath;
     private string? _resolverPath;
     private bool _stopping;
+    private HttpSocks5Bridge? _httpBridge;
+    private bool _systemProxySet;
+
 
     public DnsTunnelEngine(EngineKind kind) => _kind = kind;
 
@@ -114,6 +117,27 @@ public sealed class DnsTunnelEngine : IEngine
                     Log.Info(
                         $"{Name} SOCKS5 is ready on 127.0.0.1:{data.Port}.");
 
+                    var settingsErrors = ConfigValidator.ValidateSettings(settings);
+                    if (settingsErrors.Count > 0)
+                        throw new EngineException(string.Join(" ", settingsErrors));
+
+                    if (settings.EnableHttpProxy)
+                    {
+                        _httpBridge = new HttpSocks5Bridge(
+                            settings.HttpPort, settings.SocksPort);
+                        await _httpBridge.StartAsync(timeout.Token);
+                    }
+
+                    if (settings.SetSystemProxy)
+                    {
+                        if (_httpBridge == null)
+                            throw new EngineException(
+                                "The HTTP proxy bridge is required for Windows system proxy.");
+
+                        SystemProxy.Enable(settings.HttpPort);
+                        _systemProxySet = true;
+                    }
+
                     return;
                 }
                 catch (SocketException)
@@ -140,6 +164,18 @@ public sealed class DnsTunnelEngine : IEngine
     public async Task StopAsync()
     {
         _stopping = true;
+
+        if (_systemProxySet)
+        {
+            SystemProxy.RestoreIfNeeded();
+            _systemProxySet = false;
+        }
+
+        if (_httpBridge != null)
+        {
+            await _httpBridge.DisposeAsync();
+            _httpBridge = null;
+        }
 
         if (_process != null)
         {
