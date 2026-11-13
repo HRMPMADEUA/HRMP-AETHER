@@ -16,6 +16,12 @@ public static class AppPaths
     public static string AwgCliExe => Path.Combine(AmneziaWgDir, "awg.exe");
     public static string SlipNetDir => Path.Combine(EnginesDir, "slipnet");
     public static string SlipNetExe => Path.Combine(SlipNetDir, "slipnet.exe");
+    public static string MasterDnsDir => Path.Combine(EnginesDir, "masterdns");
+    public static string MasterDnsExe => Path.Combine(MasterDnsDir, "masterdnsvpn-client.exe");
+    public static string CottenDnsDir => Path.Combine(EnginesDir, "cottendns");
+    public static string CottenDnsExe => Path.Combine(CottenDnsDir, "cottendns-client.exe");
+    public static string StormDnsDir => Path.Combine(EnginesDir, "stormdns");
+    public static string StormDnsExe => Path.Combine(StormDnsDir, "stormdns-client.exe");
     /// <summary>Where the TIREXNET installer places the official OpenVPN Community build (INSTALLDIR).</summary>
     public static string OpenVpnBundledExe => Path.Combine(EnginesDir, "openvpn", "bin", "openvpn.exe");
 

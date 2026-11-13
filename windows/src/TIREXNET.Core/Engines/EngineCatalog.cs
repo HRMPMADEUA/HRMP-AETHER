@@ -19,6 +19,12 @@ public static class EngineCatalog
             "Official OpenVPN Community build (signed openvpn.exe)", "Wintun / ovpn-dco installed by the official OpenVPN installer"),
         new EngineInfo(EngineKind.SlipNet, "SlipNet", "SlipNet: DNSTT, NoizDNS, VayDNS, SSH, SOCKS5, VLESS, DoH", true, true,
             "SlipNet command-line client (upstream, built from a pinned commit)", "Wintun via tun2socks (VPN mode)"),
+        new EngineInfo(EngineKind.MasterDns, "MasterDNS", "Encrypted DNS tunnel", true, false,
+            "MasterDnsVPN Windows client", "Local SOCKS5 proxy"),
+        new EngineInfo(EngineKind.CottenDns, "CottenDNS", "Encrypted DNS tunnel · CottenMax", true, false,
+            "CottenDNS Windows client", "Local SOCKS5 proxy"),
+        new EngineInfo(EngineKind.StormDns, "StormDNS", "Encrypted DNS tunnel", true, false,
+            "StormDNS Windows client", "Local SOCKS5 proxy"),
     };
 
     public static EngineInfo Get(EngineKind kind) => All.First(e => e.Kind == kind);
@@ -30,6 +36,9 @@ public static class EngineCatalog
         EngineKind.AmneziaWG => AmneziaWgEngine.IsRuntimeAvailable,
         EngineKind.OpenVpn => OpenVpnEngine.IsRuntimeAvailable,
         EngineKind.SlipNet => SlipNetEngine.IsRuntimeAvailable,
+        EngineKind.MasterDns => File.Exists(AppPaths.MasterDnsExe),
+        EngineKind.CottenDns => File.Exists(AppPaths.CottenDnsExe),
+        EngineKind.StormDns => File.Exists(AppPaths.StormDnsExe),
         _ => false,
     };
 
@@ -37,7 +46,9 @@ public static class EngineCatalog
 
     /// <summary>Engines with a native tunnel always run as a full-device VPN; Xray and SlipNet follow the selected mode.</summary>
     public static ConnectionMode EffectiveMode(Profile p, AppSettings s) =>
-        p.Engine is EngineKind.Xray or EngineKind.SlipNet ? s.Mode : ConnectionMode.Vpn;
+        p.Engine is EngineKind.MasterDns or EngineKind.CottenDns or EngineKind.StormDns
+            ? ConnectionMode.Proxy
+            : p.Engine is EngineKind.Xray or EngineKind.SlipNet ? s.Mode : ConnectionMode.Vpn;
 
     public static bool NeedsAdmin(Profile p, AppSettings s) => EffectiveMode(p, s) == ConnectionMode.Vpn;
 
@@ -67,6 +78,7 @@ public static class EngineCatalog
         EngineKind.AmneziaWG => new AmneziaWgEngine(),
         EngineKind.OpenVpn => new OpenVpnEngine(),
         EngineKind.SlipNet => new SlipNetEngine(),
+        EngineKind.MasterDns or EngineKind.CottenDns or EngineKind.StormDns => new DnsTunnelEngine(kind),
         _ => new XrayEngine(),
     };
 
@@ -76,7 +88,7 @@ public static class EngineCatalog
         foreach (var e in All)
         {
             var ok = IsRuntimeAvailable(e.Kind);
-            var modes = e.SupportsProxy && e.SupportsVpn ? "Proxy + VPN" : "VPN";
+            var modes = e.SupportsProxy ? (e.SupportsVpn ? "Proxy + VPN" : "Proxy") : "VPN";
             yield return $"• {e.Name} ({e.Protocols}) · {modes}: {(ok ? "available" : (e.Kind == EngineKind.OpenVpn ? "OpenVPN not installed" : "not installed"))}";
         }
         yield return $"• VPN mode for Xray and SlipNet (tun2socks + Wintun): {(IsTun2SocksAvailable ? "available" : "not installed")}";

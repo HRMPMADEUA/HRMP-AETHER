@@ -13,7 +13,7 @@ public sealed class ParseResult
 
 public static class ProfileParser
 {
-    private static readonly string[] UriSchemes = { "vless://", "vmess://", "trojan://", "ss://" };
+    private static readonly string[] UriSchemes = { "vless://", "vmess://", "trojan://", "ss://", "masterdns://", "cottendns://", "stormdns://" };
 
     /// <summary>Parses pasted text, a subscription body (plain or base64), an Xray JSON document or a WireGuard .conf.</summary>
     public static ParseResult ParseText(string? text, string? fileName = null)
@@ -163,6 +163,8 @@ public static class ProfileParser
     public static bool TryParseUri(string uri, out Profile? profile, out string error)
     {
         profile = null;
+        if (DnsTunnelProfile.IsDnsScheme(uri))
+            return DnsTunnelProfile.TryCreate(uri, out profile, out error);
         if (!TryParseEndpoint(uri, out var ep, out error) || ep == null) return false;
         profile = new Profile
         {

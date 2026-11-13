@@ -28,6 +28,10 @@ public static class ConfigValidator
         else if (p.Engine == EngineKind.AmneziaWG) ValidateWireGuard(p.Raw, errors, amnezia: true);
         else if (p.Engine == EngineKind.OpenVpn) errors.AddRange(OpenVpnConfig.Validate(p.Raw));
         else if (p.Engine == EngineKind.SlipNet) errors.AddRange(SlipNetProfile.Validate(p.Raw));
+        else if (p.Engine is EngineKind.MasterDns or EngineKind.CottenDns or EngineKind.StormDns)
+        {
+            if (!DnsTunnelProfile.TryDecode(p.Raw, out _, out var dnsError)) errors.Add(dnsError);
+        }
         else if (p.Protocol == "xray-json") ValidateXrayJson(p.Raw, errors);
         else ValidateUri(p.Raw, errors);
         return errors;
