@@ -31,7 +31,7 @@ public sealed class MhrvEngine : IEngine
         var replacement = key + " = " + value;
 
         if (Regex.IsMatch(body, pattern))
-            body = Regex.Replace(body, pattern, replacement, 1);
+            body = Regex.Replace(body, pattern, _ => replacement);
         else
             body = body.TrimEnd() + "\n" + replacement + "\n";
 
