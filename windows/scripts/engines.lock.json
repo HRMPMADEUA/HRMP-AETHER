@@ -1,10 +1,122 @@
 {
-  "_note": "xray: sha256 equals the official upstream Xray-windows-64.zip.dgst (SHA2-256). tun2socks: upstream publishes no checksum file, so the value is the SHA-256 measured from the official GitHub release asset (trust-on-first-use pin). wintun: pinned (same value amneziawg-windows-client pins). wireguard: Authenticode signature only. amneziawg: official signed MSI from the amnezia-vpn release, SHA-256 pinned (measured from the official asset) and Authenticode checked. openvpn: official OpenVPN Community MSI, version pinned, Authenticode signature (signer must be OpenVPN) is the check; it is only staged for the installer, never executed during the build. slipnet: upstream source cloned from the pinned commit and compiled for Windows during the build (AGPL-3.0).",
-  "xray":      { "version": "v26.10.21", "asset": "Xray-windows-64.zip", "sha256": "fc58c39ee2f2717b4c54d28d374362389e5319b20ae44aea76ea45a5243ec827" },
-  "tun2socks": { "version": "v2.5.2",  "asset": "tun2socks-windows-amd64.zip", "sha256": "06c71bc30e557ceab6964543bd0d68e1b9dfefa272b51a46f60171af621b5f42" },
-  "wintun":    { "version": "0.14.1",  "asset": "wintun-0.14.1.zip", "sha256": "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51" },
-  "wireguard": { "version": "0.5.3",   "asset": "wireguard-amd64-0.5.3.msi", "sha256": "" },
-  "amneziawg": { "version": "3.1.0",   "asset": "amneziawg-amd64-3.1.0.msi", "sha256": "a1b48ea8699cd347832a3691d832004574ef8ad65bcf887611ac8acb99b7de8b" },
-  "openvpn":   { "version": "2.6.19",  "asset": "OpenVPN-2.6.19-I001-amd64.msi", "sha256": "" },
-  "slipnet":   { "repo": "https://github.com/anonvector/SlipNet", "commit": "2ed00fd0072ad0b558e30ec6b5e8b30948f98894" }
+  "_note": "xray: sha256 equals the official upstream Xray-windows-64.zip.dgst (SHA2-256). tun2socks: upstream publishes no checksum file, so the value is the SHA-256 measured from the official GitHub release asset (trust-on-first-use pin). wintun: pinned (same value amneziawg-windows-client pins). wireguard: Authenticode signature only. amneziawg: official signed MSI from the amnezia-vpn release, SHA-256 pinned (measured from the official asset) and Authenticode checked. openvpn: official OpenVPN Community MSI, version pinned, Authenticode signature (signer must be OpenVPN) is the check; it is only staged for the installer, never executed during the build. slipnet: upstream source cloned from the pinned commit and compiled for Windows during the build (AGPL-3.0). slipnet.submodules: the CLI go.mod uses replace directives (../dnstt, ../noizdns, ../vaydns, ../vaydns-mobile) that point at git submodules; a plain git clone leaves them empty, so exactly these four are initialised and compared with the pinned commits.",
+  "xray": {
+    "version": "v26.10.21",
+    "asset": "Xray-windows-64.zip",
+    "sha256": "fc58c39ee2f2717b4c54d28d374362389e5319b20ae44aea76ea45a5243ec827"
+  },
+  "tun2socks": {
+    "version": "v2.5.2",
+    "asset": "tun2socks-windows-amd64.zip",
+    "sha256": "06c71bc30e557ceab6964543bd0d68e1b9dfefa272b51a46f60171af621b5f42"
+  },
+  "wintun": {
+    "version": "0.14.1",
+    "asset": "wintun-0.14.1.zip",
+    "sha256": "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
+  },
+  "wireguard": {
+    "version": "0.5.3",
+    "asset": "wireguard-amd64-0.5.3.msi",
+    "sha256": ""
+  },
+  "amneziawg": {
+    "version": "3.1.0",
+    "asset": "amneziawg-amd64-3.1.0.msi",
+    "sha256": "a1b48ea8699cd347832a3691d832004574ef8ad65bcf887611ac8acb99b7de8b"
+  },
+  "openvpn": {
+    "version": "2.6.19",
+    "asset": "OpenVPN-2.6.19-I001-amd64.msi",
+    "sha256": ""
+  },
+  "slipnet": {
+    "repo": "https://github.com/anonvector/SlipNet",
+    "commit": "2ed00fd0072ad0b558e30ec6b5e8b30948f98894",
+    "submodules": [
+      {
+        "path": "dnstt",
+        "url": "https://github.com/anonvector/dnstt.git",
+        "commit": "51bdba3948d44b3175bc88ea40b2116bb9daff07"
+      },
+      {
+        "path": "noizdns",
+        "url": "https://github.com/anonvector/noizdns.git",
+        "commit": "17ac5cf4e45cd09fa6f4bde09362e334dc4b8b55"
+      },
+      {
+        "path": "vaydns",
+        "url": "https://github.com/anonvector/vaydns.git",
+        "commit": "45f18f16af40b6ad666e8119be08701b21395ee2"
+      },
+      {
+        "path": "vaydns-mobile",
+        "url": "https://github.com/anonvector/vaydns-mobile.git",
+        "commit": "b7da42d82e204059eb4b240bb806f8ffd2ed909f"
+      }
+    ]
+  },
+  "additionalRuntimes": {
+    "MasterDNS": {
+      "repo": "https://github.com/masterking32/MasterDnsVPN",
+      "commit": "4052a6b95e758adf2dc26fa1fe527457e58d627c",
+      "package": "./cmd/client",
+      "executable": "masterdnsvpn-client.exe",
+      "assets": [
+        "client_config.toml.simple",
+        "client_resolvers.simple"
+      ],
+      "extraLicenses": []
+    },
+    "CottenDNS": {
+      "repo": "https://github.com/WhiteDNS/CottenDns",
+      "commit": "ac8e86ed83a5006ab320468daaebe759d9574da6",
+      "package": "./cmd/client",
+      "executable": "cottendns-client.exe",
+      "assets": [
+        "client_config.toml.simple",
+        "client_resolvers.simple",
+        "client_config.speed.toml",
+        "client_config.survival.toml",
+        "client_config.tcp-survival.toml"
+      ],
+      "extraLicenses": [
+        "SOAR_LICENSE.txt",
+        "QPACK_LICENSE.txt",
+        "QUIC_GO_LICENSE.txt",
+        "internal/cottenmax/engine/LICENSE"
+      ]
+    },
+    "StormDNS": {
+      "repo": "https://github.com/nullroute1970/StormDNS",
+      "commit": "a9a8e92a51f08c3030d7a1656cafd3bf07c9903b",
+      "package": "./cmd/client",
+      "executable": "stormdns-client.exe",
+      "assets": [
+        "client_config.toml.simple",
+        "client_resolvers.simple"
+      ],
+      "extraLicenses": []
+    },
+    "SNISPF": {
+      "repo": "https://github.com/NaxonM/snispf-core",
+      "commit": "4a50448bff54b5e78fbe4bc962b4719b2deb5e80",
+      "package": "./cmd/snispf",
+      "executable": "snispf.exe",
+      "assets": [
+        "configs/examples/combined-aggressive.json",
+        "configs/examples/failover-multi-endpoint.json",
+        "configs/examples/fragment-baseline.json",
+        "configs/examples/wrong-seq-strict.json"
+      ],
+      "extraLicenses": []
+    }
+  },
+  "mhrv": {
+    "version": "v1.9.38",
+    "asset": "mhrv-rs-windows-amd64.zip",
+    "sha256": "36fce2bc0977e3d123bb01f61649496fd7d59c0867bed3ebfe5d83b852a21c5c",
+    "repo": "https://github.com/therealaleph/MasterHttpRelayVPN-RUST"
+  },
+  "_windows_runtime_pack_note": "MasterDNS, CottenDNS, StormDNS and SNISPF are built from immutable upstream commits. MHRV is downloaded from the official v1.9.38 Windows release and checked against its published SHA-256. CottenDNS includes its optional CottenMax/Soar implementation; it is not a standalone Soar client binary. These staged runtimes do not automatically imply TIREXNET EngineCatalog, profile parser, UI or ConnectionManager integration."
 }

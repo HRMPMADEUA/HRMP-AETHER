@@ -24,5 +24,30 @@ SlipNet is licensed under the GNU Affero General Public License v3. TIREXNET shi
 executable that it starts as a child process; the complete corresponding source is available at
 https://github.com/anonvector/SlipNet (commit `2ed00fd0072ad0b558e30ec6b5e8b30948f98894`, see `scripts/engines.lock.json`).
 
+The SlipNet CLI is compiled together with four source dependencies that SlipNet pins as git submodules (see `slipnet.submodules`
+in `scripts/engines.lock.json`): `dnstt` (anonvector/dnstt @ 51bdba39, COPYING file in the repository), `noizdns` (anonvector/noizdns @ 17ac5cf4, MIT),
+`vaydns` (anonvector/vaydns @ 45f18f16, COPYING file in the repository) and `vaydns-mobile` (anonvector/vaydns-mobile @ b7da42d8; **the pinned revision
+contains no license file** - TIREXNET builds it only because the pinned SlipNet commit does, and it should be clarified upstream before the
+installer is distributed publicly). Their sources are fetched at exactly these revisions during the build and are not modified.
+
 OpenVPN is licensed under the GNU General Public License v2. TIREXNET does not modify or link it: the installer runs the
 official signed MSI, and TIREXNET starts the installed `openvpn.exe` as a separate process.
+
+
+## TIREXNET Windows runtime pack v11
+
+Additional upstream projects built or staged by the Windows runtime script:
+
+- MasterDNS: https://github.com/masterking32/MasterDnsVPN
+- CottenDNS: https://github.com/WhiteDNS/CottenDns
+- StormDNS: https://github.com/nullroute1970/StormDNS
+- SNISPF: https://github.com/NaxonM/snispf-core
+- MHRV: https://github.com/therealaleph/MasterHttpRelayVPN-RUST
+- WinDivert: https://github.com/basil00/WinDivert
+
+The corresponding upstream LICENSE files are copied into the staged `licenses`
+directory. CottenDNS's additional Soar, QPACK and QUIC-Go notices are copied
+separately when building its runtime.
+
+All third-party copyrights and licenses remain with their respective owners.
+The release pack must retain the upstream notices and license files.

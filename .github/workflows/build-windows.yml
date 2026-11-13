@@ -155,6 +155,11 @@ jobs:
             'engines/xray/xray.exe',
             'engines/tun2socks/tun2socks.exe', 'engines/tun2socks/wintun.dll',
             'engines/wireguard/wireguard.exe',
+            'engines/masterdns/masterdnsvpn-client.exe',
+            'engines/cottendns/cottendns-client.exe',
+            'engines/stormdns/stormdns-client.exe',
+            'engines/snispf/snispf.exe',
+            'engines/mhrv/mhrv-rs.exe',
             'THIRD_PARTY_NOTICES.md'
           )
           foreach ($r in $required) {

@@ -46,6 +46,8 @@ missing runtime fails immediately with a readable message and touches nothing on
 * IPv6: not blocked by TIREXNET; IPv6 leak protection depends on what the server pushes. Unverified.
 
 ## SlipNet
+
+Build note: SlipNet's `cli/go.mod` uses `replace` directives that point at the git submodules `dnstt`, `noizdns`, `vaydns` and `vaydns-mobile`. `fetch-engines.ps1` initialises exactly those four at the revisions pinned in `engines.lock.json`, checks them against SlipNet's own gitlinks, verifies every `replace` target exists, and then builds. A SlipNet build failure now fails the build (it is a required runtime) with the repository, revision and path in the message.
 * Links `slipnet://BASE64` (format v18). The upstream CLI provides a local SOCKS5 proxy; VPN mode adds tun2socks + Wintun.
 * **Genuine upstream limitation:** the upstream command-line client does not implement Slipstream (`ss`, `slipstream_ssh`), Snowflake or NaiveProxy,
   and `slipnet-enc://` needs a private build key. Such profiles import fine but report why they cannot run on Windows.
@@ -66,3 +68,33 @@ missing runtime fails immediately with a readable message and touches nothing on
 * No Windows notifications beyond the tray; no country flags (no verified data source); the list is not auto-sorted by ping (the fastest profile is reported and Smart connect selects it).
 * No automatic restart after an engine crash: the app reports the error and restores the network.
 * Everything that needs Windows (services, adapters, routes, UAC, drivers, MSI) is **unverified** until CI/real devices run it.
+
+
+## Windows DNS and SNI runtime pack (v11)
+
+The Windows package now stages these additional upstream runtimes:
+
+| Runtime | Staged executable | Notes |
+|---|---|---|
+| MasterDNS | `engines/masterdns/masterdnsvpn-client.exe` | Includes upstream client config and resolver sample |
+| CottenDNS | `engines/cottendns/cottendns-client.exe` | Includes legacy and CottenMax client configuration samples |
+| StormDNS | `engines/stormdns/stormdns-client.exe` | Includes upstream client config and resolver sample |
+| SNISPF | `engines/snispf/snispf.exe` | Includes upstream example configurations |
+| MHRV | `engines/mhrv/mhrv-rs.exe` | Official Windows release; UI executable is also copied when present |
+
+CottenDNS's optional CottenMax implementation incorporates Soar v0.2.3.
+That is Soar support inside CottenDNS; it is not a separate standalone Soar client.
+
+SNISPF's `wrong_seq` strategy requires valid signed WinDivert components and
+Administrator privileges. If signed WinDivert files are unavailable, the
+package keeps the SNISPF executable but does not claim that `wrong_seq` is ready.
+
+MHRV is a separate local HTTP/SOCKS proxy application. Its release files are
+packaged but TIREXNET does not automatically install its CA certificate or
+launch it in the background.
+
+IMPORTANT: these are packaged runtime payloads. They are not yet automatically
+connected to TIREXNET's in-app EngineCatalog, profile parser, engine factory,
+connection lifecycle, settings UI or ConnectionManager. That app-side integration
+is a separate implementation step. A staged executable alone does not mean that
+its protocol is selectable from the TIREXNET interface.

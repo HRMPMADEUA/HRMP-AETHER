@@ -11,7 +11,9 @@
   A hash computed from the download itself is never treated as verification.
 #>
 param(
-  [Parameter(Mandatory = $true)][string]$Stage
+  [Parameter(Mandatory = $true)][string]$Stage,
+  # SlipNet is a required runtime. This switch exists only for local developer builds without Go; CI never passes it.
+  [switch]$AllowMissingSlipNet
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -221,41 +223,307 @@ try {
   $report.Add("- OpenVPN: NOT bundled in this build ($($_.Exception.Message)). OpenVPN profiles will report that OpenVPN is not installed.")
 }
 
-# ------------------------------------------------------------------ SlipNet (optional: built from the pinned upstream commit)
+# ------------------------------------------------------------------ SlipNet (recursive submodules + pinned source)
 $sn = $lock.slipnet
 $snDir = Join-Path $engines 'slipnet'
+
 try {
   $src = Join-Path $work 'slipnet-src'
-  if (Test-Path $src) { Remove-Item $src -Recurse -Force }
-  git clone --quiet $sn.repo $src
-  if ($LASTEXITCODE -ne 0) { throw 'git clone of SlipNet failed.' }
-  git -C $src checkout --quiet $sn.commit
-  if ($LASTEXITCODE -ne 0) { throw 'git checkout of the pinned SlipNet commit failed.' }
-  $head = (git -C $src rev-parse HEAD).Trim()
-  if ($head -ne $sn.commit) { throw "SlipNet commit mismatch: expected $($sn.commit), got $head" }
-  Copy-Item (Join-Path $src 'app\src\main\res\raw\resolvers.txt') (Join-Path $src 'cli\resolvers.txt') -Force
-  New-Item -ItemType Directory -Force -Path $snDir | Out-Null
-  Push-Location (Join-Path $src 'cli')
-  try {
-    $env:CGO_ENABLED = '0'; $env:GOOS = 'windows'; $env:GOARCH = 'amd64'
-    go build -trimpath -ldflags "-s -w -X main.version=$($sn.commit.Substring(0, 8))" -o (Join-Path $snDir 'slipnet.exe') .
-    if ($LASTEXITCODE -ne 0) { throw 'go build of SlipNet failed.' }
-  } finally {
-    Pop-Location
-    Remove-Item Env:\GOOS, Env:\GOARCH, Env:\CGO_ENABLED -ErrorAction SilentlyContinue
+
+  if (Test-Path $src) {
+    Remove-Item $src -Recurse -Force
   }
-  if (-not (Test-Path (Join-Path $snDir 'slipnet.exe'))) { throw 'slipnet.exe was not produced.' }
-  Copy-Item (Join-Path $src 'LICENSE') (Join-Path $licenses 'SlipNet-AGPL-3.0.txt') -Force
-  $report.Add("- SlipNet: built from $($sn.repo) at commit $($sn.commit) (AGPL-3.0; source offer in THIRD_PARTY_NOTICES.md)")
-} catch {
-  if (Test-Path $snDir) { Remove-Item $snDir -Recurse -Force -ErrorAction SilentlyContinue }
-  Write-Warning "SlipNet was NOT built: $_"
-  $report.Add("- SlipNet: NOT built in this build ($($_.Exception.Message)). SlipNet profiles will report that the runtime is not installed.")
+
+  git clone --quiet $sn.repo $src
+  if ($LASTEXITCODE -ne 0) {
+    throw 'SlipNet git clone failed.'
+  }
+
+  git -C $src checkout --quiet $sn.commit
+  if ($LASTEXITCODE -ne 0) {
+    throw 'SlipNet pinned checkout failed.'
+  }
+
+  $head = (git -C $src rev-parse HEAD).Trim()
+  if ($head -ne $sn.commit) {
+    throw "SlipNet commit mismatch: expected $($sn.commit), got $head"
+  }
+
+  # IMPORTANT: initialize every nested Go module submodule.
+  git -C $src submodule sync --recursive
+  if ($LASTEXITCODE -ne 0) {
+    throw 'SlipNet recursive submodule sync failed.'
+  }
+
+  git -C $src submodule update --init --recursive
+  if ($LASTEXITCODE -ne 0) {
+    throw 'SlipNet recursive submodule initialization failed.'
+  }
+
+  $subStatus = @(git -C $src submodule status --recursive)
+  if ($LASTEXITCODE -ne 0) {
+    throw 'Could not verify SlipNet submodule status.'
+  }
+
+  $badSub = @($subStatus | Where-Object { $_ -match '^[-+U]' })
+  if ($badSub.Count -gt 0) {
+    throw ("SlipNet has uninitialized/mismatched submodules: " + ($badSub -join '; '))
+  }
+
+  $cliDir = Join-Path $src 'cli'
+  $resolverSource = Join-Path $src 'app\src\main\res\raw\resolvers.txt'
+
+  if (-not (Test-Path (Join-Path $cliDir 'go.mod'))) {
+    throw 'SlipNet CLI go.mod is missing.'
+  }
+
+  if (Test-Path $resolverSource) {
+    Copy-Item $resolverSource (Join-Path $cliDir 'resolvers.txt') -Force
+  }
+
+  New-Item -ItemType Directory -Force -Path $snDir | Out-Null
+
+  Push-Location $cliDir
+  try {
+    $env:CGO_ENABLED = '0'
+    $env:GOOS = 'windows'
+    $env:GOARCH = 'amd64'
+    $env:GOTOOLCHAIN = 'auto'
+
+    go mod download
+    if ($LASTEXITCODE -ne 0) {
+      throw 'SlipNet go mod download failed.'
+    }
+
+    go build -trimpath -ldflags "-s -w -X main.version=$($sn.commit.Substring(0, 8))" `
+      -o (Join-Path $snDir 'slipnet.exe') .
+
+    if ($LASTEXITCODE -ne 0) {
+      throw 'SlipNet Windows build failed.'
+    }
+  }
+  finally {
+    Pop-Location
+    Remove-Item Env:\GOOS, Env:\GOARCH, Env:\CGO_ENABLED, Env:\GOTOOLCHAIN `
+      -ErrorAction SilentlyContinue
+  }
+
+  if (-not (Test-Path (Join-Path $snDir 'slipnet.exe'))) {
+    throw 'SlipNet executable was not created.'
+  }
+
+  if (Test-Path (Join-Path $src 'LICENSE')) {
+    Copy-Item (Join-Path $src 'LICENSE') `
+      (Join-Path $licenses 'SlipNet-AGPL-3.0.txt') -Force
+  }
+
+  $report.Add("- SlipNet: built from pinned commit $($sn.commit), recursive submodules initialized.")
 }
+catch {
+  if (Test-Path $snDir) {
+    Remove-Item $snDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+
+  Write-Warning "SlipNet was NOT built: $_"
+  $report.Add("- SlipNet: NOT built ($($_.Exception.Message)).")
+}
+
+# ------------------------------------------------------------------
+# Additional Go runtimes: MasterDNS / CottenDNS / StormDNS / SNISPF
+function Build-GoRuntime {
+  param(
+    [Parameter(Mandatory = $true)][string]$Name,
+    [Parameter(Mandatory = $true)]$Config
+  )
+
+  $dest = Join-Path $engines $Name.ToLowerInvariant()
+  $src = Join-Path $work ($Name.ToLowerInvariant() + '-source')
+
+  try {
+    if (Test-Path $src) {
+      Remove-Item $src -Recurse -Force
+    }
+
+    if (Test-Path $dest) {
+      Remove-Item $dest -Recurse -Force
+    }
+
+    git clone --quiet $Config.repo $src
+    if ($LASTEXITCODE -ne 0) {
+      throw "$Name git clone failed."
+    }
+
+    git -C $src checkout --quiet $Config.commit
+    if ($LASTEXITCODE -ne 0) {
+      throw "$Name pinned checkout failed."
+    }
+
+    $head = (git -C $src rev-parse HEAD).Trim()
+    if ($head -ne $Config.commit) {
+      throw "$Name commit mismatch: expected $($Config.commit), got $head"
+    }
+
+    if (-not (Test-Path (Join-Path $src 'go.mod'))) {
+      throw "$Name go.mod is missing."
+    }
+
+    New-Item -ItemType Directory -Force -Path $dest | Out-Null
+
+    Push-Location $src
+    try {
+      $env:CGO_ENABLED = '0'
+      $env:GOOS = 'windows'
+      $env:GOARCH = 'amd64'
+      $env:GOTOOLCHAIN = 'auto'
+
+      go mod download
+      if ($LASTEXITCODE -ne 0) {
+        throw "$Name go mod download failed."
+      }
+
+      $exePath = Join-Path $dest $Config.executable
+
+      go build -trimpath -ldflags '-s -w' `
+        -o $exePath $Config.package
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "$Name Windows build failed."
+      }
+
+      if (-not (Test-Path $exePath)) {
+        throw "$Name executable was not produced."
+      }
+    }
+    finally {
+      Pop-Location
+      Remove-Item Env:\GOOS, Env:\GOARCH, Env:\CGO_ENABLED, Env:\GOTOOLCHAIN `
+        -ErrorAction SilentlyContinue
+    }
+
+    # Copy the upstream sample configurations and resolver lists.
+    foreach ($rel in @($Config.assets)) {
+      $sourceFile = Join-Path $src $rel
+
+      if (-not (Test-Path $sourceFile)) {
+        throw "$Name required runtime asset is missing: $rel"
+      }
+
+      $targetFile = Join-Path $dest $rel
+      $targetParent = Split-Path $targetFile -Parent
+
+      New-Item -ItemType Directory -Force -Path $targetParent | Out-Null
+      Copy-Item -LiteralPath $sourceFile -Destination $targetFile -Force
+    }
+
+    # Preserve upstream licenses.
+    $licenseFiles = @('LICENSE') + @($Config.extraLicenses)
+
+    foreach ($rel in $licenseFiles) {
+      $licenseSource = Join-Path $src $rel
+
+      if (-not (Test-Path $licenseSource)) {
+        throw "$Name license file is missing: $rel"
+      }
+
+      $licenseName = ($Name + '-' + ($rel -replace '[\\/]', '-') )
+      Copy-Item $licenseSource (Join-Path $licenses $licenseName) -Force
+    }
+
+    # SNISPF wrong_seq requires signed WinDivert components.
+    if ($Name -eq 'SNISPF') {
+      $windivertReady = $true
+
+      foreach ($file in @('WinDivert.dll', 'WinDivert64.sys')) {
+        $sourceFile = Join-Path $src ("resources\WinDivert\" + $file)
+
+        if (-not (Test-Path $sourceFile)) {
+          $windivertReady = $false
+          break
+        }
+
+        $signature = Get-AuthenticodeSignature $sourceFile
+        if ($signature.Status -ne 'Valid') {
+          $windivertReady = $false
+          break
+        }
+
+        Copy-Item $sourceFile (Join-Path $dest $file) -Force
+      }
+
+      if ($windivertReady) {
+        Get-License 'https://raw.githubusercontent.com/basil00/WinDivert/v2.2.2/LICENSE' `
+          'WinDivert-license.txt'
+        $report.Add("- SNISPF: signed WinDivert files included; wrong_seq prerequisites available.")
+      }
+      else {
+        $report.Add("- SNISPF: built; wrong_seq requires valid signed WinDivert files and is not enabled in this package.")
+      }
+    }
+
+    $report.Add("- ${Name}: built for Windows x64 from pinned commit $($Config.commit).")
+  }
+  catch {
+    if (Test-Path $dest) {
+      Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    throw "$Name runtime build failed; stopping package build: $_"
+  }
+}
+
+foreach ($entry in $lock.additionalRuntimes.PSObject.Properties) {
+  Build-GoRuntime -Name $entry.Name -Config $entry.Value
+}
+
+# ------------------------------------------------------------------
+# MHRV official Windows release (SHA-256 pinned)
+$m = $lock.mhrv
+$mDir = Join-Path $engines 'mhrv'
+$mZip = Join-Path $work $m.asset
+$mTmp = Join-Path $work 'mhrv-extracted'
+
+if (Test-Path $mDir) {
+  Remove-Item $mDir -Recurse -Force
+}
+if (Test-Path $mTmp) {
+  Remove-Item $mTmp -Recurse -Force
+}
+
+New-Item -ItemType Directory -Force -Path $mDir, $mTmp | Out-Null
+
+$mUrl = "https://github.com/therealaleph/MasterHttpRelayVPN-RUST/releases/download/$($m.version)/$($m.asset)"
+
+Get-Remote $mUrl $mZip
+Confirm-Hash "MHRV $($m.version)" $mZip $m.sha256 ''
+
+Expand-Archive -Path $mZip -DestinationPath $mTmp -Force
+
+# Preserve the complete upstream Windows release contents.
+Get-ChildItem $mTmp -Force | ForEach-Object {
+  Copy-Item $_.FullName -Destination $mDir -Recurse -Force
+}
+
+$mCli = Get-ChildItem $mDir -Recurse -Filter 'mhrv-rs.exe' | Select-Object -First 1
+if (-not $mCli) {
+  throw 'MHRV archive did not contain mhrv-rs.exe.'
+}
+
+$mUi = Get-ChildItem $mDir -Recurse -Filter 'mhrv-rs-ui.exe' | Select-Object -First 1
+if (-not $mUi) {
+  Write-Warning 'MHRV desktop UI executable was not found in the release archive.'
+}
+
+Get-License "https://raw.githubusercontent.com/therealaleph/MasterHttpRelayVPN-RUST/$($m.version)/LICENSE" `
+  'MHRV-MIT-license.txt'
+
+$report.Add("- MHRV: official Windows release $($m.version), SHA-256 verified.")
+
 
 # ------------------------------------------------------------------ report
 $summary = @("### Third-party runtimes", "") + $report
 $summary | ForEach-Object { Write-Host $_ }
 if ($env:GITHUB_STEP_SUMMARY) { $summary | Add-Content -Path $env:GITHUB_STEP_SUMMARY }
 Set-Content -Path (Join-Path $Stage 'engines-verification.txt') -Value ($report -join "`n")
+# A failed optional native command must not leak its exit code as the step's exit code.
+$global:LASTEXITCODE = 0
 Write-Host 'Engines ready.'
