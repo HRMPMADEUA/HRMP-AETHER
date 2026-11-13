@@ -91,13 +91,15 @@ New-Item -ItemType Directory -Force -Path $xDir | Out-Null
 $xBase = "https://github.com/XTLS/Xray-core/releases/download/$($x.version)"
 $xZip = Join-Path $work $x.asset
 Get-Remote "$xBase/$($x.asset)" $xZip
-$xDgst = Join-Path $work ($x.asset + '.dgst')
 $xUp = ''
-try {
-  Get-Remote "$xBase/$($x.asset).dgst" $xDgst
-  $m = [regex]::Match((Get-Content $xDgst -Raw), 'SHA2-256=\s*([0-9a-fA-F]{64})')
-  if ($m.Success) { $xUp = $m.Groups[1].Value }
-} catch { Write-Warning "No upstream digest for Xray: $_" }
+if (-not $x.sha256) {
+  $xDgst = Join-Path $work ($x.asset + '.dgst')
+  try {
+    Get-Remote "$xBase/$($x.asset).dgst" $xDgst
+    $m = [regex]::Match((Get-Content $xDgst -Raw), 'SHA2-256=\s*([0-9a-fA-F]{64})')
+    if ($m.Success) { $xUp = $m.Groups[1].Value }
+  } catch { Write-Warning "No upstream digest for Xray: $_" }
+}
 Confirm-Hash "Xray-core $($x.version)" $xZip $x.sha256 $xUp
 $xTmp = Join-Path $work 'xray'
 if (Test-Path $xTmp) { Remove-Item $xTmp -Recurse -Force }
@@ -294,13 +296,28 @@ try {
     throw 'SlipNet CLI go.mod is missing.'
   }
 
-  $goModText = Get-Content $goModPath -Raw
+  # Parse go.mod replace directives line-by-line. Trim() removes CR from
+  # Windows CRLF files, avoiding false negatives from line-ending conversion.
+  $goModLines = @(Get-Content -LiteralPath $goModPath)
+
   foreach ($sub in $sn.submodules) {
     $relativeTarget = "../$($sub.path)"
-    $escapedTarget = [regex]::Escape($relativeTarget)
-    $replacePattern = "(?m)^[ \t]*(?:replace[ \t]+)?\S+(?:[ \t]+\S+)?[ \t]+=>[ \t]+$escapedTarget(?:[ \t]+\S+)?[ \t]*(?:#.*)?$"
+    $replaceFound = $false
 
-    if ($goModText -notmatch $replacePattern) {
+    foreach ($goLine in $goModLines) {
+      $directive = ($goLine -split '#', 2)[0].Trim()
+      if (-not $directive -or $directive -notmatch '=>') {
+        continue
+      }
+
+      $tokens = @($directive -split '\s+')
+      if ($tokens.Count -ge 3 -and $tokens[-1] -ceq $relativeTarget) {
+        $replaceFound = $true
+        break
+      }
+    }
+
+    if (-not $replaceFound) {
       throw "SlipNet go.mod does not contain the expected pinned replace directive for $($sub.path)."
     }
 
