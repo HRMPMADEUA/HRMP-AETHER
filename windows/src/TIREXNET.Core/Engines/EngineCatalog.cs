@@ -56,6 +56,8 @@ public static class EngineCatalog
     public static string? UnavailableReason(Profile p, AppSettings s)
     {
         var info = Get(p.Engine);
+        if (p.Protocol == "snispoof" && !File.Exists(AppPaths.SniSpoofExe))
+            return "SNISPF runtime is missing from this installation. Reinstall TIREXNET.";
         if (!IsRuntimeAvailable(p.Engine))
             return p.Engine == EngineKind.OpenVpn
                 ? "OpenVPN runtime is missing. Install the official OpenVPN Community build (offered by the TIREXNET installer)."

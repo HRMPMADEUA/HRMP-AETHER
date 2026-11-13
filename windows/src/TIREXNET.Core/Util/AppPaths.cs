@@ -22,6 +22,8 @@ public static class AppPaths
     public static string CottenDnsExe => Path.Combine(CottenDnsDir, "cottendns-client.exe");
     public static string StormDnsDir => Path.Combine(EnginesDir, "stormdns");
     public static string StormDnsExe => Path.Combine(StormDnsDir, "stormdns-client.exe");
+    public static string SniSpoofDir => Path.Combine(EnginesDir, "snispf");
+    public static string SniSpoofExe => Path.Combine(SniSpoofDir, "snispf.exe");
     /// <summary>Where the TIREXNET installer places the official OpenVPN Community build (INSTALLDIR).</summary>
     public static string OpenVpnBundledExe => Path.Combine(EnginesDir, "openvpn", "bin", "openvpn.exe");
 

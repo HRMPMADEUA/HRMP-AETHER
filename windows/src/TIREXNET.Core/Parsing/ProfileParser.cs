@@ -13,7 +13,7 @@ public sealed class ParseResult
 
 public static class ProfileParser
 {
-    private static readonly string[] UriSchemes = { "vless://", "vmess://", "trojan://", "ss://", "masterdns://", "cottendns://", "stormdns://" };
+    private static readonly string[] UriSchemes = { "vless://", "vmess://", "trojan://", "ss://", "masterdns://", "cottendns://", "stormdns://", "snispoof://" };
 
     /// <summary>Parses pasted text, a subscription body (plain or base64), an Xray JSON document or a WireGuard .conf.</summary>
     public static ParseResult ParseText(string? text, string? fileName = null)
@@ -163,6 +163,23 @@ public static class ProfileParser
     public static bool TryParseUri(string uri, out Profile? profile, out string error)
     {
         profile = null;
+        if (uri.StartsWith("snispoof://", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!SniSpoofProfile.TryDecode(uri, out var sni, out error) || sni == null)
+                return false;
+            if (!SniSpoofProfile.TryGetBaseProfile(sni, out var baseProfile, out error) || baseProfile == null)
+                return false;
+            profile = new Profile
+            {
+                Name = sni.Name,
+                Engine = EngineKind.Xray,
+                Protocol = "snispoof",
+                Server = sni.ConnectIp,
+                Port = sni.ConnectPort,
+                Raw = uri.Trim(),
+            };
+            return true;
+        }
         if (DnsTunnelProfile.IsDnsScheme(uri))
             return DnsTunnelProfile.TryCreate(uri, out profile, out error);
         if (!TryParseEndpoint(uri, out var ep, out error) || ep == null) return false;
@@ -625,6 +642,13 @@ public static class ProfileParser
                     if (!string.IsNullOrEmpty(psk)) yield return psk;
                 }
             }
+            yield break;
+        }
+        if (p.Protocol == "snispoof")
+        {
+            if (SniSpoofProfile.TryDecode(p.Raw, out var sni, out _) && sni != null &&
+                SniSpoofProfile.TryGetBaseProfile(sni, out var baseProfile, out _) && baseProfile != null)
+                foreach (var secret in CollectSecrets(baseProfile)) yield return secret;
             yield break;
         }
         if (p.Protocol == "xray-json") yield break;

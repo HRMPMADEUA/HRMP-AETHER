@@ -24,7 +24,16 @@ public static class ConfigValidator
         var errors = new List<string>();
         if (string.IsNullOrWhiteSpace(p.Name)) errors.Add("The profile needs a name.");
         if (string.IsNullOrWhiteSpace(p.Raw)) { errors.Add("The profile has no configuration data."); return errors; }
-        if (p.Engine == EngineKind.WireGuard) ValidateWireGuard(p.Raw, errors, amnezia: false);
+        if (p.Protocol == "snispoof")
+        {
+            if (!SniSpoofProfile.TryDecode(p.Raw, out var sni, out var sniError) || sni == null)
+                errors.Add(sniError);
+            else if (!SniSpoofProfile.TryGetBaseProfile(sni, out var baseProfile, out var baseError) || baseProfile == null)
+                errors.Add(baseError);
+            else
+                errors.AddRange(Validate(baseProfile));
+        }
+        else if (p.Engine == EngineKind.WireGuard) ValidateWireGuard(p.Raw, errors, amnezia: false);
         else if (p.Engine == EngineKind.AmneziaWG) ValidateWireGuard(p.Raw, errors, amnezia: true);
         else if (p.Engine == EngineKind.OpenVpn) errors.AddRange(OpenVpnConfig.Validate(p.Raw));
         else if (p.Engine == EngineKind.SlipNet) errors.AddRange(SlipNetProfile.Validate(p.Raw));
