@@ -726,6 +726,87 @@ namespace TIREXNET.UI
             if (p == null) return;
             if (p.Protected) { Dialogs.Info(this, "This profile was shared as protected: it can be connected, disconnected and deleted, but not edited."); return; }
             if (p.ReadOnly) { Dialogs.Info(this, "Profiles synced from your account are read-only. Import a copy to customize it."); return; }
+
+            if (p.Engine == EngineKind.Mhrv)
+            {
+                if (!MhrvProfile.TryDecode(p.Raw, out var currentMhrv, out var decodeError) || currentMhrv == null)
+                {
+                    Dialogs.Error(this, "Could not read this MHRV profile: " + decodeError);
+                    return;
+                }
+
+                var mhrvName = Dialogs.Prompt(
+                    this,
+                    "Edit MHRV profile",
+                    "Profile name:",
+                    currentMhrv.Name);
+
+                if (mhrvName == null) return;
+                if (string.IsNullOrWhiteSpace(mhrvName))
+                {
+                    Dialogs.Error(this, "Enter a profile name.");
+                    return;
+                }
+
+                var mhrvConfig = Dialogs.Prompt(
+                    this,
+                    "Edit MHRV configuration",
+                    "Edit the complete MHRV TOML configuration. Required sections: [relay] and [network]. Supported modes: apps_script, direct, full.",
+                    currentMhrv.Config,
+                    true);
+
+                if (mhrvConfig == null) return;
+                if (string.IsNullOrWhiteSpace(mhrvConfig))
+                {
+                    Dialogs.Error(this, "MHRV configuration cannot be empty.");
+                    return;
+                }
+
+                try
+                {
+                    var payload = System.Text.Json.JsonSerializer.Serialize(new
+                    {
+                        name = mhrvName.Trim(),
+                        config = mhrvConfig.Trim()
+                    });
+
+                    var token = Convert.ToBase64String(
+                        Encoding.UTF8.GetBytes(payload))
+                        .TrimEnd('=')
+                        .Replace('+', '-')
+                        .Replace('/', '_');
+
+                    var parsedMhrv = ProfileParser.ParseText("mhrv://" + token, null);
+                    if (parsedMhrv.Profiles.Count != 1 ||
+                        parsedMhrv.Profiles[0].Engine != EngineKind.Mhrv)
+                    {
+                        Dialogs.Error(this, parsedMhrv.Errors.FirstOrDefault()
+                            ?? "The MHRV configuration is invalid.");
+                        return;
+                    }
+
+                    var updatedMhrv = parsedMhrv.Profiles[0];
+                    var mhrvProblems = ConfigValidator.Validate(updatedMhrv);
+                    if (mhrvProblems.Count > 0)
+                    {
+                        Dialogs.Error(this, mhrvProblems[0]);
+                        return;
+                    }
+
+                    p.Name = updatedMhrv.Name;
+                    p.Raw = updatedMhrv.Raw;
+                    p.Protocol = updatedMhrv.Protocol;
+                    p.Server = updatedMhrv.Server;
+                    p.Port = updatedMhrv.Port;
+                    AppServices.Profiles.Update(p);
+                }
+                catch (Exception ex)
+                {
+                    Dialogs.Error(this, "Could not update the MHRV profile: " + ex.Message);
+                }
+                return;
+            }
+
             var text = Dialogs.Prompt(this, "Edit profile", "Edit the configuration. It is shown here in clear text and stored encrypted.", p.Raw, true);
             if (text == null || text.Trim() == p.Raw.Trim()) return;
             var parsed = ProfileParser.ParseText(text, null);
