@@ -298,7 +298,7 @@ try {
   foreach ($sub in $sn.submodules) {
     $relativeTarget = "../$($sub.path)"
     $escapedTarget = [regex]::Escape($relativeTarget)
-    $replacePattern = "(?m)^\s*replace\s+\S+\s+=>\s+$escapedTarget\s*$"
+    $replacePattern = "(?m)^[ \t]*(?:replace[ \t]+)?\S+(?:[ \t]+\S+)?[ \t]+=>[ \t]+$escapedTarget(?:[ \t]+\S+)?[ \t]*(?:#.*)?$"
 
     if ($goModText -notmatch $replacePattern) {
       throw "SlipNet go.mod does not contain the expected pinned replace directive for $($sub.path)."
