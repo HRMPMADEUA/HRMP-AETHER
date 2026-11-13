@@ -126,6 +126,10 @@ public sealed class AppSettings
     public int Mtu { get; set; } = 0;
     /// <summary>IPv4 networks (CIDR) that bypass the tunnel in VPN mode, one per line or comma separated.</summary>
     public string BypassNetworks { get; set; } = "";
+    /// <summary>Selected executable paths for the Windows split-tunnel policy.</summary>
+    public List<string> SplitTunnelApplications { get; set; } = new();
+    /// <summary>include or exclude; stored until packet-steering support is installed.</summary>
+    public string SplitTunnelMode { get; set; } = "exclude";
     public bool CloseToTray { get; set; } = true;
     public bool StartMinimized { get; set; } = false;
     public string LastProfileId { get; set; } = "";

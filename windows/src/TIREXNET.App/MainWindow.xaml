@@ -338,6 +338,15 @@
                 <TextBox x:Name="SetMtu" Margin="0,5,0,12" Width="130" HorizontalAlignment="Left" />
                 <TextBlock Text="Networks that bypass the VPN (IPv4 CIDR, one per line) — VPN mode with Xray" Style="{StaticResource Caption}" />
                 <TextBox x:Name="SetBypass" AcceptsReturn="True" Height="80" Margin="0,5,0,0" VerticalScrollBarVisibility="Auto" />
+                <Separator Margin="0,14,0,12" Opacity="0.35" />
+                <TextBlock Text="Application split tunneling" Style="{StaticResource CardTitle}" />
+                <TextBlock Text="Select executable files and save an Include or Exclude policy. Per-application traffic steering is not active until the dedicated Windows filtering component is installed." Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,6,0,8" />
+                <ComboBox x:Name="SetSplitMode" Width="220" HorizontalAlignment="Left" SelectedIndex="1" Margin="0,0,0,8">
+                  <ComboBoxItem Content="Include selected apps" Tag="include" />
+                  <ComboBoxItem Content="Exclude selected apps" Tag="exclude" />
+                </ComboBox>
+                <TextBox x:Name="SetSplitApps" AcceptsReturn="True" Height="105" Margin="0,0,0,8" VerticalScrollBarVisibility="Auto" ToolTip="One full executable path per line" />
+                <Button Content="Add application executable…" Style="{StaticResource GhostButton}" Click="OnAddSplitApplication" HorizontalAlignment="Left" />
               </StackPanel>
             </Border>
 

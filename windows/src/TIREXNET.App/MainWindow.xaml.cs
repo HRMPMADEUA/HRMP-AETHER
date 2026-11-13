@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using Microsoft.Win32;
 using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -986,6 +987,8 @@ namespace TIREXNET.UI
             SetDns.Text = s.Dns;
             SetMtu.Text = s.Mtu.ToString(System.Globalization.CultureInfo.InvariantCulture);
             SetBypass.Text = s.BypassNetworks;
+            SetSplitApps.Text = string.Join(Environment.NewLine, s.SplitTunnelApplications ?? new List<string>());
+            SetSplitMode.SelectedIndex = string.Equals(s.SplitTunnelMode, "include", StringComparison.OrdinalIgnoreCase) ? 0 : 1;
             SetCloseToTray.IsChecked = s.CloseToTray;
             SetStartMin.IsChecked = s.StartMinimized;
             LoadUpdateSettings(s);
@@ -1003,6 +1006,42 @@ namespace TIREXNET.UI
         private void OnDnsPreset(object sender, RoutedEventArgs e)
         {
             SetDns.Text = (sender as Button)?.Tag as string ?? "";
+        }
+
+
+        private void OnAddSplitApplication(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var dialog = new OpenFileDialog
+                {
+                    Title = "Select application executable",
+                    Filter = "Windows applications (*.exe)|*.exe|All files (*.*)|*.*",
+                    CheckFileExists = true,
+                    Multiselect = true
+                };
+
+                if (dialog.ShowDialog(this) != true)
+                    return;
+
+                var paths = SetSplitApps.Text
+                    .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(p => p.Trim().Trim('"'))
+                    .Where(p => p.Length > 0)
+                    .ToList();
+
+                foreach (var path in dialog.FileNames)
+                {
+                    if (!paths.Contains(path, StringComparer.OrdinalIgnoreCase))
+                        paths.Add(path);
+                }
+
+                SetSplitApps.Text = string.Join(Environment.NewLine, paths);
+            }
+            catch (Exception ex)
+            {
+                Dialogs.Error(this, "Could not add the application.\n\n" + Redactor.Redact(ex.Message));
+            }
         }
 
         private void OnSaveSettings(object sender, RoutedEventArgs e)
@@ -1030,6 +1069,13 @@ namespace TIREXNET.UI
                 Dns = SetDns.Text.Trim(),
                 Mtu = mtu,
                 BypassNetworks = SetBypass.Text.Trim(),
+                SplitTunnelApplications = SetSplitApps.Text
+                    .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(p => p.Trim().Trim('"'))
+                    .Where(p => p.Length > 0)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList(),
+                SplitTunnelMode = (SetSplitMode.SelectedItem as ComboBoxItem)?.Tag as string ?? "exclude",
                 CloseToTray = SetCloseToTray.IsChecked == true,
                 StartMinimized = SetStartMin.IsChecked == true,
                 LastProfileId = cur.LastProfileId,
