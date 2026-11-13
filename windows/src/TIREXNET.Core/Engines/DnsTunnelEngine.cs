@@ -37,6 +37,21 @@ public sealed class DnsTunnelEngine : IEngine
         if (!DnsTunnelProfile.TryDecode(profile.Raw, out var data, out var error) || data == null)
             throw new EngineException(error);
 
+        // Android parity: profile-level selected/custom resolvers override
+        // the resolver list embedded in the shared profile. Keep selected first.
+        var customResolvers = new[] { profile.SelectedResolver ?? "" }
+            .Concat(profile.DnsResolvers ?? new List<string>())
+            .Select(x => (x ?? "").Trim())
+            .Where(IsResolverEndpoint)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (customResolvers.Count > 0)
+        {
+            data = data with { Resolvers = string.Join(Environment.NewLine, customResolvers) };
+            Log.Info($"{Name}: applying {customResolvers.Count} profile-specific DNS resolver(s).");
+        }
+
         if (!File.Exists(data.Executable))
             throw new EngineException($"{Name} runtime is missing. Reinstall TIREXNET.");
 
@@ -201,6 +216,62 @@ public sealed class DnsTunnelEngine : IEngine
 
         _configPath = null;
         _resolverPath = null;
+    }
+
+    private static bool IsResolverEndpoint(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+
+        value = value.Trim();
+        string host;
+        string? portText = null;
+
+        if (value.StartsWith("[", StringComparison.Ordinal))
+        {
+            var close = value.IndexOf(']');
+            if (close <= 1) return false;
+
+            host = value.Substring(1, close - 1);
+            var tail = value[(close + 1)..];
+
+            if (tail.Length > 0)
+            {
+                if (!tail.StartsWith(":") || tail.Length == 1) return false;
+                portText = tail[1..];
+            }
+
+            if (!IPAddress.TryParse(host, out var ipv6) ||
+                ipv6.AddressFamily != AddressFamily.InterNetworkV6)
+                return false;
+        }
+        else
+        {
+            var colons = value.Count(c => c == ':');
+
+            if (colons >= 2)
+            {
+                host = value;
+                if (!IPAddress.TryParse(host, out var ipv6) ||
+                    ipv6.AddressFamily != AddressFamily.InterNetworkV6)
+                    return false;
+            }
+            else
+            {
+                if (colons == 1)
+                {
+                    host = value[..value.IndexOf(':')];
+                    portText = value[(value.IndexOf(':') + 1)..];
+                }
+                else host = value;
+
+                if (!IPAddress.TryParse(host, out var ipv4) ||
+                    ipv4.AddressFamily != AddressFamily.InterNetwork)
+                    return false;
+            }
+        }
+
+        if (portText == null) return true;
+        return int.TryParse(portText, out var port) && port is >= 1 and <= 65535;
     }
 
     public Task<(long Upload, long Download)> QueryTotalsAsync() =>
