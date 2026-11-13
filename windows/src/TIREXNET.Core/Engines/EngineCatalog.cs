@@ -25,6 +25,8 @@ public static class EngineCatalog
             "CottenDNS Windows client", "Local SOCKS5 proxy"),
         new EngineInfo(EngineKind.StormDns, "StormDNS", "Encrypted DNS tunnel", true, false,
             "StormDNS Windows client", "Local SOCKS5 proxy"),
+        new EngineInfo(EngineKind.Mhrv, "MHRV", "Master HTTP Relay VPN · Apps Script / Direct / Full", true, false,
+            "Official MHRV Rust Windows runtime", "Local HTTP + SOCKS5 proxy"),
     };
 
     public static EngineInfo Get(EngineKind kind) => All.First(e => e.Kind == kind);
@@ -39,6 +41,7 @@ public static class EngineCatalog
         EngineKind.MasterDns => File.Exists(AppPaths.MasterDnsExe),
         EngineKind.CottenDns => File.Exists(AppPaths.CottenDnsExe),
         EngineKind.StormDns => File.Exists(AppPaths.StormDnsExe),
+        EngineKind.Mhrv => File.Exists(AppPaths.MhrvExe),
         _ => false,
     };
 
@@ -46,7 +49,7 @@ public static class EngineCatalog
 
     /// <summary>Engines with a native tunnel always run as a full-device VPN; Xray and SlipNet follow the selected mode.</summary>
     public static ConnectionMode EffectiveMode(Profile p, AppSettings s) =>
-        p.Engine is EngineKind.MasterDns or EngineKind.CottenDns or EngineKind.StormDns
+        p.Engine is EngineKind.MasterDns or EngineKind.CottenDns or EngineKind.StormDns or EngineKind.Mhrv
             ? ConnectionMode.Proxy
             : p.Engine is EngineKind.Xray or EngineKind.SlipNet ? s.Mode : ConnectionMode.Vpn;
 
@@ -81,6 +84,7 @@ public static class EngineCatalog
         EngineKind.OpenVpn => new OpenVpnEngine(),
         EngineKind.SlipNet => new SlipNetEngine(),
         EngineKind.MasterDns or EngineKind.CottenDns or EngineKind.StormDns => new DnsTunnelEngine(kind),
+        EngineKind.Mhrv => new MhrvEngine(),
         _ => new XrayEngine(),
     };
 

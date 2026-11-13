@@ -13,7 +13,7 @@ public sealed class ParseResult
 
 public static class ProfileParser
 {
-    private static readonly string[] UriSchemes = { "vless://", "vmess://", "trojan://", "ss://", "masterdns://", "cottendns://", "stormdns://", "snispoof://" };
+    private static readonly string[] UriSchemes = { "vless://", "vmess://", "trojan://", "ss://", "masterdns://", "cottendns://", "stormdns://", "snispoof://", "mhrv://" };
 
     /// <summary>Parses pasted text, a subscription body (plain or base64), an Xray JSON document or a WireGuard .conf.</summary>
     public static ParseResult ParseText(string? text, string? fileName = null)
@@ -163,6 +163,21 @@ public static class ProfileParser
     public static bool TryParseUri(string uri, out Profile? profile, out string error)
     {
         profile = null;
+        if (uri.StartsWith("mhrv://", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!MhrvProfile.TryDecode(uri, out var mhrv, out error) || mhrv == null)
+                return false;
+
+            profile = new Profile
+            {
+                Name = mhrv.Name,
+                Engine = EngineKind.Mhrv,
+                Protocol = "mhrv",
+                Raw = uri.Trim(),
+            };
+            return true;
+        }
+
         if (uri.StartsWith("snispoof://", StringComparison.OrdinalIgnoreCase))
         {
             if (!SniSpoofProfile.TryDecode(uri, out var sni, out error) || sni == null)
@@ -642,6 +657,12 @@ public static class ProfileParser
                     if (!string.IsNullOrEmpty(psk)) yield return psk;
                 }
             }
+            yield break;
+        }
+        if (p.Engine == EngineKind.Mhrv)
+        {
+            foreach (var secret in MhrvProfile.Secrets(p.Raw))
+                yield return secret;
             yield break;
         }
         if (p.Protocol == "snispoof")

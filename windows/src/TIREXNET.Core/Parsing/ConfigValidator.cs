@@ -24,7 +24,12 @@ public static class ConfigValidator
         var errors = new List<string>();
         if (string.IsNullOrWhiteSpace(p.Name)) errors.Add("The profile needs a name.");
         if (string.IsNullOrWhiteSpace(p.Raw)) { errors.Add("The profile has no configuration data."); return errors; }
-        if (p.Protocol == "snispoof")
+        if (p.Engine == EngineKind.Mhrv)
+        {
+            if (!MhrvProfile.TryDecode(p.Raw, out _, out var mhrvError))
+                errors.Add(mhrvError);
+        }
+        else if (p.Protocol == "snispoof")
         {
             if (!SniSpoofProfile.TryDecode(p.Raw, out var sni, out var sniError) || sni == null)
                 errors.Add(sniError);

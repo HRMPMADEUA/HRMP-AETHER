@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 namespace TIREXNET.Core.Models;
 
 /// <summary>Values are persisted as numbers: only ever append.</summary>
-public enum EngineKind { Xray = 0, WireGuard = 1, AmneziaWG = 2, OpenVpn = 3, SlipNet = 4, MasterDns = 5, CottenDns = 6, StormDns = 7 }
+public enum EngineKind { Xray = 0, WireGuard = 1, AmneziaWG = 2, OpenVpn = 3, SlipNet = 4, MasterDns = 5, CottenDns = 6, StormDns = 7, Mhrv = 8 }
 
 public enum ConnectionMode { Proxy, Vpn }
 
@@ -62,6 +62,7 @@ public sealed class Profile
         "masterdns" => "MD",
         "cottendns" => "CD",
         "stormdns" => "SD",
+        "mhrv" => "MH",
         _ => "TX",
     };
 
@@ -75,6 +76,7 @@ public sealed class Profile
         EngineKind.MasterDns => "MasterDNS",
         EngineKind.CottenDns => "CottenDNS",
         EngineKind.StormDns => "StormDNS",
+        EngineKind.Mhrv => "MHRV",
         _ => "Xray",
     };
 

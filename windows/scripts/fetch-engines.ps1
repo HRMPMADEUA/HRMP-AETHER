@@ -508,6 +508,13 @@ if (-not $mCli) {
   throw 'MHRV archive did not contain mhrv-rs.exe.'
 }
 
+# Normalize the official CLI path for TIREXNET.Core.AppPaths.
+# Keep the original upstream release contents intact.
+$normalizedCli = Join-Path $mDir 'mhrv-rs.exe'
+if ($mCli.FullName -ne $normalizedCli) {
+  Copy-Item $mCli.FullName $normalizedCli -Force
+}
+
 $mUi = Get-ChildItem $mDir -Recurse -Filter 'mhrv-rs-ui.exe' | Select-Object -First 1
 if (-not $mUi) {
   Write-Warning 'MHRV desktop UI executable was not found in the release archive.'
