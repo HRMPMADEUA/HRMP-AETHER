@@ -54,6 +54,23 @@ public static class ProfileParser
         }
 
         var lines = SplitLines(text);
+
+        // Android engines without a Windows runtime must never enter a
+        // Windows decoder merely because their URI scheme is recognised.
+        var androidOnlyLines = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var line in lines)
+        {
+            if (AndroidOnlyLinks.TryIdentify(line, out _, out var androidOnlyMessage))
+            {
+                result.Errors.Add(androidOnlyMessage);
+                androidOnlyLines.Add(line);
+            }
+        }
+        if (androidOnlyLines.Count > 0)
+        {
+            lines = lines.Where(line => !androidOnlyLines.Contains(line)).ToList();
+            if (lines.Count == 0) return result;
+        }
         if (lines.Any(SlipNetProfile.LooksLikeSlipNet))
         {
             foreach (var line in lines)

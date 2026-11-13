@@ -270,11 +270,41 @@ try {
     throw ("SlipNet has uninitialized/mismatched submodules: " + ($badSub -join '; '))
   }
 
+  # Verify every nested dependency against the exact commit in engines.lock.json.
+  foreach ($sub in $sn.submodules) {
+    $subDir = Join-Path $src $sub.path
+    if (-not (Test-Path $subDir)) {
+      throw "SlipNet pinned submodule directory is missing: $($sub.path)"
+    }
+
+    $actualSubCommit = (git -C $subDir rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or $actualSubCommit -ne $sub.commit) {
+      throw "SlipNet submodule commit mismatch for $($sub.path): expected $($sub.commit), got $actualSubCommit"
+    }
+  }
+
   $cliDir = Join-Path $src 'cli'
   $resolverSource = Join-Path $src 'app\src\main\res\raw\resolvers.txt'
 
-  if (-not (Test-Path (Join-Path $cliDir 'go.mod'))) {
+  $goModPath = Join-Path $cliDir 'go.mod'
+  if (-not (Test-Path $goModPath)) {
     throw 'SlipNet CLI go.mod is missing.'
+  }
+
+  $goModText = Get-Content $goModPath -Raw
+  foreach ($sub in $sn.submodules) {
+    $relativeTarget = "../$($sub.path)"
+    $escapedTarget = [regex]::Escape($relativeTarget)
+    $replacePattern = "(?m)^\s*replace\s+\S+\s+=>\s+$escapedTarget\s*$"
+
+    if ($goModText -notmatch $replacePattern) {
+      throw "SlipNet go.mod does not contain the expected pinned replace directive for $($sub.path)."
+    }
+
+    $targetDir = Join-Path $cliDir $relativeTarget
+    if (-not (Test-Path $targetDir)) {
+      throw "SlipNet go.mod replaces a module with a missing directory: $relativeTarget"
+    }
   }
 
   if (Test-Path $resolverSource) {
