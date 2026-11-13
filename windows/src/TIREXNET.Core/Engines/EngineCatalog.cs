@@ -47,10 +47,10 @@ public static class EngineCatalog
         var info = Get(p.Engine);
         if (!IsRuntimeAvailable(p.Engine))
             return p.Engine == EngineKind.OpenVpn
-                ? "OpenVPN is not installed. Install the official OpenVPN Community build (offered by the TIREXNET installer)."
-                : $"The {info.Name} runtime is not installed in this build of TIREXNET.";
+                ? "OpenVPN runtime is missing. Install the official OpenVPN Community build (offered by the TIREXNET installer)."
+                : $"{info.Name} runtime is missing from this installation. Reinstall TIREXNET.";
         if (p.Engine is EngineKind.Xray or EngineKind.SlipNet && s.Mode == ConnectionMode.Vpn && !IsTun2SocksAvailable)
-            return "VPN mode needs tun2socks and Wintun, which are not installed in this build.";
+            return "VPN mode runtime is missing: tun2socks and Wintun are not installed in this build.";
         return null;
     }
 

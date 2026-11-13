@@ -25,6 +25,7 @@ SolidCompression=yes
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 PrivilegesRequired=admin
+ChangesAssociations=yes
 MinVersion=10.0
 WizardStyle=modern
 UninstallDisplayIcon={app}\TIREXNET.exe
@@ -59,6 +60,11 @@ Name: "{group}\Uninstall TIREXNET"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\TIREXNET"; Filename: "{app}\TIREXNET.exe"; Tasks: desktopicon
 
 [Registry]
+; tirexnet:// links (browsers, chat apps, Run dialog) open TIREXNET, which imports them. Machine-wide, removed on uninstall.
+Root: HKLM; Subkey: "Software\Classes\tirexnet"; ValueType: string; ValueName: ""; ValueData: "URL:TIREXNET Share Link"; Flags: uninsdeletekey
+Root: HKLM; Subkey: "Software\Classes\tirexnet"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKLM; Subkey: "Software\Classes\tirexnet\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\TIREXNET.exe"",0"
+Root: HKLM; Subkey: "Software\Classes\tirexnet\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\TIREXNET.exe"" ""%1"""
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "TIREXNET"; ValueData: """{app}\TIREXNET.exe"""; Tasks: startupicon; Flags: uninsdeletevalue
 
 [Run]

@@ -304,12 +304,12 @@ public class EngineTests
     [Fact]
     public async Task Connect_WithMissingRuntime_FailsCleanlyWithoutTouchingTheSystem()
     {
-        // The test host has no engines folder, so every runtime is "not installed".
+        // The test host has no engines folder, so every runtime is "missing".
         using var manager = new ConnectionManager();
         var profile = Assert.Single(ProfileParser.ParseText(Link("dnstt")).Profiles);
         await manager.ConnectAsync(profile, new AppSettings());
         Assert.Equal(ConnectionState.Error, manager.State);
-        Assert.Contains("not installed", manager.Message);
+        Assert.Contains("runtime is missing", manager.Message);
         await manager.DisconnectAsync();
         Assert.Equal(ConnectionState.Disconnected, manager.State);
     }

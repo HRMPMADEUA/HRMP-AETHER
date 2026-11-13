@@ -42,6 +42,14 @@ public sealed class ConnectionManager : IDisposable
             ActiveMode = EngineCatalog.EffectiveMode(profile, settings);
             Traffic = new TrafficSnapshot();
             ConnectedSinceUtc = null;
+            // Order: 1) profile validation, 2) engine/runtime availability, 3) start. An invalid profile is never masked by a missing runtime.
+            var invalid = ConfigValidator.Validate(profile);
+            if (invalid.Count > 0)
+            {
+                _engine = null;
+                Set(ConnectionState.Error, "The profile is not valid: " + invalid[0]);
+                return;
+            }
             var unavailable = EngineCatalog.UnavailableReason(profile, settings);
             if (unavailable != null)
             {

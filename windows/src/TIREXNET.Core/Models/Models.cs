@@ -25,6 +25,20 @@ public sealed class Profile
     public string Raw { get; set; } = "";
     public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
 
+    // Metadata carried by tirexnet:// share links (Android parity). All optional.
+    /// <summary>Android ConfigEngine name from the share link (XRAY, SLIPNET, ...), empty for local imports.</summary>
+    public string AndroidEngine { get; set; } = "";
+    /// <summary>Custom DNS resolvers shipped with the profile (Android "dns").</summary>
+    public List<string> DnsResolvers { get; set; } = new();
+    /// <summary>The resolver chosen for this profile (Android "selDns").</summary>
+    public string SelectedResolver { get; set; } = "";
+    public string Country { get; set; } = "";
+    public string Origin { get; set; } = "";
+    /// <summary>Per-profile engine settings (Android "custom"); preserved verbatim.</summary>
+    public Dictionary<string, string> CustomSettings { get; set; } = new();
+    /// <summary>Application-level lock requested by the share's creator: no edit, rename, copy or re-share.</summary>
+    public bool Protected { get; set; }
+
     /// <summary>Two-letter protocol code shown in the round badge of profile lists.</summary>
     [JsonIgnore]
     public string ProtocolCode => (Engine switch
@@ -107,6 +121,15 @@ public sealed class AppSettings
     public bool CloseToTray { get; set; } = true;
     public bool StartMinimized { get; set; } = false;
     public string LastProfileId { get; set; } = "";
+
+    // OTA updates
+    public bool UpdateAutoCheck { get; set; } = true;
+    public int UpdateIntervalHours { get; set; } = 24;
+    /// <summary>stable or beta.</summary>
+    public string UpdateChannel { get; set; } = "stable";
+    /// <summary>https manifest (see scripts/make-update-manifest.py). Editable in Settings.</summary>
+    public string UpdateManifestUrl { get; set; } = "https://github.com/HRMPMADEUA/HRMP-AETHER/releases/latest/download/windows-update.json";
+    public string LastUpdateCheckUtc { get; set; } = "";
 }
 
 public sealed class TrafficSnapshot

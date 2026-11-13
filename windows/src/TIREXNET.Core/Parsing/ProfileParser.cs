@@ -27,6 +27,12 @@ public static class ProfileParser
         text = text.Trim().TrimStart('﻿');
         var stem = string.IsNullOrEmpty(fileName) ? null : Path.GetFileNameWithoutExtension(fileName);
 
+        if (text.Contains("tirexnet://", StringComparison.OrdinalIgnoreCase))
+        {
+            ParseTirexShares(text, result);
+            if (result.Profiles.Count > 0 || result.Errors.Count > 0) return result;
+        }
+
         if (WgConfig.LooksLikeWireGuard(text))
         {
             if (TryParseWireGuard(text, stem, out var wg, out var err)) result.Profiles.Add(wg!);
@@ -62,7 +68,7 @@ public static class ProfileParser
                     if (TryParseUri(line, out var up, out var upErr)) result.Profiles.Add(up!);
                     else result.Errors.Add(upErr);
                 }
-                else result.Errors.Add($"Unsupported or unrecognized entry: {Truncate(line, 40)}");
+                else result.Errors.Add(UnrecognizedMessage(line));
             }
             return result;
         }
@@ -80,7 +86,7 @@ public static class ProfileParser
         {
             if (!HasKnownScheme(line))
             {
-                result.Errors.Add($"Unsupported or unrecognized entry: {Truncate(line, 40)}");
+                result.Errors.Add(UnrecognizedMessage(line));
                 continue;
             }
             if (TryParseUri(line, out var profile, out var error)) result.Profiles.Add(profile!);
@@ -91,11 +97,61 @@ public static class ProfileParser
         return result;
     }
 
+    /// <summary>Opens tirexnet://share/v1/… links (alone or among other lines), then imports the embedded configuration through the normal parser.</summary>
+    private static void ParseTirexShares(string text, ParseResult result)
+    {
+        var links = new List<string>();
+        var rest = new List<string>();
+        foreach (var line in SplitLines(text))
+        {
+            var found = System.Text.RegularExpressions.Regex.Matches(line, @"tirexnet://[^\s<>""']+", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (found.Count == 0) rest.Add(line);
+            else foreach (System.Text.RegularExpressions.Match m in found) links.Add(m.Value);
+        }
+        foreach (var link in links)
+        {
+            TirexShare.Payload payload;
+            try { payload = TirexShare.Decode(link); }
+            catch (ShareException ex) { result.Errors.Add(ex.Message); continue; }
+
+            if (payload.Raw.Contains("tirexnet://", StringComparison.OrdinalIgnoreCase))
+            {
+                result.Errors.Add("A share link cannot contain another share link.");
+                continue;
+            }
+            var inner = ParseText(payload.Raw);
+            if (inner.Profiles.Count == 0)
+            {
+                var why = inner.Errors.FirstOrDefault() ?? "unsupported content";
+                result.Errors.Add($"The shared \"{payload.Name}\" profile ({payload.Engine}) cannot be imported: {why}");
+                continue;
+            }
+            foreach (var p in inner.Profiles)
+            {
+                if (inner.Profiles.Count == 1 || string.IsNullOrWhiteSpace(p.Name)) p.Name = payload.Name;
+                p.AndroidEngine = payload.Engine;
+                p.DnsResolvers = payload.DnsResolvers.ToList();
+                p.SelectedResolver = payload.SelectedResolver;
+                p.Country = payload.Country;
+                p.Origin = payload.Origin;
+                p.CustomSettings = new Dictionary<string, string>(payload.CustomSettings);
+                p.Protected = payload.Protected;
+                result.Profiles.Add(p);
+            }
+            foreach (var e in inner.Errors) result.Errors.Add(e);
+        }
+        if (rest.Count > 0 && links.Count > 0)
+            foreach (var r in rest.Where(HasKnownScheme)) { if (TryParseUri(r, out var up, out var err)) result.Profiles.Add(up!); else result.Errors.Add(err); }
+    }
+
     private static List<string> SplitLines(string text) =>
         text.Replace("\r", "").Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0 && !l.StartsWith('#')).ToList();
 
     private static bool HasKnownScheme(string line) =>
         UriSchemes.Any(s => line.StartsWith(s, StringComparison.OrdinalIgnoreCase));
+
+    private static string UnrecognizedMessage(string line) =>
+        AndroidOnlyLinks.TryIdentify(line, out _, out var msg) ? msg : $"Unsupported or unrecognized entry: {Truncate(line, 40)}";
 
     private static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "…";
 

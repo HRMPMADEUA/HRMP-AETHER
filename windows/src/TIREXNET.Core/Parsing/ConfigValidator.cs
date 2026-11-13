@@ -220,6 +220,10 @@ public static class ConfigValidator
             if (!NetUtil.TryParseIp(d, out _)) errors.Add($"Invalid DNS server: {d}");
         foreach (var b in SplitList(s.BypassNetworks))
             if (!NetUtil.TryParseCidrV4(b, out _, out _)) errors.Add($"Invalid bypass network (use IPv4 CIDR): {b}");
+        if (s.UpdateIntervalHours is < 1 or > 720) errors.Add("The update check interval must be between 1 and 720 hours.");
+        if (!s.UpdateChannel.Equals("stable", StringComparison.OrdinalIgnoreCase) && !s.UpdateChannel.Equals("beta", StringComparison.OrdinalIgnoreCase))
+            errors.Add("The update channel must be Stable or Beta.");
+        if (s.UpdateManifestUrl.Length > 0 && !TIREXNET.Core.Update.UpdateService.IsHttps(s.UpdateManifestUrl)) errors.Add("The update manifest URL must start with https://.");
         return errors;
     }
 

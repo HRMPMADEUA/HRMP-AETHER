@@ -47,11 +47,54 @@ public class ValidationTests
         Assert.Contains(ConfigValidator.Validate(Wg(conf)), e => e.Contains("PostUp"));
     }
 
+    private const string AwgParams = "Jc = 4\nJmin = 40\nJmax = 70\nS1 = 15\nS2 = 20\nS3 = 8\nS4 = 6\nH1 = 11\nH2 = 22\nH3 = 33\nH4 = 44\nI1 = <b 0xdead><r 8>\nI2 = <c><t>\nI3 = <rc 4>\nI4 = <rd 4>\nI5 = <r 2>";
+
     [Fact]
-    public void WireGuard_AmneziaParameters_AreRejectedAsUnsupported()
+    public void WireGuard_EngineRejectsAmneziaParameters_ButTheyAreAcceptedAsAmneziaWG()
     {
-        var conf = ProfileParserTests.WgConf.Replace("MTU = 1380", "MTU = 1380\nJc = 4\nJmin = 40\nJmax = 70");
-        Assert.Contains(ConfigValidator.Validate(Wg(conf)), e => e.Contains("AmneziaWG"));
+        var conf = ProfileParserTests.WgConf.Replace("MTU = 1380", "MTU = 1380\n" + AwgParams);
+        // Run as plain WireGuard the obfuscation would be silently dropped, so the plain engine refuses it and points to AmneziaWG.
+        var plain = new Profile { Name = "w", Engine = EngineKind.WireGuard, Protocol = "wireguard", Raw = conf };
+        Assert.Contains(ConfigValidator.Validate(plain), e => e.Contains("AmneziaWG"));
+        var p = Assert.Single(ProfileParser.ParseText(conf).Profiles);
+        Assert.Equal(EngineKind.AmneziaWG, p.Engine);
+        Assert.Empty(ConfigValidator.Validate(p));
+    }
+
+    [Fact]
+    public void AmneziaWG_AllParameters_ArePreservedInTheStoredProfile()
+    {
+        var conf = ProfileParserTests.WgConf.Replace("MTU = 1380", "MTU = 1380\n" + AwgParams);
+        var p = Assert.Single(ProfileParser.ParseText(conf).Profiles);
+        Assert.True(WgConfig.TryParse(p.Raw, out var cfg, out _));
+        foreach (var line in AwgParams.Split('\n'))
+        {
+            var kv = line.Split(" = ", 2);
+            Assert.Equal(kv[1], cfg.GetInterface(kv[0]));
+        }
+    }
+
+    [Fact]
+    public void PlainWireGuard_IsNotMistakenForAmneziaWG_AndStaysSupported()
+    {
+        var p = Assert.Single(ProfileParser.ParseText(ProfileParserTests.WgConf).Profiles);
+        Assert.Equal(EngineKind.WireGuard, p.Engine);
+        Assert.Empty(ConfigValidator.Validate(p));
+        Assert.False(AmneziaConfig.HasObfuscation(ProfileParserTests.WgConf));
+    }
+
+    [Theory]
+    [InlineData("Jc = 500")]
+    [InlineData("Jc = 4\nJmin = 80\nJmax = 40")]
+    [InlineData("Jc = 4\nS1 = 10\nS2 = 66")]
+    [InlineData("Jc = 4\nH1 = 7\nH2 = 7")]
+    [InlineData("Jc = 4\nH3 = nope")]
+    public void AmneziaWG_InvalidParameters_AreRejected(string extra)
+    {
+        var conf = ProfileParserTests.WgConf.Replace("MTU = 1380", "MTU = 1380\n" + extra);
+        var p = Assert.Single(ProfileParser.ParseText(conf).Profiles);
+        Assert.Equal(EngineKind.AmneziaWG, p.Engine);
+        Assert.NotEmpty(ConfigValidator.Validate(p));
     }
 
     [Fact]

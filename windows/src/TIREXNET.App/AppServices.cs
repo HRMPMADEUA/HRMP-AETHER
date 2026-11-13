@@ -13,6 +13,7 @@ namespace TIREXNET.UI
         public static SessionStore Sessions { get; private set; } = null!;
         public static ApiClient Api { get; private set; } = null!;
         public static ConnectionManager Manager { get; private set; } = null!;
+        public static TIREXNET.Core.Update.UpdateService Updates { get; private set; } = null!;
 
         public static void Initialize()
         {
@@ -22,6 +23,15 @@ namespace TIREXNET.UI
             Sessions = new SessionStore(dir);
             Api = new ApiClient();
             Manager = new ConnectionManager();
+            var asm = typeof(AppServices).Assembly.GetName().Version ?? new System.Version(1, 0, 0);
+            var current = new TIREXNET.Core.Update.SemVer(asm.Major, asm.Minor, Math.Max(0, asm.Build), "");
+            var exe = Environment.ProcessPath ?? "";
+            var signer = "";
+            if (exe.Length > 0) TIREXNET.Core.Authenticode.IsTrusted(exe, out signer);
+            var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromMinutes(30) };
+            http.DefaultRequestHeaders.UserAgent.ParseAdd("TIREXNET-Windows/" + current);
+            Updates = new TIREXNET.Core.Update.UpdateService(http, System.IO.Path.Combine(System.IO.Path.GetDirectoryName(AppPaths.RunDir) ?? dir, "updates"), current,
+                new TIREXNET.Core.Update.AuthenticodeUpdateVerifier(), signer);
         }
     }
 }

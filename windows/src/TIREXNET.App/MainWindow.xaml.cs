@@ -191,6 +191,15 @@ namespace TIREXNET.UI
             _tray.DoubleClick += (_, _) => ShowFromTray();
         }
 
+        /// <summary>Called for a clicked tirexnet:// link, or (link == null) when a second launch just wants the window.</summary>
+        public void HandleActivation(string? link)
+        {
+            ShowFromTray();
+            if (link == null) return;
+            Log.Info("Opening a tirexnet:// link from another application.");
+            ImportText(link, null);
+        }
+
         private void ShowFromTray()
         {
             Show();
@@ -597,6 +606,7 @@ namespace TIREXNET.UI
         {
             var p = PickedProfile();
             if (p == null) return;
+            if (p.Protected) { Dialogs.Info(this, "This profile was shared as protected: it can be connected, disconnected and deleted, but not renamed."); return; }
             if (p.ReadOnly) { Dialogs.Info(this, "Profiles synced from your account are read-only."); return; }
             var name = Dialogs.Prompt(this, "Rename profile", "Profile name:", p.Name);
             if (!string.IsNullOrWhiteSpace(name)) AppServices.Profiles.Rename(p.Id, name!);
@@ -663,6 +673,7 @@ namespace TIREXNET.UI
         {
             var p = PickedProfile();
             if (p == null) return;
+            if (p.Protected) { Dialogs.Info(this, "This profile was shared as protected: it can be connected, disconnected and deleted, but not edited."); return; }
             if (p.ReadOnly) { Dialogs.Info(this, "Profiles synced from your account are read-only. Import a copy to customize it."); return; }
             var text = Dialogs.Prompt(this, "Edit profile", "Edit the configuration. It is shown here in clear text and stored encrypted.", p.Raw, true);
             if (text == null || text.Trim() == p.Raw.Trim()) return;
@@ -683,6 +694,7 @@ namespace TIREXNET.UI
         {
             var p = PickedProfile();
             if (p == null) return;
+            if (p.Protected) { Dialogs.Info(this, "This profile was shared as protected: it can be connected, disconnected and deleted, but not exported or copied."); return; }
             if (!Dialogs.Confirm(this, "The exported file is NOT encrypted and contains your connection secrets. Keep it safe.\n\nContinue?")) return;
             var dlg = new Microsoft.Win32.SaveFileDialog { FileName = ProfileStore.ExportFileName(p), Title = "Export profile" };
             if (dlg.ShowDialog(this) != true) return;
@@ -844,6 +856,7 @@ namespace TIREXNET.UI
             SetBypass.Text = s.BypassNetworks;
             SetCloseToTray.IsChecked = s.CloseToTray;
             SetStartMin.IsChecked = s.StartMinimized;
+            LoadUpdateSettings(s);
             var vpn = s.Mode == ConnectionMode.Vpn && XrayEngine.IsVpnRuntimeAvailable;
             ModeVpn.IsChecked = vpn;
             ModeProxy.IsChecked = !vpn;
@@ -888,7 +901,14 @@ namespace TIREXNET.UI
                 CloseToTray = SetCloseToTray.IsChecked == true,
                 StartMinimized = SetStartMin.IsChecked == true,
                 LastProfileId = cur.LastProfileId,
+                LastUpdateCheckUtc = cur.LastUpdateCheckUtc,
             };
+            if (!ReadUpdateSettings(next, out var updateError))
+            {
+                SettingsMessage.Text = updateError;
+                SettingsMessage.Foreground = (Brush)FindResource("RedBrush");
+                return;
+            }
             var errors = ConfigValidator.ValidateSettings(next);
             if (errors.Count > 0)
             {

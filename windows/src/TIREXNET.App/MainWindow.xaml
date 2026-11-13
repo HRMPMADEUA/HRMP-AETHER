@@ -350,6 +350,40 @@
 
             <Border Style="{StaticResource GlassCard}" Margin="0,0,0,14">
               <StackPanel>
+                <TextBlock Text="Updates" Style="{StaticResource CardTitle}" />
+                <TextBlock x:Name="UpdVersion" Style="{StaticResource Caption}" Margin="0,6,0,0" />
+                <CheckBox x:Name="SetUpdAuto" Content="Check for updates automatically" Margin="0,10,0,0" />
+                <Grid Margin="0,6,0,0">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                  </Grid.ColumnDefinitions>
+                  <StackPanel Margin="0,0,8,0">
+                    <TextBlock Text="Channel" Style="{StaticResource Caption}" />
+                    <ComboBox x:Name="SetUpdChannel" Margin="0,5,0,0">
+                      <ComboBoxItem Content="Stable" Tag="stable" />
+                      <ComboBoxItem Content="Beta" Tag="beta" />
+                    </ComboBox>
+                  </StackPanel>
+                  <StackPanel Grid.Column="1" Margin="8,0,0,0">
+                    <TextBlock Text="Check every (hours)" Style="{StaticResource Caption}" />
+                    <TextBox x:Name="SetUpdHours" Margin="0,5,0,0" InputScope="Number" />
+                  </StackPanel>
+                </Grid>
+                <TextBlock Text="Update manifest (https)" Style="{StaticResource Caption}" Margin="0,10,0,0" />
+                <TextBox x:Name="SetUpdUrl" Margin="0,5,0,10" />
+                <WrapPanel>
+                  <Button x:Name="UpdCheckBtn" Content="Check now" Style="{StaticResource GhostButton}" Click="OnUpdateCheck" />
+                  <Button x:Name="UpdInstallBtn" Content="Download and install" Style="{StaticResource NeonButton}" Click="OnUpdateInstall" Visibility="Collapsed" />
+                  <Button x:Name="UpdCancelBtn" Content="Cancel" Style="{StaticResource GhostButton}" Click="OnUpdateCancel" Visibility="Collapsed" />
+                </WrapPanel>
+                <ProgressBar x:Name="UpdProgress" Height="6" Margin="0,10,0,0" Minimum="0" Maximum="100" Visibility="Collapsed" />
+                <TextBlock x:Name="UpdStatus" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,8,0,0" LineHeight="20" />
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource GlassCard}" Margin="0,0,0,14">
+              <StackPanel>
                 <TextBlock Text="Engines" Style="{StaticResource CardTitle}" />
                 <TextBlock x:Name="EngineStatus" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,8,0,0" LineHeight="20" />
               </StackPanel>

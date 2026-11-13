@@ -4,12 +4,14 @@ using System.Threading;
 using System.Windows;
 using TIREXNET.Core;
 using TIREXNET.Core.Engines;
+using TIREXNET.Core.Services;
 
 namespace TIREXNET.UI
 {
     public partial class TirexApp : System.Windows.Application
     {
         private Mutex? _single;
+        private ActivationServer? _activation;
         public static bool AutoConnect { get; private set; }
 
         protected override void OnStartup(StartupEventArgs e)
@@ -32,9 +34,12 @@ namespace TIREXNET.UI
             bool owned;
             try { owned = _single.WaitOne(elevated ? 8000 : 0); }
             catch (AbandonedMutexException) { owned = true; }
+            var startupLink = UriActivation.FindLink(args);
             if (!owned)
             {
-                System.Windows.MessageBox.Show("TIREXNET is already running. Look for it in the system tray.", "TIREXNET", MessageBoxButton.OK, MessageBoxImage.Information);
+                // Hand the clicked tirexnet:// link (or a plain "show window" request) to the running instance; never start a second one.
+                if (!ActivationServer.TrySend(UriActivation.DefaultPipeName(), startupLink))
+                    System.Windows.MessageBox.Show("TIREXNET is already running. Look for it in the system tray.", "TIREXNET", MessageBoxButton.OK, MessageBoxImage.Information);
                 Shutdown(0);
                 return;
             }
@@ -56,13 +61,20 @@ namespace TIREXNET.UI
             var window = new MainWindow();
             MainWindow = window;
             var minimized = AppServices.Settings.Current.StartMinimized && !AutoConnect;
-            if (!minimized) window.Show();
+            if (!minimized || startupLink != null) window.Show();
             else window.PrepareHidden();
+
+            _activation = new ActivationServer(UriActivation.DefaultPipeName(), link =>
+                Dispatcher.BeginInvoke(new Action(() => window.HandleActivation(link))));
+            _activation.Start();
+            window.StartUpdateChecks();
+            if (startupLink != null) Dispatcher.BeginInvoke(new Action(() => window.HandleActivation(startupLink)));
         }
 
         protected override void OnExit(ExitEventArgs e)
         {
             try { AppServices.Manager?.ShutdownBlocking(); } catch { /* best effort */ }
+            try { _activation?.Dispose(); } catch { /* best effort */ }
             try { _single?.ReleaseMutex(); } catch { /* not owned */ }
             base.OnExit(e);
         }
