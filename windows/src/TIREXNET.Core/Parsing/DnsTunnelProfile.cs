@@ -221,7 +221,7 @@ public static class DnsTunnelProfile
     // Matches Android EngineProfiles.isResolverEndpoint:
     // IPv4 with optional port, bracketed IPv6 with optional port,
     // or an unbracketed IPv6 literal without a port.
-    private static bool IsResolverEndpoint(string value)
+    public static bool IsResolverEndpoint(string value)
     {
         value = value.Trim();
         if (value.Length == 0) return false;

@@ -721,6 +721,101 @@ namespace TIREXNET.UI
             await ConnectSelectedAsync();
         }
 
+        private void OnProfileDnsResolvers(object sender, RoutedEventArgs e)
+        {
+            var p = PickedProfile();
+            if (p == null) return;
+
+            if (p.Engine is not (EngineKind.MasterDns or EngineKind.CottenDns or EngineKind.StormDns))
+            {
+                Dialogs.Info(this, "Per-profile resolver selection is available for MasterDNS, CottenDNS and StormDNS profiles.");
+                return;
+            }
+
+            var currentResolvers = string.Join(
+                Environment.NewLine,
+                p.DnsResolvers ?? new List<string>());
+
+            var input = Dialogs.Prompt(
+                this,
+                "Profile DNS resolvers",
+                "Enter resolver IP endpoints, one per line. IPv4, IPv4:port, IPv6 and [IPv6]:port are supported. Leave empty to use the resolvers embedded in this profile.",
+                currentResolvers,
+                true);
+
+            if (input == null) return;
+
+            var resolvers = input
+                .Split(
+                    new[] { '\r', '\n', ',', ';' },
+                    StringSplitOptions.RemoveEmptyEntries |
+                    StringSplitOptions.TrimEntries)
+                .Where(x => !x.StartsWith("#", StringComparison.Ordinal))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (resolvers.Count > 100)
+            {
+                Dialogs.Error(this, "A maximum of 100 DNS resolvers is allowed.");
+                return;
+            }
+
+            var invalid = resolvers.FirstOrDefault(
+                x => x.Length > 160 ||
+                     x.Any(char.IsWhiteSpace) ||
+                     !DnsTunnelProfile.IsResolverEndpoint(x));
+
+            if (invalid != null)
+            {
+                Dialogs.Error(this, "Invalid DNS resolver endpoint: " + invalid);
+                return;
+            }
+
+            string selected = "";
+            if (resolvers.Count > 0)
+            {
+                selected = Dialogs.Prompt(
+                    this,
+                    "Select primary DNS",
+                    "Enter one resolver exactly as it appears in the list. Leave empty to select the first resolver.",
+                    p.SelectedResolver,
+                    false) ?? "\0";
+
+                if (selected == "\0") return;
+
+                selected = selected.Trim();
+                if (selected.Length == 0)
+                    selected = resolvers[0];
+
+                if (!resolvers.Contains(selected, StringComparer.OrdinalIgnoreCase))
+                {
+                    Dialogs.Error(this, "The selected DNS must be one of the resolver endpoints in the list.");
+                    return;
+                }
+            }
+
+            p.DnsResolvers = resolvers;
+            p.SelectedResolver = selected;
+
+            AppServices.Profiles.Update(p);
+
+            if (AppServices.Manager.ActiveProfile?.Id == p.Id &&
+                AppServices.Manager.State == ConnectionState.Connected)
+            {
+                Dialogs.Info(
+                    this,
+                    "DNS settings saved. Disconnect and reconnect this profile to apply the new resolver selection.");
+            }
+            else
+            {
+                Dialogs.Info(
+                    this,
+                    resolvers.Count == 0
+                        ? "Custom DNS resolvers cleared. The profile's embedded resolver list will be used."
+                        : $"Saved {resolvers.Count} DNS resolver(s). The selected resolver will be tried first.");
+            }
+        }
+
         private void OnEdit(object sender, RoutedEventArgs e)
         {
             var p = PickedProfile();
