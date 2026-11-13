@@ -338,8 +338,22 @@ try {
       -ErrorAction SilentlyContinue
   }
 
-  if (-not (Test-Path (Join-Path $snDir 'slipnet.exe'))) {
+  $slipnetExe = Join-Path $snDir 'slipnet.exe'
+  if (-not (Test-Path $slipnetExe)) {
     throw 'SlipNet executable was not created.'
+  }
+
+  # Validate the Windows PE header before accepting the required runtime.
+  $slipnetBytes = [System.IO.File]::ReadAllBytes($slipnetExe)
+  if ($slipnetBytes.Length -lt 256 -or
+      [System.Text.Encoding]::ASCII.GetString($slipnetBytes, 0, 2) -ne 'MZ') {
+    throw 'slipnet.exe is not a valid Windows executable'
+  }
+
+  $peOffset = [BitConverter]::ToInt32($slipnetBytes, 0x3C)
+  if ($peOffset -lt 64 -or $peOffset -gt ($slipnetBytes.Length - 4) -or
+      [System.Text.Encoding]::ASCII.GetString($slipnetBytes, $peOffset, 4) -ne "PE`0`0") {
+    throw 'slipnet.exe is not a valid Windows executable'
   }
 
   if (Test-Path (Join-Path $src 'LICENSE')) {
@@ -354,8 +368,7 @@ catch {
     Remove-Item $snDir -Recurse -Force -ErrorAction SilentlyContinue
   }
 
-  Write-Warning "SlipNet was NOT built: $_"
-  $report.Add("- SlipNet: NOT built ($($_.Exception.Message)).")
+  throw "SlipNet is a required runtime; refusing to continue without a valid Windows executable: $_"
 }
 
 # ------------------------------------------------------------------
