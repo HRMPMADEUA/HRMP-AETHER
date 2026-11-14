@@ -160,6 +160,7 @@ jobs:
             'engines/stormdns/stormdns-client.exe',
             'engines/snispf/snispf.exe',
             'engines/mhrv/mhrv-rs.exe',
+            'engines/soar/soar-wrapper.exe',
             'THIRD_PARTY_NOTICES.md'
           )
           foreach ($r in $required) {
@@ -229,7 +230,7 @@ jobs:
           $dir = Join-Path $env:RUNNER_TEMP 'TIREXNET-install-test'
           $p = Start-Process $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=`"$dir`"" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "Silent install failed with exit code $($p.ExitCode)" }
-          foreach ($f in 'TIREXNET.exe', 'engines\xray\xray.exe', 'engines\wireguard\wireguard.exe', 'engines\tun2socks\wintun.dll', 'licenses') {
+          foreach ($f in 'TIREXNET.exe', 'engines\xray\xray.exe', 'engines\soar\soar-wrapper.exe', 'engines\wireguard\wireguard.exe', 'engines\tun2socks\wintun.dll', 'licenses') {
             if (-not (Test-Path (Join-Path $dir $f))) { throw "Installed package is missing $f" }
           }
           $un = Get-ChildItem $dir -Filter 'unins*.exe' | Select-Object -First 1
