@@ -376,6 +376,70 @@ try {
     throw 'slipnet.exe is not a valid Windows executable'
   }
 
+  # TIREXNET_SOAR_WRAPPER_BUILD_V1
+  # Build the separate Soar mobile runtime from the same pinned SlipNet checkout.
+  $soarSource = Join-Path $src 'soar-mobile'
+  $soarWrapper = Join-Path $PSScriptRoot '..\engines\soar-wrapper'
+  $soarGoMod = Join-Path $soarWrapper 'go.mod'
+  $soarDir = Join-Path $engines 'soar'
+
+  if (-not (Test-Path (Join-Path $soarSource 'go.mod'))) {
+    throw 'Pinned SlipNet Soar mobile source is missing.'
+  }
+  if (-not (Test-Path $soarGoMod)) {
+    throw 'TIREXNET Soar wrapper go.mod is missing.'
+  }
+  if (-not (Test-Path (Join-Path $soarWrapper 'main.go'))) {
+    throw 'TIREXNET Soar wrapper main.go is missing.'
+  }
+
+  New-Item -ItemType Directory -Force -Path $soarDir | Out-Null
+
+  Push-Location $soarWrapper
+  try {
+    $env:CGO_ENABLED = '0'
+    $env:GOOS = 'windows'
+    $env:GOARCH = 'amd64'
+    $env:GOTOOLCHAIN = 'auto'
+
+    go mod download
+    if ($LASTEXITCODE -ne 0) {
+      throw 'Soar wrapper go mod download failed.'
+    }
+
+    go build -trimpath -ldflags "-s -w -X main.version=$($sn.commit.Substring(0, 8))" `
+      -o (Join-Path $soarDir 'soar-wrapper.exe') .
+
+    if ($LASTEXITCODE -ne 0) {
+      throw 'Soar Windows wrapper build failed.'
+    }
+  }
+  finally {
+    Pop-Location
+    Remove-Item Env:\GOOS, Env:\GOARCH, Env:\CGO_ENABLED, Env:\GOTOOLCHAIN `
+      -ErrorAction SilentlyContinue
+  }
+
+  $soarExe = Join-Path $soarDir 'soar-wrapper.exe'
+  if (-not (Test-Path $soarExe)) {
+    throw 'Soar wrapper executable was not created.'
+  }
+
+  $soarBytes = [System.IO.File]::ReadAllBytes($soarExe)
+  if ($soarBytes.Length -lt 256 -or
+      [System.Text.Encoding]::ASCII.GetString($soarBytes, 0, 2) -ne 'MZ') {
+    throw 'soar-wrapper.exe is not a valid Windows executable.'
+  }
+
+  $soarPeOffset = [BitConverter]::ToInt32($soarBytes, 0x3C)
+  if ($soarPeOffset -lt 64 -or
+      $soarPeOffset -gt ($soarBytes.Length - 4) -or
+      [System.Text.Encoding]::ASCII.GetString($soarBytes, $soarPeOffset, 4) -ne "PE`0`0") {
+    throw 'soar-wrapper.exe has an invalid PE header.'
+  }
+
+  $report.Add("- Soar: Windows amd64 wrapper built from pinned SlipNet source $($sn.commit.Substring(0, 8)).")
+
   if (Test-Path (Join-Path $src 'LICENSE')) {
     Copy-Item (Join-Path $src 'LICENSE') `
       (Join-Path $licenses 'SlipNet-AGPL-3.0.txt') -Force
