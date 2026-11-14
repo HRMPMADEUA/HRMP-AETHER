@@ -175,8 +175,8 @@ if !client.IsRunning() {
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	fmt.Printf("SOAR_READY %s\\n", listen)
-	fmt.Printf("SOAR_ESTABLISHED verified_paths=%d\\n", client.VerifiedPathCount())
+	fmt.Printf("SOAR_READY %s\n", listen)
+	fmt.Printf("SOAR_ESTABLISHED verified_paths=%d\n", client.VerifiedPathCount())
 
 	sig := make(chan os.Signal, 1)
 signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
