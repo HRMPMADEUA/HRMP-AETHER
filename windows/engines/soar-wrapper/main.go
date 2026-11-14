@@ -154,14 +154,31 @@ os.Exit(1)
 defer client.Stop()
 
 if !client.IsRunning() {
-fmt.Fprintln(os.Stderr, "SOAR_START_ERROR: client did not enter running state")
-os.Exit(1)
-}
+		fmt.Fprintln(os.Stderr, "SOAR_START_ERROR: client did not enter running state")
+		client.Stop()
+		os.Exit(1)
+	}
 
-fmt.Printf("SOAR_READY %s\n", listen)
-fmt.Println("Soar SOCKS5 listener started; server handshake runs asynchronously.")
+	// Wait for the authenticated Soar handshake, not only the local listener.
+	handshakeDeadline := time.Now().Add(35 * time.Second)
+	for !client.IsEstablished() {
+		if !client.IsRunning() {
+			fmt.Fprintln(os.Stderr, "SOAR_RUNTIME_EXITED: listener stopped during handshake")
+			client.Stop()
+			os.Exit(1)
+		}
+		if time.Now().After(handshakeDeadline) {
+			fmt.Fprintln(os.Stderr, "SOAR_HANDSHAKE_FAILED: no authenticated session after 35 seconds; check zone, public key and resolvers")
+			client.Stop()
+			os.Exit(1)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 
-sig := make(chan os.Signal, 1)
+	fmt.Printf("SOAR_READY %s\\n", listen)
+	fmt.Printf("SOAR_ESTABLISHED verified_paths=%d\\n", client.VerifiedPathCount())
+
+	sig := make(chan os.Signal, 1)
 signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 
 ticker := time.NewTicker(time.Second)
