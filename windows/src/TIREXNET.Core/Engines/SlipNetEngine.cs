@@ -96,12 +96,14 @@ public sealed class SlipNetEngine : IEngine
             await VerifySocks5Async(settings.SocksPort, proc, ct).ConfigureAwait(false);
             await VerifySocks5ConnectAsync(settings.SocksPort, proc, ct)
                 .ConfigureAwait(false);
+            EnsureRuntimeAlive(proc, runtimeName, "after SOCKS5 CONNECT");
             Log.Info($"{runtimeName} is listening on 127.0.0.1:{settings.SocksPort} (SOCKS5).");
             if (_vpn)
             {
                 _tunnel = new VpnTunnel();
                 _tunnel.Failed += RaiseFailed;
                 await _tunnel.StartAsync(serverIps, settings, ct).ConfigureAwait(false);
+                EnsureRuntimeAlive(proc, runtimeName, "after VPN startup");
             }
         }
         catch
@@ -109,6 +111,22 @@ public sealed class SlipNetEngine : IEngine
             await StopAsync().ConfigureAwait(false);
             throw;
         }
+    }
+
+
+    // V42_RUNTIME_STABILITY_CHECK:
+    // Do not report a successful connection if the runtime exited
+    // immediately after SOCKS5 or VPN initialization.
+    private static void EnsureRuntimeAlive(
+        ManagedProcess process, string runtimeName, string stage)
+    {
+        if (process.IsRunning)
+            return;
+
+        var exitCode = process.ExitCode?.ToString() ?? "unknown";
+        throw new EngineException(
+            $"{runtimeName} exited {stage} (exit code {exitCode}). " +
+            process.LastLines());
     }
 
     /// <summary>
