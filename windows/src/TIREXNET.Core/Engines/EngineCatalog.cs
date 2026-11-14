@@ -17,7 +17,7 @@ public static class EngineCatalog
             "amneziawg-windows-client tunnel service", "Wintun (wintun.dll next to amneziawg.exe)"),
         new EngineInfo(EngineKind.OpenVpn, "OpenVPN", "OpenVPN (UDP/TCP, TLS, tls-crypt/tls-auth, user/password)", false, true,
             "Official OpenVPN Community build (signed openvpn.exe)", "Wintun / ovpn-dco installed by the official OpenVPN installer"),
-        new EngineInfo(EngineKind.SlipNet, "SlipNet", "SlipNet: DNSTT, NoizDNS, VayDNS, SSH, SOCKS5, VLESS, DoH", true, true,
+        new EngineInfo(EngineKind.SlipNet, "SlipNet", "SlipNet: DNSTT, NoizDNS, VayDNS, SSH, SOCKS5, VLESS, DoH, Soar", true, true,
             "SlipNet command-line client (upstream, built from a pinned commit)", "Wintun via tun2socks (VPN mode)"),
         new EngineInfo(EngineKind.MasterDns, "MasterDNS", "Encrypted DNS tunnel", true, false,
             "MasterDnsVPN Windows client", "Local SOCKS5 proxy"),
@@ -61,6 +61,13 @@ public static class EngineCatalog
         var info = Get(p.Engine);
         if (p.Protocol == "snispoof" && !File.Exists(AppPaths.SniSpoofExe))
             return "SNISPF runtime is missing from this installation. Reinstall TIREXNET.";
+        if (p.Engine == EngineKind.SlipNet && SlipNetProfile.TryParse(p.Raw, out var slipProfile, out _) && slipProfile != null)
+        {
+            if (slipProfile.IsSoar && !SlipNetEngine.IsSoarRuntimeAvailable)
+                return "Soar Windows runtime is missing. Reinstall TIREXNET.";
+            if (!slipProfile.IsSoar && !File.Exists(AppPaths.SlipNetExe))
+                return "SlipNet command-line runtime is missing. Reinstall TIREXNET.";
+        }
         if (!IsRuntimeAvailable(p.Engine))
             return p.Engine == EngineKind.OpenVpn
                 ? "OpenVPN runtime is missing. Install the official OpenVPN Community build (offered by the TIREXNET installer)."

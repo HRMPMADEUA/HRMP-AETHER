@@ -16,6 +16,8 @@ public static class AppPaths
     public static string AwgCliExe => Path.Combine(AmneziaWgDir, "awg.exe");
     public static string SlipNetDir => Path.Combine(EnginesDir, "slipnet");
     public static string SlipNetExe => Path.Combine(SlipNetDir, "slipnet.exe");
+    public static string SoarDir => Path.Combine(EnginesDir, "soar");
+    public static string SoarWrapperExe => Path.Combine(SoarDir, "soar-wrapper.exe");
     public static string MasterDnsDir => Path.Combine(EnginesDir, "masterdns");
     public static string MasterDnsExe => Path.Combine(MasterDnsDir, "masterdnsvpn-client.exe");
     public static string CottenDnsDir => Path.Combine(EnginesDir, "cottendns");

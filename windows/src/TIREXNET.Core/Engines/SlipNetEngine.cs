@@ -19,7 +19,8 @@ public sealed class SlipNetEngine : IEngine
     public string Name => "SlipNet";
     public event Action<string>? Failed;
 
-    public static bool IsRuntimeAvailable => File.Exists(AppPaths.SlipNetExe);
+    public static bool IsSoarRuntimeAvailable => File.Exists(AppPaths.SoarWrapperExe);
+    public static bool IsRuntimeAvailable => File.Exists(AppPaths.SlipNetExe) || IsSoarRuntimeAvailable;
 
     /// <summary>The upstream client prints this when the tunnel is established and the local proxy accepts connections.</summary>
     internal const string ReadyMarker = "Connected! SOCKS5 proxy listening";
@@ -33,7 +34,15 @@ public sealed class SlipNetEngine : IEngine
         if (problems.Count > 0) throw new EngineException(problems[0]);
         var settingProblems = ConfigValidator.ValidateSettings(settings);
         if (settingProblems.Count > 0) throw new EngineException("Settings are not valid: " + settingProblems[0]);
-        if (!IsRuntimeAvailable) throw new EngineException("The SlipNet runtime is missing from this installation. Reinstall TIREXNET.");
+        if (!SlipNetProfile.TryParse(profile.Raw, out var parsed, out var parseError) || parsed == null)
+            throw new EngineException(parseError);
+        var isSoar = parsed.IsSoar;
+        if (parsed.IsSoarSsh)
+            throw new EngineException("Soar + SSH is not supported by this Windows runtime yet.");
+        var runtimeExe = isSoar ? AppPaths.SoarWrapperExe : AppPaths.SlipNetExe;
+        var runtimeDir = isSoar ? AppPaths.SoarDir : AppPaths.SlipNetDir;
+        if (!File.Exists(runtimeExe))
+            throw new EngineException(isSoar ? "The Soar Windows runtime is missing. Reinstall TIREXNET." : "The SlipNet runtime is missing from this installation. Reinstall TIREXNET.");
         _vpn = settings.Mode == ConnectionMode.Vpn;
         if (_vpn)
         {
@@ -49,16 +58,21 @@ public sealed class SlipNetEngine : IEngine
 
         Log.Info($"Starting SlipNet ({(_vpn ? "VPN" : "proxy")} mode).");
         var ready = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var proc = ManagedProcess.Start("SlipNet", AppPaths.SlipNetExe, BuildArgs(profile.Raw.Trim(), settings.SocksPort), AppPaths.SlipNetDir);
+        var runtimeArgs = isSoar
+            ? new[] { "--host", "127.0.0.1", "--port", settings.SocksPort.ToString(System.Globalization.CultureInfo.InvariantCulture), profile.Raw.Trim() }
+            : BuildArgs(profile.Raw.Trim(), settings.SocksPort);
+        var readyMarker = isSoar ? "SOAR_READY" : ReadyMarker;
+        var runtimeName = isSoar ? "Soar" : "SlipNet";
+        var proc = ManagedProcess.Start(runtimeName, runtimeExe, runtimeArgs, runtimeDir);
         _proc = proc;
         proc.OutputLine += l =>
         {
             Log.Info("[slipnet] " + l);
-            if (l.Contains(ReadyMarker, StringComparison.Ordinal)) ready.TrySetResult(true);
+            if (l.Contains(readyMarker, StringComparison.Ordinal)) ready.TrySetResult(true);
         };
         proc.UnexpectedExit += code =>
         {
-            var msg = $"SlipNet stopped unexpectedly (exit code {code}). {proc.LastLines()}";
+            var msg = $"{runtimeName} stopped unexpectedly (exit code {code}). {proc.LastLines()}";
             if (!ready.TrySetException(new EngineException(msg))) RaiseFailed(msg);
         };
         try
@@ -67,7 +81,7 @@ public sealed class SlipNetEngine : IEngine
             using var r1 = ct.Register(() => ready.TrySetCanceled());
             using var r2 = timeout.Token.Register(() => ready.TrySetException(new EngineException("SlipNet did not establish its tunnel within 60 seconds. " + proc.LastLines())));
             await ready.Task.ConfigureAwait(false);
-            Log.Info($"SlipNet is listening on 127.0.0.1:{settings.SocksPort} (SOCKS5).");
+            Log.Info($"{runtimeName} is listening on 127.0.0.1:{settings.SocksPort} (SOCKS5).");
             if (_vpn)
             {
                 _tunnel = new VpnTunnel();

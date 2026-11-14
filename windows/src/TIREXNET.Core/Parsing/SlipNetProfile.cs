@@ -23,7 +23,7 @@ public sealed class SlipNetProfile
     /// <summary>Tunnel types the SlipNet command-line runtime (the only SlipNet runtime that exists for Windows) can run.</summary>
     private static readonly HashSet<string> Supported = new(StringComparer.OrdinalIgnoreCase)
     {
-        "", "dnstt", "dnstt_ssh", "sayedns", "sayedns_ssh", "vaydns", "vaydns_ssh", "ssh", "direct_ssh", "socks5", "direct_socks", "vless", "doh",
+        "", "dnstt", "dnstt_ssh", "sayedns", "sayedns_ssh", "vaydns", "vaydns_ssh", "ssh", "direct_ssh", "socks5", "direct_socks", "vless", "doh", "soar",
     };
 
     public static bool IsSupportedTunnel(string type) => Supported.Contains(type ?? "");
@@ -92,11 +92,10 @@ public sealed class SlipNetProfile
 
     public static string? UnsupportedReason(SlipNetProfile p)
     {
-        if (p.IsSoar)
-            return "Soar is not yet supported by the pinned Windows SlipNet CLI runtime. The Android Soar binding is a separate runtime.";
-
         if (p.Encrypted)
             return "This is an encrypted slipnet-enc:// profile. The Windows SlipNet runtime is built without the private decryption key, so it cannot open it. Ask for a plain slipnet:// link.";
+        if (p.IsSoarSsh)
+            return "Soar + SSH requires the SSH chain layer, which is not included in the Windows Soar runtime yet.";
         if (!IsSupportedTunnel(p.TunnelType))
             return $"The SlipNet tunnel type \"{p.TunnelType}\" is not available in the upstream SlipNet command-line runtime for Windows " +
                    "(supported: DNSTT, NoizDNS, VayDNS, SSH, SOCKS5, VLESS, DoH). Slipstream, Snowflake and NaiveProxy profiles only run in the Android app.";
