@@ -23,7 +23,7 @@ public sealed class SlipNetProfile
     /// <summary>Tunnel types the SlipNet command-line runtime (the only SlipNet runtime that exists for Windows) can run.</summary>
     private static readonly HashSet<string> Supported = new(StringComparer.OrdinalIgnoreCase)
     {
-        "", "dnstt", "dnstt_ssh", "sayedns", "sayedns_ssh", "vaydns", "vaydns_ssh", "ssh", "direct_ssh", "socks5", "direct_socks", "vless", "doh", "soar",
+        "", "dnstt", "dnstt_ssh", "sayedns", "sayedns_ssh", "vaydns", "vaydns_ssh", "ssh", "direct_ssh", "socks5", "direct_socks", "vless", "doh", "soar", "soar_ssh",
     };
 
     public static bool IsSupportedTunnel(string type) => Supported.Contains(type ?? "");
