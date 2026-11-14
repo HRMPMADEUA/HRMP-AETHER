@@ -377,6 +377,7 @@ try {
   }
 
   # TIREXNET_SOAR_WRAPPER_BUILD_V1
+  # TIREXNET_SOAR_GO_SUM_V52
   # Build the separate Soar mobile runtime from the same pinned SlipNet checkout.
   $soarSource = Join-Path $src 'soar-mobile'
   $soarWrapper = Join-Path $PSScriptRoot '..\engines\soar-wrapper'
@@ -401,6 +402,17 @@ try {
     $env:GOOS = 'windows'
     $env:GOARCH = 'amd64'
     $env:GOTOOLCHAIN = 'auto'
+
+    # Generate and verify dependency checksums before downloading/building.
+    go mod tidy
+    if ($LASTEXITCODE -ne 0) {
+      throw 'Soar wrapper go mod tidy failed.'
+    }
+
+    $goSum = Join-Path $soarWrapper 'go.sum'
+    if (-not (Test-Path $goSum) -or (Get-Item $goSum).Length -lt 20) {
+      throw 'Soar wrapper go.sum was not generated correctly.'
+    }
 
     go mod download
     if ($LASTEXITCODE -ne 0) {
