@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Text;
 using TIREXNET.Core.Models;
 using TIREXNET.Core.Parsing;
 
@@ -83,6 +84,8 @@ public sealed class SlipNetEngine : IEngine
             using var r2 = timeout.Token.Register(() => ready.TrySetException(new EngineException("SlipNet did not establish its tunnel within 60 seconds. " + proc.LastLines())));
             await ready.Task.ConfigureAwait(false);
             await VerifySocks5Async(settings.SocksPort, proc, ct).ConfigureAwait(false);
+            await VerifySocks5ConnectAsync(settings.SocksPort, proc, ct)
+                .ConfigureAwait(false);
             Log.Info($"{runtimeName} is listening on 127.0.0.1:{settings.SocksPort} (SOCKS5).");
             if (_vpn)
             {
@@ -171,6 +174,112 @@ public sealed class SlipNetEngine : IEngine
         throw new EngineException(
             $"SOCKS5 listener on 127.0.0.1:{port} did not pass protocol verification. " +
             (lastError?.Message ?? "No valid SOCKS5 response received.") +
+            " " + process.LastLines());
+    }
+
+
+    /// <summary>Verifies a real outbound TCP connection through SOCKS5.</summary>
+    private static async Task VerifySocks5ConnectAsync(
+        int port, ManagedProcess process, CancellationToken ct)
+    {
+        const string targetHost = "example.com";
+        const int targetPort = 443;
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        Exception? lastError = null;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (!process.IsRunning)
+                throw new EngineException(
+                    "SlipNet stopped before SOCKS5 CONNECT verification. " +
+                    process.LastLines());
+
+            try
+            {
+                using var client = new TcpClient();
+                using var timeout =
+                    CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeout.CancelAfter(TimeSpan.FromSeconds(5));
+
+                await client.ConnectAsync(
+                    IPAddress.Loopback, port, timeout.Token).ConfigureAwait(false);
+
+                using NetworkStream stream = client.GetStream();
+
+                byte[] greeting = { 0x05, 0x01, 0x00 };
+                await stream.WriteAsync(greeting, timeout.Token).ConfigureAwait(false);
+
+                byte[] greetingResponse = new byte[2];
+                await stream.ReadExactlyAsync(
+                    greetingResponse, timeout.Token).ConfigureAwait(false);
+
+                if (greetingResponse[0] != 0x05 ||
+                    greetingResponse[1] != 0x00)
+                    throw new IOException("SOCKS5 no-auth negotiation failed.");
+
+                byte[] host = Encoding.ASCII.GetBytes(targetHost);
+                byte[] request = new byte[7 + host.Length];
+                request[0] = 0x05;
+                request[1] = 0x01;
+                request[2] = 0x00;
+                request[3] = 0x03;
+                request[4] = (byte)host.Length;
+                Buffer.BlockCopy(host, 0, request, 5, host.Length);
+                request[5 + host.Length] = (byte)(targetPort >> 8);
+                request[6 + host.Length] = (byte)(targetPort & 0xFF);
+
+                await stream.WriteAsync(
+                    request, timeout.Token).ConfigureAwait(false);
+
+                byte[] reply = new byte[4];
+                await stream.ReadExactlyAsync(
+                    reply, timeout.Token).ConfigureAwait(false);
+
+                if (reply[0] != 0x05)
+                    throw new IOException("Invalid SOCKS5 reply version.");
+
+                if (reply[1] != 0x00)
+                    throw new IOException(
+                        $"SOCKS5 CONNECT failed; REP=0x{reply[1]:X2}");
+
+                int addressLength;
+                if (reply[3] == 0x01) addressLength = 4;
+                else if (reply[3] == 0x04) addressLength = 16;
+                else if (reply[3] == 0x03)
+                {
+                    byte[] len = new byte[1];
+                    await stream.ReadExactlyAsync(
+                        len, timeout.Token).ConfigureAwait(false);
+                    addressLength = len[0];
+                }
+                else throw new IOException("Unknown SOCKS5 address type.");
+
+                byte[] rest = new byte[addressLength + 2];
+                await stream.ReadExactlyAsync(
+                    rest, timeout.Token).ConfigureAwait(false);
+
+                Log.Info(
+                    $"SOCKS5 outbound CONNECT verified: {targetHost}:{targetPort}.");
+                return;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex) when (
+                ex is SocketException or IOException or
+                OperationCanceledException or ObjectDisposedException)
+            {
+                lastError = ex;
+                await Task.Delay(400, ct).ConfigureAwait(false);
+            }
+        }
+
+        throw new EngineException(
+            $"SOCKS5 outbound CONNECT to {targetHost}:{targetPort} failed. " +
+            (lastError?.Message ?? "No successful reply.") +
             " " + process.LastLines());
     }
 
