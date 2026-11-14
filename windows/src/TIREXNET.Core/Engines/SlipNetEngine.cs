@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using TIREXNET.Core.Models;
 using TIREXNET.Core.Parsing;
 
@@ -81,6 +82,7 @@ public sealed class SlipNetEngine : IEngine
             using var r1 = ct.Register(() => ready.TrySetCanceled());
             using var r2 = timeout.Token.Register(() => ready.TrySetException(new EngineException("SlipNet did not establish its tunnel within 60 seconds. " + proc.LastLines())));
             await ready.Task.ConfigureAwait(false);
+            await VerifySocks5Async(settings.SocksPort, proc, ct).ConfigureAwait(false);
             Log.Info($"{runtimeName} is listening on 127.0.0.1:{settings.SocksPort} (SOCKS5).");
             if (_vpn)
             {
@@ -94,6 +96,82 @@ public sealed class SlipNetEngine : IEngine
             await StopAsync().ConfigureAwait(false);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Confirms that the local SOCKS5 listener accepts a real no-authentication
+    /// greeting. A readiness log line alone is not considered sufficient.
+    /// </summary>
+    private static async Task VerifySocks5Async(
+        int port, ManagedProcess process, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(12);
+        Exception? lastError = null;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (!process.IsRunning)
+                throw new EngineException(
+                    "Soar stopped before its SOCKS5 listener passed verification. " +
+                    process.LastLines());
+
+            try
+            {
+                using var client = new TcpClient();
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeout.CancelAfter(TimeSpan.FromSeconds(2));
+
+                await client.ConnectAsync(
+                    IPAddress.Loopback, port, timeout.Token).ConfigureAwait(false);
+
+                using NetworkStream stream = client.GetStream();
+                stream.ReadTimeout = 2000;
+                stream.WriteTimeout = 2000;
+
+                byte[] greeting = { 0x05, 0x01, 0x00 };
+                await stream.WriteAsync(greeting, timeout.Token).ConfigureAwait(false);
+                await stream.FlushAsync(timeout.Token).ConfigureAwait(false);
+
+                byte[] response = new byte[2];
+                int received = 0;
+
+                while (received < response.Length)
+                {
+                    int count = await stream.ReadAsync(
+                        response.AsMemory(received), timeout.Token).ConfigureAwait(false);
+
+                    if (count == 0)
+                        throw new IOException("SOCKS5 listener closed during greeting.");
+
+                    received += count;
+                }
+
+                if (response[0] != 0x05 || response[1] != 0x00)
+                    throw new IOException(
+                        $"Unexpected SOCKS5 greeting response: {response[0]:X2} {response[1]:X2}");
+
+                Log.Info($"SOCKS5 protocol verified on 127.0.0.1:{port}.");
+                return;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex) when (
+                ex is SocketException or IOException or OperationCanceledException or
+                ObjectDisposedException)
+            {
+                lastError = ex;
+                await Task.Delay(300, ct).ConfigureAwait(false);
+            }
+        }
+
+        throw new EngineException(
+            $"SOCKS5 listener on 127.0.0.1:{port} did not pass protocol verification. " +
+            (lastError?.Message ?? "No valid SOCKS5 response received.") +
+            " " + process.LastLines());
     }
 
     private static async Task<List<IPAddress>> ResolveAsync(List<string> hosts, CancellationToken ct)
