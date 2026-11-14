@@ -20,24 +20,39 @@ public sealed class SlipNetSoarGuardTests
             Convert.ToBase64String(Encoding.UTF8.GetBytes(payload));
     }
 
-    [Theory]
-    [InlineData("soar")]
-    [InlineData("soar_ssh")]
-    public void SoarProfilesMustNotBeReportedAsSupported(string tunnelType)
+    [Fact]
+    public void SoarProfileIsSupportedByWindowsRuntime()
     {
-        var link = MakeLink(tunnelType);
+        var link = MakeLink("soar");
 
         Assert.True(SlipNetProfile.TryParse(link, out var profile, out var error), error);
         Assert.NotNull(profile);
         Assert.True(profile!.IsSoar);
-        Assert.False(SlipNetProfile.IsSupportedTunnel(tunnelType));
+        Assert.False(profile.IsSoarSsh);
+        Assert.True(SlipNetProfile.IsSupportedTunnel("soar"));
+
+        Assert.Null(SlipNetProfile.UnsupportedReason(profile));
+        Assert.Empty(SlipNetProfile.Validate(link));
+    }
+
+    [Fact]
+    public void SoarSshProfileIsRejectedUntilSshChainExists()
+    {
+        var link = MakeLink("soar_ssh");
+
+        Assert.True(SlipNetProfile.TryParse(link, out var profile, out var error), error);
+        Assert.NotNull(profile);
+        Assert.True(profile!.IsSoar);
+        Assert.True(profile.IsSoarSsh);
+
+        Assert.True(SlipNetProfile.IsSupportedTunnel("soar_ssh"));
 
         var reason = SlipNetProfile.UnsupportedReason(profile);
         Assert.NotNull(reason);
-        Assert.Contains("Soar is not yet supported", reason);
+        Assert.Contains("SSH chain layer", reason);
 
         var errors = SlipNetProfile.Validate(link);
-        Assert.Contains(errors, x => x.Contains("Soar is not yet supported"));
+        Assert.Contains(errors, x => x.Contains("SSH chain layer"));
     }
 
     [Theory]
