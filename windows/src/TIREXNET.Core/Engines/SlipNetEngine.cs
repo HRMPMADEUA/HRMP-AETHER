@@ -77,6 +77,16 @@ public sealed class SlipNetEngine : IEngine
             var msg = $"{runtimeName} stopped unexpectedly (exit code {code}). {proc.LastLines()}";
             if (!ready.TrySetException(new EngineException(msg))) RaiseFailed(msg);
         };
+        // EARLY_PROCESS_EXIT_CHECK:
+        // Catch a runtime that exits before event handlers can observe it.
+        if (!proc.IsRunning)
+        {
+            var exitCode = proc.ExitCode?.ToString() ?? "unknown";
+            throw new EngineException(
+                $"{runtimeName} exited immediately during startup " +
+                $"(exit code {exitCode}). {proc.LastLines()}");
+        }
+
         try
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
